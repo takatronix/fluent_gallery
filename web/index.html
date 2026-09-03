@@ -1853,6 +1853,7 @@ function closeLb() {
 async function lbShow(i, dir) {
   if (!items.length) return;
   clearFaceBoxes(); $('lbfacebox').style.display = 'none'; // 顔選択は画像単位でリセット
+  $('lbfacename').value = ''; // 前の画像で打ちかけた名前を持ち越さない(sakuraにgaul残留の実害 2026-09-03)
   { const fb = document.getElementById('lbfacebtn'); if (fb) fb.innerHTML = ic('bot', 13) + ' 顔ID'; } // ボタン表記も画像単位で戻す
   lbIdx = (i + items.length) % items.length;
   const sha = items[lbIdx].sha1;
