@@ -148,6 +148,11 @@ PUT  /api/edits/{sha1} {action,edit}                    非破壊編集(push/pop
 POST /api/seg {album|shas,prompt}                       自動マスク
 POST /api/datasets {name,shas,folder}                   データセット払い出し
 POST /api/trash {shas} / /api/trash/restore             削除(30日)/復元
+GET  /dl/{sha1}/{fname}                                 原本をファイルとしてダウンロード
+POST /api/export {shas,name?} → GET /api/export/{id} → GET /export/{id}/{name}.zip
+                                                        zip書き出し(画像+meta/サイドカー+manifest、無圧縮・zip64・ストリーム配信)
+GET  /api/images/shas?<同じ条件>                         条件に合う全 sha1(上限なし・一括書き出し用)
+POST /api/upload (file=*.zip)                           zip取り込み。meta/<sha1>.json があれば出典/ライセンス/編集履歴ごと復元
 GET  /api/activity                                      AI稼働状況+CPU/GPU/VRAM/RAM
 ```
 

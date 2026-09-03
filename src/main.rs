@@ -392,6 +392,143 @@ async fn img(State(app): S, AxPath(sha1): AxPath<String>) -> impl IntoResponse {
     }
 }
 
+// ---------- 書き出し: 個別ダウンロード(原本そのまま) / zip(画像+サイドカー+manifest) ----------
+/// Content-Disposition(日本語ファイル名は RFC 5987 の filename*=UTF-8''… で)
+fn attachment(name: &str) -> String {
+    let ascii: String = name.chars().map(|c| if c.is_ascii_alphanumeric() || "._-".contains(c) { c } else { '_' }).collect();
+    let enc: String = name.bytes().map(|b| match b {
+        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+        _ => format!("%{b:02X}"),
+    }).collect();
+    format!("attachment; filename=\"{ascii}\"; filename*=UTF-8''{enc}")
+}
+
+/// 原本をファイルとしてダウンロード。URL末尾の {fname} は保存名(Tauriの on_download はURLしか見ないので経路に含める)
+async fn dl_img(State(app): S, AxPath((sha1, fname)): AxPath<(String, String)>) -> impl IntoResponse {
+    let Some(m) = store::load_meta(&app.root, &sha1) else { return StatusCode::NOT_FOUND.into_response() };
+    let ext = m["ext"].as_str().unwrap_or("png").to_string();
+    match std::fs::read(store::image_path(&app.root, &sha1, &ext)) {
+        Ok(b) => ([(header::CONTENT_TYPE, mime(&ext).to_string()), (header::CONTENT_DISPOSITION, attachment(&fname))], b).into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+#[derive(Clone, serde::Serialize)]
+struct ExportJob { name: String, total: usize, done: usize, ready: bool, error: String, bytes: u64 }
+static EXPORTS: std::sync::OnceLock<Mutex<std::collections::HashMap<String, ExportJob>>> = std::sync::OnceLock::new();
+fn exports() -> &'static Mutex<std::collections::HashMap<String, ExportJob>> { EXPORTS.get_or_init(|| Mutex::new(Default::default())) }
+fn export_dir(root: &std::path::Path) -> PathBuf { root.join("store/.export") }
+
+#[derive(Deserialize)]
+struct ExportIn { shas: Vec<String>, #[serde(default)] name: String }
+
+/// zip書き出しジョブ: {name}/{sha1}.{ext} + {name}/meta/{sha1}.json(サイドカー=出典/ライセンス/編集履歴) + {name}/manifest.json
+/// 無圧縮(JPEG/PNGは縮まない)・zip64。進捗は GET /api/export/{id}、完成品は GET /export/{id}/{name}.zip
+async fn api_export(State(app): S, Json(i): Json<ExportIn>) -> impl IntoResponse {
+    if i.shas.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"detail": "書き出す画像がありません"}))).into_response();
+    }
+    let raw = i.name.trim();
+    let name: String = if raw.is_empty() { format!("fluent_gallery_{}", chrono_like_now()) }
+        else { raw.chars().map(|c| if "/\\:*?\"<>|".contains(c) { '_' } else { c }).collect() };
+    let id = format!("{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
+    let dir = export_dir(&app.root);
+    let _ = std::fs::create_dir_all(&dir);
+    // 1日より古い書き出しは片付ける(ダウンロード済みの残骸)
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for e in rd.flatten() {
+            if e.metadata().and_then(|m| m.modified()).map(|t| t.elapsed().map(|d| d.as_secs() > 86400).unwrap_or(false)).unwrap_or(false) {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+    exports().lock().unwrap().insert(id.clone(), ExportJob { name: name.clone(), total: i.shas.len(), done: 0, ready: false, error: String::new(), bytes: 0 });
+    // zip内のフォルダ名は ASCII に限定(日本語だと macOS の unzip 等で文字化けして見える)。ダウンロード名(filename*)には日本語を残す
+    let inner: String = if name.is_ascii() { name.clone() } else { format!("fluent_gallery_{}", chrono_like_now()) };
+    let (root, id2, name2, shas) = (app.root.clone(), id.clone(), inner, i.shas);
+    let name_title = name.clone();
+    tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+        let path = export_dir(&root).join(format!("{id2}.zip"));
+        let r = (|| -> Result<u64, String> {
+            let f = std::fs::File::create(&path).map_err(|e| e.to_string())?;
+            let mut zw = zip::ZipWriter::new(f);
+            let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored).large_file(true);
+            let mut manifest = Vec::new();
+            for sha in &shas {
+                let Some(m) = store::load_meta(&root, sha) else { continue };
+                let ext = m["ext"].as_str().unwrap_or("png").to_string();
+                let Ok(data) = std::fs::read(store::image_path(&root, sha, &ext)) else { continue };
+                zw.start_file(format!("{name2}/{sha}.{ext}"), opts).map_err(|e| e.to_string())?;
+                zw.write_all(&data).map_err(|e| e.to_string())?;
+                zw.start_file(format!("{name2}/meta/{sha}.json"), opts).map_err(|e| e.to_string())?;
+                zw.write_all(serde_json::to_string_pretty(&m).unwrap_or_default().as_bytes()).map_err(|e| e.to_string())?;
+                manifest.push(json!({"sha1": sha, "file": format!("{sha}.{ext}"), "source": m["source"], "rights": m["rights"],
+                                     "credit": m["credit"], "title": m["crawl"]["title"], "landing": m["crawl"]["landing"], "url": m["crawl"]["url"]}));
+                if let Some(j) = exports().lock().unwrap().get_mut(&id2) { j.done += 1; }
+            }
+            zw.start_file(format!("{name2}/manifest.json"), opts).map_err(|e| e.to_string())?;
+            let mf = json!({"app": "fluent_gallery", "version": env!("CARGO_PKG_VERSION"), "name": name2, "title": name_title,
+                            "exported_at": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
+                            "count": manifest.len(), "items": manifest,
+                            "note": "meta/*.json はサイドカー(出典・ライセンス・編集履歴・顔ID等)。このzipをそのまま取り込みにドロップすれば復元される"});
+            zw.write_all(serde_json::to_string_pretty(&mf).unwrap_or_default().as_bytes()).map_err(|e| e.to_string())?;
+            zw.finish().map_err(|e| e.to_string())?;
+            Ok(std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0))
+        })();
+        let mut ex = exports().lock().unwrap();
+        if let Some(j) = ex.get_mut(&id2) {
+            match r { Ok(b) => { j.ready = true; j.bytes = b; } Err(e) => { j.error = e; let _ = std::fs::remove_file(&path); } }
+        }
+    });
+    Json(json!({"ok": true, "id": id, "name": name})).into_response()
+}
+
+/// 日時スタンプ(依存なし): YYYYMMDD_HHMMSS(UTC)
+fn chrono_like_now() -> String {
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) as i64;
+    let days = secs.div_euclid(86400); let rem = secs.rem_euclid(86400);
+    // 1970-01-01 起点の日数→暦(civil_from_days)
+    let z = days + 719468; let era = z.div_euclid(146097); let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1; let m = if mp < 10 { mp + 3 } else { mp - 9 }; let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}{m:02}{d:02}_{:02}{:02}{:02}", rem / 3600, (rem % 3600) / 60, rem % 60)
+}
+
+async fn api_export_status(AxPath(id): AxPath<String>) -> impl IntoResponse {
+    match exports().lock().unwrap().get(&id) {
+        Some(j) => Json(json!(j)).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// 完成した zip をストリーム配信(数GBでもメモリに載せない)
+async fn export_zip(State(app): S, AxPath((id, fname)): AxPath<(String, String)>) -> impl IntoResponse {
+    let ready = exports().lock().unwrap().get(&id).map(|j| j.ready).unwrap_or(false);
+    let path = export_dir(&app.root).join(format!("{id}.zip"));
+    if !ready || !path.exists() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let Ok(f) = tokio::fs::File::open(&path).await else { return StatusCode::NOT_FOUND.into_response() };
+    let len = f.metadata().await.map(|m| m.len()).unwrap_or(0);
+    let body = axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(f));
+    ([(header::CONTENT_TYPE, "application/zip".to_string()), (header::CONTENT_DISPOSITION, attachment(&fname)),
+      (header::CONTENT_LENGTH, len.to_string())], body).into_response()
+}
+
+/// 条件に合う全画像の sha1 だけ(上限なし)。フォルダ/取り込み元の一括書き出し用
+async fn api_images_shas(State(app): S, Query(q): Query<Q>) -> Json<Value> {
+    let (cond, args) = build_where(&q);
+    let db = app.db.lock().unwrap();
+    let params: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
+    let shas: Vec<String> = db
+        .prepare(&format!("SELECT sha1 FROM images WHERE {cond} ORDER BY ingested DESC"))
+        .and_then(|mut st| st.query_map(params.as_slice(), |r| r.get::<_, String>(0)).map(|rows| rows.flatten().collect()))
+        .unwrap_or_default();
+    Json(json!({"total": shas.len(), "shas": shas}))
+}
+
 async fn thumb(State(app): S, AxPath(sha1): AxPath<String>) -> impl IntoResponse {
     app.touch_ui();
     let jpg = store::thumb_path(&app.root, &sha1);
@@ -1656,6 +1793,60 @@ async fn api_upload(State(app): S, mut mp: axum::extract::Multipart) -> impl Int
         let ext = fname.rsplit('.').next().unwrap_or("").to_string();
         let root = app.root.clone();
         let src = source.clone();
+        if ext == "zip" {
+            // zip取り込み: 中の画像を収蔵。meta/<sha1>.json(このアプリの書き出し=サイドカー)があれば出典/ライセンス/編集履歴ごと復元
+            let src_given = source != "upload";
+            let zip_name = fname.trim_end_matches(".zip").to_string();
+            let res = tokio::task::spawn_blocking(move || -> (usize, usize, usize, usize) {
+                let db = Connection::open(root.join("store/index.sqlite")).unwrap();
+                store::ensure_schema(&db);
+                let Ok(mut ar) = zip::ZipArchive::new(std::io::Cursor::new(&data[..])) else { return (0, 0, 1, 0) };
+                use std::io::Read;
+                let mut metas: std::collections::HashMap<String, Value> = Default::default();
+                for i in 0..ar.len() {
+                    let Ok(mut e) = ar.by_index(i) else { continue };
+                    let name = e.name().to_string();
+                    let parts: Vec<&str> = name.split('/').collect();
+                    if name.ends_with(".json") && parts.len() >= 2 && parts[parts.len() - 2] == "meta" {
+                        let mut t = String::new();
+                        if e.read_to_string(&mut t).is_ok() {
+                            if let Ok(v) = serde_json::from_str::<Value>(&t) {
+                                metas.insert(parts[parts.len() - 1].trim_end_matches(".json").to_string(), v);
+                            }
+                        }
+                    }
+                }
+                let (mut a, mut d, mut b) = (0, 0, 0);
+                for i in 0..ar.len() {
+                    let Ok(mut e) = ar.by_index(i) else { continue };
+                    if e.is_dir() { continue; }
+                    let name = e.name().to_string();
+                    let base = name.rsplit('/').next().unwrap_or("").to_string();
+                    if base.starts_with("._") || base.starts_with('.') { continue; } // macOSのリソースフォーク等
+                    let ext = base.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+                    if !["jpg", "jpeg", "png", "webp", "gif", "bmp", "tif", "tiff"].contains(&ext.as_str()) { continue; }
+                    let mut bytes = Vec::new();
+                    if e.read_to_end(&mut bytes).is_err() { b += 1; continue; }
+                    let stem = base.trim_end_matches(&format!(".{}", base.rsplit('.').next().unwrap_or(""))).to_string();
+                    let mut extra = metas.get(&stem).cloned().unwrap_or(json!({}));
+                    let mut this_src = if src_given { src.clone() } else { format!("zip:{zip_name}") };
+                    if let Some(o) = extra.as_object_mut() {
+                        if !src_given { if let Some(s0) = o.get("source").and_then(|v| v.as_str()) { this_src = s0.to_string(); } }
+                        for k in ["sha1", "ext", "w", "h", "bytes", "ingested", "phash", "tint", "source"] { o.remove(k); }
+                        if !metas.contains_key(&stem) { o.insert("rights".into(), json!("unknown")); }
+                    }
+                    match store::ingest_bytes(&root, &db, &bytes, &ext, &this_src, &extra) {
+                        Ok(_) => a += 1,
+                        Err("dup") => d += 1,
+                        Err(_) => b += 1,
+                    }
+                }
+                (a, d, b, metas.len())
+            }).await.unwrap_or((0, 0, 1, 0));
+            added += res.0; dup += res.1; bad += res.2;
+            println!("📦 zip取り込み {fname}: +{} (重複{} 不採用{} サイドカー{})", res.0, res.1, res.2, res.3);
+            continue;
+        }
         if media::VIDEO_EXTS.contains(&ext.as_str()) {
             // 動画→1fpsフレーム抽出→ソックリ連続フレームは間引いて収蔵(無駄な動画を入れない)
             let scratch2 = scratch.clone();
@@ -2895,6 +3086,11 @@ async fn main() {
         .route("/api/facets", get(api_facets))
         .route("/api/meta/{sha1}", get(api_meta))
         .route("/img/{sha1}", get(img))
+        .route("/dl/{sha1}/{fname}", get(dl_img))
+        .route("/api/export", post(api_export))
+        .route("/api/export/{id}", get(api_export_status))
+        .route("/export/{id}/{fname}", get(export_zip))
+        .route("/api/images/shas", get(api_images_shas))
         .route("/thumb/{sha1}", get(thumb))
         .route("/preview/{sha1}", get(preview))
         .route("/render/{sha1}", get(render_img))

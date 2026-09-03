@@ -7,7 +7,21 @@ use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+use tauri::webview::DownloadEvent;
 use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
+
+fn pct_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Ok(v) = u8::from_str_radix(std::str::from_utf8(&b[i + 1..i + 3]).unwrap_or("zz"), 16) { out.push(v); i += 3; continue; }
+        }
+        out.push(b[i]); i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
 
 struct Server(Mutex<Option<Child>>);
 
@@ -61,6 +75,20 @@ fn main() {
                         let _ = tauri_plugin_opener::open_url(u.as_str(), None::<&str>);
                     }
                     local
+                })
+                // ダウンロード(原本/zip)は ~/Downloads へ。保存名はURL末尾(/dl/{sha}/{name} と /export/{id}/{name}.zip)
+                .on_download(|_wv, ev| {
+                    if let DownloadEvent::Requested { url, destination } = ev {
+                        let name = url.path_segments().and_then(|mut s| s.next_back()).map(pct_decode).filter(|s| !s.is_empty()).unwrap_or_else(|| "download".into());
+                        let dir = PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("Downloads");
+                        let _ = std::fs::create_dir_all(&dir);
+                        let mut p = dir.join(&name);
+                        let (stem, ext) = match name.rsplit_once('.') { Some((a, b)) => (a.to_string(), format!(".{b}")), None => (name.clone(), String::new()) };
+                        let mut n = 2;
+                        while p.exists() { p = dir.join(format!("{stem} ({n}){ext}")); n += 1; }
+                        *destination = p;
+                    }
+                    true
                 })
                 .title("Fluent Gallery")
                 .inner_size(1440.0, 920.0)

@@ -418,7 +418,7 @@
     <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center">
       <button class="pri" onclick="$('up_files').click()" id="up_btn"></button>
       <button onclick="$('up_cam').click()" id="up_cam_btn"></button>
-      <input type="file" id="up_files" multiple accept="image/*,video/*" style="display:none" onchange="doUpload(this.files)">
+      <input type="file" id="up_files" multiple accept="image/*,video/*,.zip,application/zip" style="display:none" onchange="doUpload(this.files)">
       <input type="file" id="up_cam" accept="image/*" capture="environment" style="display:none" onchange="doUpload(this.files)">
       <span class="sub">動画は1秒1コマで取り込み(そっくりな場面は自動間引き・HDR白飛び対策済み)</span>
     </div>
@@ -454,6 +454,7 @@
   <button class="ghost" onclick="bulkKeep(false)">解除</button>
   <button id="sb_gen" onclick="genVar()" title="選択を種に、言語指示で変種を量産"></button>
   <button id="sb_del" onclick="delSelected()" title="DELキーでも。30日は戻せる"></button>
+  <button id="sb_zip" onclick="exportZip([...sel], '選択' + sel.size + '枚')" title="選択した画像を原本のままzipで保存(出典・ライセンス・編集履歴のサイドカー付き。取り込みにドロップすれば戻せる)"></button>
   <span class="sp"></span>
   <input id="ds_name" placeholder="データセット名 (フォルダ/名前可)" style="width:190px">
   <button class="pri" onclick="makeDataset()" id="sb_ds"></button>
@@ -1019,6 +1020,7 @@ function ctxItems(row, kind, key) {
     rename,
     {icon: 'plus', label: 'この中に新規フォルダ', run: () => newInFolder((a?.folder ? a.folder + '/' : '') + key)},
     {icon: 'copy', label: 'レシピごと複製', run: () => copyAlbum(key)},
+    {icon: 'box', label: 'zipで書き出し', run: () => exportCriteria({...(a?.criteria || {})}, key)},
     ...(inGroup ? [toTop] : []),
     {icon: 'x', label: 'フォルダを削除', danger: true, run: () => delAlbum(key)},
     {hint: '合流は、フォルダを別のフォルダへドラッグ'},
@@ -1026,6 +1028,7 @@ function ctxItems(row, kind, key) {
   if (kind === 'dataset') return [
     {icon: 'box', label: '開く', run: () => openDataset(key)},
     rename,
+    {icon: 'box', label: 'zipで書き出し', run: () => exportDataset(key)},
     ...(inGroup ? [toTop] : []),
     {icon: 'trash', label: 'データセットを削除', danger: true, run: () => delDataset(key)},
   ];
@@ -1036,6 +1039,7 @@ function ctxItems(row, kind, key) {
   ];
   if (kind === 'source') return [
     {icon: 'globe', label: '開く', run: () => go({type: 'source', key, criteria: {source: key}})},
+    {icon: 'box', label: 'zipで書き出し', run: () => exportCriteria({source: key}, key.replace(/^[a-z]+:/, ''))},
     {icon: 'trash', label: 'この取り込み元を全部ゴミ箱へ', danger: true,
      run: () => sourceTrash(key, facetsCache?.sources?.[key] || 0)},
   ];
@@ -1121,7 +1125,7 @@ async function mergeAlbums(from, into) {
 $('searchico').innerHTML = ic('search', 14);
 $('fitbtn').innerHTML = ic('img', 14);
 $('ing_ico').innerHTML = ic('upload', 15);
-$('up_btn').innerHTML = ic('upload', 13) + ' 画像/動画を選ぶ';
+$('up_btn').innerHTML = ic('upload', 13) + ' 画像/動画/zipを選ぶ';
 $('up_cam_btn').innerHTML = ic('img', 13) + ' カメラで撮る';
 $('gen_ico').innerHTML = ic('seed', 15);
 $('sb_keep').innerHTML = ic('star', 13) + 'お気に入り';
@@ -1136,6 +1140,7 @@ j('/api/caps').then(c => {
 }).catch(() => loadPersonSet());
 $('sb_gen').innerHTML = ic('seed', 13) + '指示で量産';
 $('sb_del').innerHTML = ic('trash', 13) + '消す';
+$('sb_zip').innerHTML = ic('box', 13) + 'zipで保存';
 $('sb_ds').innerHTML = ic('box', 13) + 'データセット化';
 
 // ================= ビューヘッダ(今いる場所) =================
@@ -2007,8 +2012,50 @@ $('lbbar').innerHTML = `
     title="自動マスク(輪郭)の表示On/Off">${ic('smart', 13)} マスク</button>
   <button class="ghost" id="lbsrcbtn" style="display:none" onclick="lbOpenSource()"
     title="この画像の取得元ページをブラウザで開く (O)">${ic('globe', 13)} 元ページ ↗</button>
+  <button class="ghost" onclick="lbDownload()" title="原本をそのまま保存 (⌘S)">${ic('upload', 13)} 保存</button>
   <button class="ghost" onclick="lbDel()" title="DELキーでも。30日は戻せる">${ic('trash', 13)}</button>`;
 
+// ---- 書き出し: 個別(原本そのまま) / zip(選択・フォルダ・取り込み元・データセット) ----
+// ダウンロードはリンク経由。Macアプリ(Tauri)は on_download が URL末尾のファイル名で ~/Downloads に保存する
+function startDownload(url) {
+  const a = document.createElement('a'); a.href = url; a.download = ''; a.style.display = 'none';
+  document.body.appendChild(a); a.click(); setTimeout(() => a.remove(), 1000);
+}
+function safeName(s) { return (s || '').replace(/[\/\\:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 80); }
+function lbDownload() {
+  const it = items[lbIdx]; if (!it) return;
+  const ext = it.ext || lbMeta?.ext || 'jpg';
+  const title = safeName(lbMeta?.crawl?.title) || it.sha1.slice(0, 12);
+  startDownload(`/dl/${it.sha1}/${encodeURIComponent(title + '.' + ext)}`);
+}
+// zip書き出し: ジョブ開始→進捗トースト→完成したらダウンロード
+async function exportZip(shas, name) {
+  if (!shas?.length) return toast('書き出す画像がありません');
+  try {
+    const r = await j('/api/export', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({shas, name: safeName(name)})});
+    toast(`${shas.length}枚をzipにまとめています…`);
+    const tick = async () => {
+      const st = await j('/api/export/' + r.id);
+      if (st.error) return toast('❌ 書き出し失敗: ' + st.error);
+      if (!st.ready) { toast(`zip作成中 ${st.done}/${st.total}${eta('export:' + r.id, st.done, st.total)}`); return setTimeout(tick, 800); }
+      toast(`zip完成(${(st.bytes / 1048576).toFixed(0)}MB) — 保存します`);
+      startDownload(`/export/${r.id}/${encodeURIComponent(r.name + '.zip')}`);
+    };
+    setTimeout(tick, 500);
+  } catch (e) { toast('❌ ' + e.message); }
+}
+// 条件(フォルダのレシピ/取り込み元)に合う全画像をzipへ
+async function exportCriteria(criteria, name) {
+  try {
+    const r = await j('/api/images/shas?' + new URLSearchParams(criteria));
+    if (!r.shas.length) return toast('この条件に画像がありません');
+    if (r.shas.length > 2000 && !confirm(`${r.shas.length.toLocaleString()}枚をzipにします。時間とディスクを使いますが続けますか?`)) return;
+    exportZip(r.shas, name);
+  } catch (e) { toast('❌ ' + e.message); }
+}
+async function exportDataset(name) {
+  try { const r = await j(`/api/datasets/${encodeURIComponent(name)}/shas`); exportZip(r.shas || r, name); } catch (e) { toast('❌ ' + e.message); }
+}
 // 出典ページへ飛ぶ(2026-09-03指示)。metaのcrawl.landing/urlがある画像だけボタンが出る
 function lbOpenSource() {
   const u = lbMeta?.crawl?.landing || lbMeta?.crawl?.url;
@@ -3088,7 +3135,7 @@ async function doUpload(files) {
     const res = await fetch('/api/upload', {method: 'POST', body: fd});
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const r = await res.json();
-    toast(`取り込み完了: +${r.added}枚` +
+    toast(`取り込み完了: +${r.added}枚` + (r.bad ? ` · 不採用${r.bad}` : '') +
       (r.video_frames ? `(動画${r.video_frames}コマ中、そっくり${r.frames_skipped}コマ間引き)` : '') +
       (r.dup ? ` · 既所持${r.dup}` : ''));
     closeIngest(); refreshFacets(); reload();
@@ -3401,6 +3448,7 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && $('facesovl').style.display !== 'none') { facesClose(); return; }
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
   if (e.key === '/') { e.preventDefault(); $('q').focus(); return; }
+  if ((e.metaKey || e.ctrlKey) && (e.key === 's' || e.key === 'S') && $('lb').classList.contains('show')) { e.preventDefault(); lbDownload(); return; } // ⌘S=原本を保存
   if (!$('lb').classList.contains('show')) {
     // ---- グリッド ----
     if (e.key.startsWith('Arrow')) {
