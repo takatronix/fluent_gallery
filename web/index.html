@@ -2208,7 +2208,10 @@ function lbMorphOpen(sha) {
     // 本体のデコード完了を待ってから見せ、描画された次フレームまでゴーストを重ねる
     // (どちらか欠けると受け渡しの瞬間に1フレーム抜けて「一瞬消える」)
     const fin = () => {
-      img.style.opacity = ''; img.style.animation = '';
+      // animation は none のまま。ここで '' に戻すとCSSの入場アニメ(lbimg: scale .92→1・opacity .5→1)が
+      // 着地の瞬間に再生され、「一回り小さく半透明で現れて育つ」=ずっと直らなかったちらつき+サイズ違いの正体(2026-09-04)。
+      // 入場演出はゴーストが担っているので本体は等倍のまま出す。戻すのは closeLb(次回の非モーフ開きで使う)
+      img.style.opacity = '';
       requestAnimationFrame(() => requestAnimationFrame(() => ghost.remove()));
     };
     (img.decode ? img.decode().catch(() => {}) : Promise.resolve()).then(fin);
@@ -2256,6 +2259,7 @@ function closeLb() {
   }
   lb.animate([{opacity: 1}, {opacity: 0}], {duration: 240, easing: 'ease-in'}).onfinish = () => {
     lb.classList.remove('show'); syncHash();
+    img.style.animation = ''; // モーフ開きで止めていた入場アニメを解除(ゴーストが出せない開き方では次回これが使われる)
     // 閉じたらカーソル(=最後に見ていた画像)をグリッドで見える位置へ
     if (curSha) {
       const el = document.getElementById('c_' + curSha);
