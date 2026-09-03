@@ -1625,6 +1625,22 @@ fn sys_stats() -> Value {
     if c.0.elapsed() < Duration::from_secs(3) && !c.1.is_null() {
         return c.1.clone();
     }
+    // CPU使用率: /proc/statの差分(前回値をstaticに保持。初回は0%になるが2秒ポーリングで即収束)
+    static CPU_PREV: OnceLock<Mutex<(u64, u64)>> = OnceLock::new();
+    let cpu = std::fs::read_to_string("/proc/stat").ok().and_then(|s| {
+        let v: Vec<u64> = s.lines().next()?.split_whitespace().skip(1)
+            .filter_map(|x| x.parse().ok()).collect();
+        if v.len() < 5 { return None; }
+        let idle = v[3] + v[4];
+        let total: u64 = v.iter().sum();
+        let prev = CPU_PREV.get_or_init(|| Mutex::new((idle, total)));
+        let mut p = prev.lock().unwrap();
+        let (di, dt) = (idle.saturating_sub(p.0), total.saturating_sub(p.1));
+        *p = (idle, total);
+        let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+        (dt > 0).then(|| json!({"pct": (100.0 * (1.0 - di as f64 / dt as f64) * 10.0).round() / 10.0,
+                                "cores": cores}))
+    }).unwrap_or(json!(null));
     let gpu = std::process::Command::new("nvidia-smi")
         .args(["--query-gpu=utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"])
         .output()
@@ -1657,7 +1673,7 @@ fn sys_stats() -> Value {
                         "total_gb": get("MemTotal:")? / 1048576.0}))
         })
         .unwrap_or(json!(null));
-    *c = (Instant::now(), json!({"gpu": gpu, "ram": ram, "disk": disk}));
+    *c = (Instant::now(), json!({"cpu": cpu, "gpu": gpu, "ram": ram, "disk": disk}));
     c.1.clone()
 }
 

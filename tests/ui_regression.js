@@ -99,7 +99,21 @@ const check = (name, ok, detail = '') => {
   });
   check('顔IDパネル開閉', face.shown && face.cleaned);
 
-  // 7) 連続削除: 5連打で5枚消え、詰まらない
+  // 7) 押しっぱなし送り: 高速連打で流しても、静止したら正しい画像がすぐ出る
+  //    (中間画像の原寸DLが回線を塞ぎ「最初の画像が出続ける」退行の再発検知 2026-09-03)
+  const hold = await p.evaluate(async () => {
+    openLb(0); await new Promise(r => setTimeout(r, 600));
+    for (let k = 0; k < 12; k++) { lbGo(1); await new Promise(r => setTimeout(r, 40)); }
+    const want = items[lbIdx].sha1;
+    await new Promise(r => setTimeout(r, 900));
+    const i = $('lbimg');
+    const ok = i.src.includes(want) && !!i.dataset.tier;
+    closeLb();
+    return {ok, src: i.src.slice(-46)};
+  });
+  check('押しっぱなし送り(最終画像が出る)', hold.ok, hold.src);
+
+  // 8) 連続削除: 5連打で5枚消え、詰まらない
   const del = await p.evaluate(async () => {
     openLb(0); await new Promise(r => setTimeout(r, 600));
     const start = items.length;

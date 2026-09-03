@@ -1187,27 +1187,39 @@ const lbView = {
     img.dataset.tier = tier;
     this.tier = tier;
     img.src = url;
+    // 原寸昇格はpreviewが見えて一息ついてから(送り中の原寸DL乱発で回線を塞がない)
+    if (tier === 'pv') {
+      setTimeout(() => {
+        if (gen !== this.gen || this.edited) return;
+        const full = this._full = new Image();
+        full.src = '/img/' + this.sha;
+        full.onload = () => { if (gen === this.gen && !this.edited) this.apply(gen, full.src, 'full'); };
+      }, 300);
+    }
   },
-  // 新しい画像: 箱は最初から最終サイズで確保し、サムネ→プレビュー→原寸を届いた順に同じ箱へ流し込む
+  // 新しい画像: 箱は最初から最終サイズで確保し、サムネ→プレビュー→原寸を届いた順に同じ箱へ流し込む。
+  // 押しっぱなし送り対策: 中間画像は120ms落ち着くまで一切読み込まず、進行中のDLは即中断
+  // (中間の原寸DLが回線6本を塞ぎ「最初の画像が出続ける」実害 2026-09-03)
   show(it, dir, bust) {
     const gen = ++this.gen;
     this.sha = it.sha1; this.edited = false; this.tier = null;
     $('lbimg').dataset.tier = '';
     this.box(it.w, it.h);
-    const pvUrl = '/preview/' + it.sha1 + (bust ? '?t=' + Date.now() : '');
-    const probe = new Image();
-    probe.src = pvUrl;
-    if (probe.complete) this.apply(gen, pvUrl, 'pv');
-    else {
-      // preview未着の間は正しいサムネ(開き直し=即/送り=150ms猶予: 先読みhitなら無傷)
-      const t = setTimeout(() => { if (gen === this.gen && this.tier === null) this.apply(gen, '/thumb/' + it.sha1, 'thumb', it.w, it.h); },
-                           dir ? 150 : 0);
-      probe.onload = () => { clearTimeout(t); this.apply(gen, pvUrl, 'pv'); };
-      probe.onerror = () => { clearTimeout(t); this.apply(gen, '/thumb/' + it.sha1, 'thumb', it.w, it.h); };
-    }
-    const full = new Image();
-    full.src = '/img/' + it.sha1;
-    full.onload = () => { if (gen === this.gen && !this.edited) this.apply(gen, full.src, 'full'); };
+    if (this._probe) { this._probe.onload = this._probe.onerror = null; this._probe.src = ''; }
+    if (this._full) { this._full.onload = null; this._full.src = ''; }
+    const start = () => {
+      if (gen !== this.gen) return; // もう次へ行った=この画像は読み込みすらしない
+      const pvUrl = '/preview/' + it.sha1 + (bust ? '?t=' + Date.now() : '');
+      const probe = this._probe = new Image();
+      probe.src = pvUrl;
+      if (probe.complete) this.apply(gen, pvUrl, 'pv');
+      else {
+        // preview未着の間は正しいサムネを即出す(この時点でユーザーは静止している)
+        this.apply(gen, '/thumb/' + it.sha1, 'thumb', it.w, it.h);
+        probe.onload = () => this.apply(gen, pvUrl, 'pv');
+      }
+    };
+    if (!dir) start(); else setTimeout(start, 120);
   },
   // 編集/マスク焼きレンダ(自然寸法)
   render(url) {
@@ -2802,9 +2814,15 @@ async function watchActivity() {
     const bar = (pct, hot) => `<span style="flex:1; height:4px; min-width:34px; border-radius:99px; background:#1c1e26; overflow:hidden">
       <span style="display:block; width:${Math.min(100, pct).toFixed(0)}%; height:100%; border-radius:99px;
         background:${hot ? '#e0a83c' : 'var(--acc)'}; transition:width .6s ease"></span></span>`;
-    const gpu = s.gpu ? `<div style="display:flex; gap:6px; align-items:center; padding:2px 0" title="GPU ${s.gpu.util}% · VRAM ${(s.gpu.vram_used_mb / 1024).toFixed(1)}/${(s.gpu.vram_total_mb / 1024).toFixed(0)}GB">
+    const cpu = s.cpu ? `<div style="display:flex; gap:6px; align-items:center; padding:2px 0" title="CPU ${s.cpu.pct}%(${s.cpu.cores}コア) — 内蔵AIが食い過ぎるとここが赤くなりUIが重くなる">
+      <span style="flex:none">CPU</span>${bar(s.cpu.pct, s.cpu.pct > 85)}
+      <span style="flex:none; font-variant-numeric:tabular-nums">${s.cpu.pct.toFixed(0)}%</span></div>` : '';
+    const gpu = s.gpu ? `<div style="display:flex; gap:6px; align-items:center; padding:2px 0" title="GPU計算の使用率">
       <span style="flex:none">GPU</span>${bar(s.gpu.util, s.gpu.util > 85)}
-      <span style="flex:none; font-variant-numeric:tabular-nums">${s.gpu.util}% ${(s.gpu.vram_used_mb / 1024).toFixed(1)}/${(s.gpu.vram_total_mb / 1024).toFixed(0)}G</span></div>` : '';
+      <span style="flex:none; font-variant-numeric:tabular-nums">${s.gpu.util}%</span></div>
+      <div style="display:flex; gap:6px; align-items:center; padding:2px 0" title="VRAM ${(s.gpu.vram_used_mb / 1024).toFixed(1)}/${(s.gpu.vram_total_mb / 1024).toFixed(0)}GB — 空きが無いと内蔵VLMがCPUに追い出されて激重になる">
+      <span style="flex:none">VRAM</span>${bar(100 * s.gpu.vram_used_mb / s.gpu.vram_total_mb, s.gpu.vram_used_mb / s.gpu.vram_total_mb > .85)}
+      <span style="flex:none; font-variant-numeric:tabular-nums">${(s.gpu.vram_used_mb / 1024).toFixed(1)}/${(s.gpu.vram_total_mb / 1024).toFixed(0)}G</span></div>` : '';
     const ram = s.ram ? `<div style="display:flex; gap:6px; align-items:center; padding:2px 0" title="RAM ${s.ram.used_gb.toFixed(0)}/${s.ram.total_gb.toFixed(0)}GB">
       <span style="flex:none">RAM</span>${bar(100 * s.ram.used_gb / s.ram.total_gb, s.ram.used_gb / s.ram.total_gb > .85)}
       <span style="flex:none; font-variant-numeric:tabular-nums">${s.ram.used_gb.toFixed(0)}G</span></div>` : '';
@@ -2825,7 +2843,7 @@ async function watchActivity() {
       wrow('spark', 'CLIP', 'clip') +       // 似た画像の索引(裏方)
       wrow('loop', '見回り', 'autopilot') + // ♻自動補充の巡回
       wrow('bot', 'お手入れ', 'groom') +    // 属性/マスクの穴埋め巡回
-      gpu + ram;
+      cpu + gpu + ram;
     // ストレージ(ml-hub風メーター): ライブラリの量と、ディスクの余白
     if (s.disk && facetsCache) {
       const usedPct = 100 * s.disk.used_gb / (s.disk.total_gb || 1);
