@@ -338,6 +338,35 @@ const check = (name, ok, detail = '') => {
   check('データセットの改名/棚へD&D', dsT.renamed && dsT.lit && dsT.moved === '_uitest棚d', `folder=${dsT.moved}`);
   check('木をまたぐD&Dは無効', dsT.crossLit === false);
 
+  // 15) 右クリックメニュー: 出て、名前を変えるが効いて、Escで閉じる
+  const ctx = await p.evaluate(async () => {
+    const fire = sel => {
+      const el = document.querySelector(sel);
+      if (!el) return false;
+      const r = el.getBoundingClientRect();
+      el.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, clientX: r.x + 30, clientY: r.y + 8}));
+      return true;
+    };
+    fire('.nav[data-ds="_uitest_ds2"]');
+    const shown = !!$('ctxm');
+    const labels = [...($('ctxm')?.querySelectorAll('.it') || [])].map(e => e.textContent.trim());
+    const inside = $('ctxm') && $('ctxm').getBoundingClientRect().right <= innerWidth; // 画面外に出ない
+    document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
+    const closed = !$('ctxm');
+    // フォルダ行の「名前を変える」を実際に押す
+    fire('.nav[data-album="_uitest_b"]');
+    const it = [...$('ctxm').querySelectorAll('.it')].find(e => e.textContent.includes('名前を変える'));
+    it.click();
+    await new Promise(r => setTimeout(r, 300));
+    const editing = document.querySelector('input.rn')?.closest('.nav')?.dataset.album;
+    const inp = document.querySelector('input.rn');
+    if (inp) { inp.dataset.cancel = '1'; inp.blur(); }
+    return {shown, labels, inside, closed, editing, menuGone: !$('ctxm')};
+  });
+  check('右クリックメニュー(表示/Escで閉じる/画面内)', ctx.shown && ctx.closed && ctx.inside && ctx.labels.length >= 3,
+    ctx.labels.join(' | '));
+  check('右クリック→名前を変える', ctx.editing === '_uitest_b' && ctx.menuGone, `編集中=${ctx.editing}`);
+
   check('JSエラーなし', jsErrors.length === 0, jsErrors.slice(0, 3).join(' | '));
   await b.close();
 

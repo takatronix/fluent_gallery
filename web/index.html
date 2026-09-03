@@ -311,6 +311,16 @@
   #cfovl .b .sub { color:var(--faint); font-size:11px; }
   #cfovl .a { margin-top:16px; display:flex; gap:8px; justify-content:flex-end; }
   #cfovl button.danger { background:#a33333; border:1px solid #c04b4b; color:#fff; }
+  /* 右クリックメニュー(サイドバー) */
+  #ctxm { position:fixed; z-index:60; min-width:184px; background:var(--bg2,#14161c); border:1px solid #2a2d38;
+          border-radius:10px; padding:5px; box-shadow:0 14px 38px #000b; font-size:12px; }
+  #ctxm .it { display:flex; align-items:center; gap:8px; padding:6px 9px; border-radius:6px;
+              cursor:pointer; color:var(--tx); white-space:nowrap; }
+  #ctxm .it:hover { background:#ffffff10; }
+  #ctxm .it.danger { color:#ff9b9b; }
+  #ctxm .it.danger:hover { background:#a3333340; }
+  #ctxm .hint { padding:7px 9px 3px; margin-top:4px; color:var(--faint); font-size:10.5px;
+                border-top:1px solid #ffffff10; white-space:nowrap; }
 </style>
 
 <aside id="side">
@@ -541,6 +551,7 @@ const I = {
   grid2:'<rect x="4" y="4" width="7" height="7" rx="1.2"/><rect x="13" y="4" width="7" height="7" rx="1.2"/><rect x="4" y="13" width="7" height="7" rx="1.2"/><rect x="13" y="13" width="7" height="7" rx="1.2"/>',
   grid1:'<rect x="4" y="4" width="16" height="16" rx="2"/>',
   pen:'<path d="M4 20h4l10-10a2.1 2.1 0 0 0-3-3L5 17z"/><path d="M13.5 6.5l4 4"/>',
+  up:'<path d="M12 19V6"/><path d="m6 12 6-6 6 6"/>',
   merge:'<path d="M7 21V9a4 4 0 0 1 4-4h6"/><path d="M13.5 1.5 17.5 5l-4 3.5"/><path d="M7 13h4a4 4 0 0 0 4-4"/>',
   none:'',
 };
@@ -683,7 +694,8 @@ function treeHtml(node, item, depth = 0, key = '', kind = '') {
     const dnd = gk
       ? ` data-grp="${esc(path)}" draggable="true" ondragstart="dragNav(event, '${gk}', this.dataset.grp)"
          ondragend="dragEnd(event)" ondragover="navOver(event, '${gk}', this.dataset.grp)"
-         ondragleave="navLeave(event)" ondrop="navDrop(event, '${gk}', this.dataset.grp)"` : '';
+         ondragleave="navLeave(event)" ondrop="navDrop(event, '${gk}', this.dataset.grp)"
+         oncontextmenu="ctxMenu(event, '${gk}', this.dataset.grp)"` : '';
     h += `<div class="nav"${dnd} style="padding-left:${10 + depth * 13}px" onclick="toggleFold('${k.replace(/'/g, "\\'")}')">
       ${ic(open ? 'chevD' : 'chevR', 13)}<span class="nm" style="color:var(--faint)"${
         gk ? ` ondblclick="startRename(event, '${gk}', this.closest('.nav').dataset.grp)"` : ''}>${esc(name)}</span>` +
@@ -718,6 +730,7 @@ function renderSide() {
        draggable="true" ondragstart="dragNav(event, 'album', this.dataset.album)" ondragend="dragEnd(event)"
        ondragover="navOver(event, 'album', this.dataset.album)"
        ondragleave="navLeave(event)" ondrop="navDrop(event, 'album', this.dataset.album)"
+       oncontextmenu="ctxMenu(event, 'album', this.dataset.album)"
        onclick="openFolder(this.dataset.album)">
       ${ic(a.goal ? 'bot' : 'smart')}<span class="nm"
         ondblclick="startRename(event, 'album', this.closest('.nav').dataset.album)">${esc(a.name)}</span>
@@ -750,6 +763,7 @@ function renderSide() {
       `<div class="nav" data-loc="source:${esc(s)}" data-dsrc="${esc(s)}"
         ondragover="navOver(event, 'source', this.dataset.dsrc)" ondragleave="navLeave(event)"
         ondrop="navDrop(event, 'source', this.dataset.dsrc)"
+        oncontextmenu="ctxMenu(event, 'source', this.dataset.dsrc)"
         onclick="go({type:'source', key:'${esc(s)}', criteria:{source:'${esc(s)}'}})">
         ${ic(s.startsWith('crawl') ? 'globe' : s.includes('gen') ? 'spark' : 'upload', 13)}
         <span class="nm" title="${esc(s)}">${esc(s)}</span><span class="n">${n}</span>
@@ -917,8 +931,10 @@ function refoldPrefix(from, to) {
 // ---- インライン改名(prompt禁止=憲法5条。その場で書き換えてEnter/フォーカスアウトで確定、Escで取消) ----
 function startRename(ev, kind, key) {
   ev.stopPropagation(); ev.preventDefault();
+  beginRename(ev.currentTarget.closest('.nav'), kind, key);
+}
+function beginRename(row, kind, key) {
   if (renaming) document.querySelector('input.rn')?.blur(); // 開きっぱなしの別の入力を先に閉じる
-  const row = ev.currentTarget.closest('.nav');
   const nm = row?.querySelector('.nm');
   if (!nm || renaming) return;
   renaming = {kind, key};
@@ -974,6 +990,79 @@ async function endRename(inp, kind, key) {
       await (ds ? loadDatasets() : loadAlbums());
     }
   } catch (e) { toast('❌ ' + e.message); restore(); }
+}
+
+// ---- 右クリックメニュー(サイドバー)。ホバーの小アイコンは見つけにくいので、標準の右クリックでも同じ操作を出す ----
+function ctxClose() {
+  $('ctxm')?.remove();
+  document.removeEventListener('mousedown', ctxOutside, true);
+  document.removeEventListener('keydown', ctxKey, true);
+  window.removeEventListener('resize', ctxClose);
+  $('side')?.removeEventListener('scroll', ctxClose);
+}
+function ctxOutside(e) { if (!e.target.closest('#ctxm')) ctxClose(); }
+function ctxKey(e) { if (e.key === 'Escape') { e.stopPropagation(); ctxClose(); } }
+function ctxItems(row, kind, key) {
+  const a = kind === 'album' ? albumsCache.find(x => x.name === key) : null;
+  const d = kind === 'dataset' ? datasetsCache.find(x => x.name === key) : null;
+  const inGroup = kind === 'album' ? !!a?.folder : kind === 'dataset' ? !!d?.folder : key.includes('/');
+  const rename = {icon: 'pen', label: '名前を変える', run: () => beginRename(row, kind, key)};
+  const toTop = {icon: 'up', label: '一番上へ出す', run: () =>
+    kind === 'album' ? moveAlbum(key, '')
+    : kind === 'dataset' ? moveDataset(key, '')
+    : moveGroup(key, '', kind === 'dsgroup' ? 'dataset' : '')};
+  if (kind === 'album') return [
+    {icon: 'folder', label: '開く', run: () => openFolder(key)},
+    rename,
+    {icon: 'plus', label: 'この中に新規フォルダ', run: () => newInFolder((a?.folder ? a.folder + '/' : '') + key)},
+    {icon: 'copy', label: 'レシピごと複製', run: () => copyAlbum(key)},
+    ...(inGroup ? [toTop] : []),
+    {icon: 'x', label: 'フォルダを削除', danger: true, run: () => delAlbum(key)},
+    {hint: '合流は、フォルダを別のフォルダへドラッグ'},
+  ];
+  if (kind === 'dataset') return [
+    {icon: 'box', label: '開く', run: () => openDataset(key)},
+    rename,
+    ...(inGroup ? [toTop] : []),
+    {icon: 'trash', label: 'データセットを削除', danger: true, run: () => delDataset(key)},
+  ];
+  if (kind === 'group' || kind === 'dsgroup') return [
+    rename,
+    ...(kind === 'group' ? [{icon: 'plus', label: 'この中に新規フォルダ', run: () => newInFolder(key)}] : []),
+    ...(inGroup ? [toTop] : []),
+  ];
+  if (kind === 'source') return [
+    {icon: 'globe', label: '開く', run: () => go({type: 'source', key, criteria: {source: key}})},
+    {icon: 'trash', label: 'この取り込み元を全部ゴミ箱へ', danger: true,
+     run: () => sourceTrash(key, facetsCache?.sources?.[key] || 0)},
+  ];
+  return [];
+}
+function ctxMenu(ev, kind, key) {
+  ev.preventDefault(); ev.stopPropagation();
+  ctxClose();
+  const row = ev.currentTarget.closest('.nav');
+  const items = ctxItems(row, kind, key);
+  if (!items.length) return;
+  const m = document.createElement('div');
+  m.id = 'ctxm';
+  m.innerHTML = items.map((it, i) => it.hint
+    ? `<div class="hint">${esc(it.hint)}</div>`
+    : `<div class="it${it.danger ? ' danger' : ''}" data-i="${i}">${ic(it.icon, 13)}${esc(it.label)}</div>`).join('');
+  document.body.appendChild(m);
+  const r = m.getBoundingClientRect(); // 画面からはみ出さない
+  m.style.left = Math.max(4, Math.min(ev.clientX, innerWidth - r.width - 8)) + 'px';
+  m.style.top = Math.max(4, Math.min(ev.clientY, innerHeight - r.height - 8)) + 'px';
+  m.onclick = e => {
+    const el = e.target.closest('.it');
+    if (!el) return;
+    ctxClose();
+    items[+el.dataset.i].run();
+  };
+  document.addEventListener('mousedown', ctxOutside, true);
+  document.addEventListener('keydown', ctxKey, true);
+  window.addEventListener('resize', ctxClose);
+  $('side')?.addEventListener('scroll', ctxClose);
 }
 
 // ---- 確認ポップアップ(ネイティブconfirm禁止=憲法5条。戻すのが大変な操作にだけ出す) ----
@@ -2898,6 +2987,7 @@ async function loadDatasets() {
          draggable="true" ondragstart="dragNav(event, 'dataset', this.dataset.ds)" ondragend="dragEnd(event)"
          ondragover="navOver(event, 'dataset', this.dataset.ds)" ondragleave="navLeave(event)"
          ondrop="navDrop(event, 'dataset', this.dataset.ds)"
+         oncontextmenu="ctxMenu(event, 'dataset', this.dataset.ds)"
          onclick="openDataset(this.dataset.ds)">
         ${ic('box', 13)}<span class="nm"
           ondblclick="startRename(event, 'dataset', this.closest('.nav').dataset.ds)">${esc(d.name)}</span><span class="n">${d.count}</span>
