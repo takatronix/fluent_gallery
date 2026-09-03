@@ -1158,6 +1158,17 @@ async function loadAlbums() {
 let seenMap = JSON.parse(localStorage.getItem('fg_seen') || '{}');
 let prevSeen = 0;
 function seenKey(a) { return a ? 'src:' + (a.criteria?.source || a.name) : 'src:' + (loc.criteria?.source || loc.key || ''); }
+// ライトボックスの表示サイズは常に「ビューポートへアスペクトフィット」1本(2026-09-03確定)。
+// 小さい原本も拡大して見せる(250px原本が小さく出て「壊れてる?」となった件)。編集レンダは自然寸法。
+function lbFit(nw, nh) {
+  const img = $('lbimg');
+  if (!nw || !nh) { img.removeAttribute('width'); img.removeAttribute('height'); return; }
+  const ar = nw / nh;
+  let bw = Math.min(innerWidth * .94, innerHeight * .74 * ar), bh = bw / ar;
+  if (bh > innerHeight * .74) { bh = innerHeight * .74; bw = bh * ar; }
+  img.width = Math.round(bw);
+  img.height = Math.round(bh);
+}
 let rgen = 0; // reload世代: ナビ連打時に遅い古の応答が新しい場所を上書きする追い越し事故の防止
 async function reload(flip) {
   const g = ++rgen;
@@ -1772,12 +1783,8 @@ function lbMorphOpen(sha) {
     // 着地すると拡大アニメごと消える(「小さく移動→パッと拡大」退行 2026-09-03)→1フレーム譲る
     if (!flown) { requestAnimationFrame(settle); return; }
     landed = true;
-    // 仮の箱(width/height属性)を外して実画像の本当の寸法で測り直す(残すと実アスペクトと違う時に歪む)。
-    // ただし中身がまだ仮サムネ(360px)なら外すと箱が縮む→previewが来た時(swap)が外してくれるので残す
-    if (img.dataset.tier !== 'thumb') {
-      img.removeAttribute('width');
-      img.removeAttribute('height');
-    }
+    // フィット箱を実画像の寸法で測り直す(常にビューポートへアスペクトフィット)
+    if (img.naturalWidth) lbFit(img.naturalWidth, img.naturalHeight);
     requestAnimationFrame(() => {
       const t = img.getBoundingClientRect();
       if (t.width) Object.assign(ghost.style, {
@@ -1868,14 +1875,7 @@ async function lbShow(i, dir) {
       // 仮サムネでも「最終表示サイズの箱」を先に確保してから見せる(常に最適サイズの原則)。
       // 箱なしだとサムネ原寸(360px)の小さい表示のまま止まって見える(送りで小画像化の退行 2026-09-03)
       const it2 = items[lbIdx];
-      if (it2.w && it2.h) {
-        const ar = it2.w / it2.h;
-        let bw = Math.min(innerWidth * .94, innerHeight * .74 * ar), bh = bw / ar;
-        if (bh > innerHeight * .74) { bh = innerHeight * .74; bw = bh * ar; }
-        if (bw > it2.w) { bw = it2.w; bh = bw / ar; } // 原寸超え拡大はしない(preview到着時と同サイズ=揺れゼロ)
-        img.width = Math.round(bw);
-        img.height = Math.round(bh);
-      }
+      lbFit(it2.w, it2.h);
       img.dataset.tier = 'thumb'; // 仮画像の印(開くアニメの着地判定はこれを待つ。swap時に箱は外れる)
       img.src = '/thumb/' + sha;
     };
@@ -1885,8 +1885,7 @@ async function lbShow(i, dir) {
     if (items[lbIdx]?.sha1 !== sha) return;
     clearTimeout(lbShow._grace);
     img.dataset.tier = 'pv';
-    img.removeAttribute('width');  // 開くアニメの仮箱が残っていたら必ず外す(アスペクト崩れ防止)
-    img.removeAttribute('height');
+    lbFit(pv.naturalWidth, pv.naturalHeight); // 常にビューポートへフィット(小原本も拡大)
     img.src = pv.src;
     if (dir) img.animate([{transform: `translateX(${dir * 40}px)`, opacity: .3}, {transform: 'none', opacity: 1}],
                          {duration: 220, easing: 'cubic-bezier(.2,.9,.3,1)'});
@@ -1908,9 +1907,10 @@ async function lbShow(i, dir) {
     $('lbsegbtn').classList.toggle('on', lbSegOn && hasSeg);
     $('segfix').style.display = lbSegOn && hasSeg ? 'flex' : 'none';
     $('lbsegbtn').style.display = hasSeg ? '' : 'none';
-    if (lbSegOn && hasSeg) img.src = lbUrl(sha, 1600); // 記憶ONならマスク焼きで開く
+    // 編集レンダ/マスク焼きはアスペクトが変わり得るのでフィット箱を外して自然寸法で
+    if (lbSegOn && hasSeg) { lbFit(0, 0); img.src = lbUrl(sha, 1600); }
     edHist(eds);
-    if (eds.length) img.src = lbUrl(sha, 1600);
+    if (eds.length) { lbFit(0, 0); img.src = lbUrl(sha, 1600); }
     else {
       const full = new Image(); full.src = '/img/' + sha;
       full.onload = () => (full.decode ? full.decode().catch(() => {}) : Promise.resolve())
@@ -2145,7 +2145,7 @@ async function edMutate(body) {
     { // レンダ完成+デコード後に差し替え(直接src交換だと生成待ちの間imgが幅0に潰れて「消えた」ように見える)
       const url = r.edits.length ? lbUrl(sha, 1600) : '/preview/' + sha + '?t=' + Date.now();
       const nw = new Image(); nw.src = url;
-      const apply = () => { if (items[lbIdx]?.sha1 === sha) $('lbimg').src = url; };
+      const apply = () => { if (items[lbIdx]?.sha1 === sha) { lbFit(0, 0); $('lbimg').src = url; } };
       nw.onload = () => (nw.decode ? nw.decode().catch(() => {}) : Promise.resolve()).then(apply);
       nw.onerror = apply;
     }
