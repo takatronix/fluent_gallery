@@ -837,20 +837,38 @@ struct FaceDetectIn {
     sha1: String,
 }
 
-/// 画像内の顔位置を返す(正規化bbox)。登録UIの「クリックで顔を選ぶ」用
+/// 画像内の顔位置+登録台帳との照合結果を返す。
+/// person=本人確定(FACE_SAME以上) / maybe=似ている(中間帯) / どちらも無し=未登録or別人
 async fn api_faces_detect(State(app): S, Json(p): Json<FaceDetectIn>) -> impl IntoResponse {
     let root = app.root.clone();
     let out = tokio::task::spawn_blocking(move || -> Option<Value> {
         let db = Connection::open(root.join("store/index.sqlite")).ok()?;
-        let ext: String = db
-            .query_row("SELECT ext FROM images WHERE sha1=?1", [p.sha1.as_str()], |r| r.get(0))
-            .unwrap_or_else(|_| "jpg".into());
+        let (ext, source): (String, String) = db
+            .query_row("SELECT ext, source FROM images WHERE sha1=?1", [p.sha1.as_str()],
+                       |r| Ok((r.get(0)?, r.get::<_, Option<String>>(1)?.unwrap_or_default())))
+            .unwrap_or(("jpg".into(), String::new()));
+        let album = source.strip_prefix("crawl:").unwrap_or("").to_string();
+        let refs = store::face_refs(&db, &album);
         let img = image::open(store::image_path(&root, &p.sha1, &ext)).ok()?;
         let (w, h) = (img.width() as f32, img.height() as f32);
         let faces = faceid::detect_faces(&img);
-        Some(json!({"faces": faces.iter().map(|f| json!({
-            "bbox": [f.bbox[0] / w, f.bbox[1] / h, f.bbox[2] / w, f.bbox[3] / h]
-        })).collect::<Vec<_>>()}))
+        Some(json!({"faces": faces.iter().map(|f| {
+            let (mut who, mut best) = (None::<String>, -1.0f32);
+            if !refs.is_empty() {
+                if let Some(e) = faceid::embed_face(&img, &f.kps) {
+                    for (nm, rs) in &refs {
+                        let s = faceid::best_sim(&e, rs);
+                        if s > best { best = s; who = Some(nm.clone()); }
+                    }
+                }
+            }
+            json!({
+                "bbox": [f.bbox[0] / w, f.bbox[1] / h, f.bbox[2] / w, f.bbox[3] / h],
+                "person": who.as_ref().filter(|_| best >= faceid::FACE_SAME),
+                "maybe": who.as_ref().filter(|_| best >= faceid::FACE_DIFF && best < faceid::FACE_SAME),
+                "sim": (best * 100.0).round() / 100.0,
+            })
+        }).collect::<Vec<_>>()}))
     })
     .await
     .ok()

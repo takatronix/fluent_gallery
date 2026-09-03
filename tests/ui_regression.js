@@ -47,13 +47,24 @@ const check = (name, ok, detail = '') => {
   });
   check('ライトボックス表示', open.w > 100 && open.op === '1' && open.srcOk, `w=${open.w.toFixed(0)}`);
 
-  // 3) 送り: サイズ属性が残らず、次画像も表示される
+  // 3) 送り: 直後(仮サムネ段階)から最終サイズで表示され、preview到着後は属性が残らない
   const nav = await p.evaluate(async () => {
-    lbGo(1); await new Promise(r => setTimeout(r, 900));
+    lbGo(1);
+    await new Promise(r => setTimeout(r, 260)); // 仮サムネ段階(grace150ms後)
+    const it = items[lbIdx];
+    const ar = it.w / it.h;
+    let bw = Math.min(innerWidth * .94, innerHeight * .74 * ar);
+    if (bw / ar > innerHeight * .74) bw = innerHeight * .74 * ar;
+    bw = Math.min(bw, it.w); // 原寸キャップ(placeの箱と同じ式)
+    const early = $('lbimg').getBoundingClientRect().width;
+    await new Promise(r => setTimeout(r, 1200));
     const i = $('lbimg');
-    return {attr: i.hasAttribute('width') || i.hasAttribute('height'), w: i.getBoundingClientRect().width};
+    return {early, expect: bw, attr: i.hasAttribute('width') || i.hasAttribute('height'),
+            w: i.getBoundingClientRect().width};
   });
-  check('送り(アスペクト属性掃除)', !nav.attr && nav.w > 100, `w=${nav.w.toFixed(0)}`);
+  const earlyOk = Math.abs(nav.early - nav.expect) < nav.expect * 0.1;
+  check('送り(最初から最適サイズ+属性掃除)', earlyOk && !nav.attr && nav.w > 100,
+    `直後${nav.early.toFixed(0)}/期待${nav.expect.toFixed(0)} 最終${nav.w.toFixed(0)}`);
 
   // 4) クロップ: 確定してもライトボックスが閉じず、編集が保存され、画像が表示され続ける
   await p.evaluate(() => { edToggle(); cropToggle(); });

@@ -1260,7 +1260,7 @@ function contentTop() { // スクロール座標系でのスペーサー上端�
   const gw = $('gridwrap');
   return $('gridspacer').getBoundingClientRect().top - gw.getBoundingClientRect().top + gw.scrollTop;
 }
-function updateWindow(force) {
+function updateWindow(force, reflow) {
   const gw = $('gridwrap'), g = $('grid');
   if (!items.length) return;
   const n = gridCols(), ch = cellPitch(), H = gw.clientHeight;
@@ -1271,8 +1271,10 @@ function updateWindow(force) {
   const ne = Math.min(items.length, (Math.floor(rel / ch) + visRows + buf) * n);
   // ヒステリシス: 半バッファ動くまで再構築しない(スクロール毎のinnerHTML再生成防止)
   if (!force && Math.abs(ns - vStart) < (buf * n) / 2 && Math.abs(ne - vEnd) < (buf * n) / 2) return;
-  // 差分更新: 窓が重なっていれば増減した分だけ足し引き(denseで窓全体を作り直すと固まる 2026-09-03)
-  const overlap = !force && vEnd > vStart && ns < vEnd && ne > vStart;
+  // 差分更新: 窓が重なっていれば増減した分だけ足し引き(denseで窓全体を作り直すと固まる 2026-09-03)。
+  // reflow=itemsは同じでサイズだけ変わった時(俯瞰⇄標準)。生き残るセルはDOMごと残す=
+  // 全再構築でデコード待ちのtint背景が全面に見える「切替フラッシュ」の根治(2026-09-03指摘)
+  const overlap = (reflow || !force) && vEnd > vStart && ns < vEnd && ne > vStart;
   if (overlap) {
     if (ns > vStart) { for (let k = vStart; k < ns; k++) g.firstElementChild?.remove(); }
     else if (ns < vStart) { g.insertAdjacentHTML('afterbegin', items.slice(ns, vStart).map(cellHtml).join('')); }
@@ -1427,7 +1429,7 @@ function commitCell() {
   clearTimeout(setCell._commit);
   const v = setCell._t || +localStorage.getItem('fg_cell') || 168;
   localStorage.setItem('fg_cell', v);
-  updateWindow(true); // 列数/行高が変わったので窓を組み直す
+  updateWindow(true, true); // 列数/行高が変わったので窓の端だけ差し引き(中身のセルは残す=フラッシュ防止)
   retierVisible(v);
   fillViewport();
 }
@@ -1863,7 +1865,18 @@ async function lbShow(i, dir) {
   if (!pv.complete) {
     const place = () => {
       if (items[lbIdx]?.sha1 !== sha || pv.complete) return;
-      img.dataset.tier = 'thumb'; // 仮画像の印(開くアニメの着地判定はこれを待つ)
+      // 仮サムネでも「最終表示サイズの箱」を先に確保してから見せる(常に最適サイズの原則)。
+      // 箱なしだとサムネ原寸(360px)の小さい表示のまま止まって見える(送りで小画像化の退行 2026-09-03)
+      const it2 = items[lbIdx];
+      if (it2.w && it2.h) {
+        const ar = it2.w / it2.h;
+        let bw = Math.min(innerWidth * .94, innerHeight * .74 * ar), bh = bw / ar;
+        if (bh > innerHeight * .74) { bh = innerHeight * .74; bw = bh * ar; }
+        if (bw > it2.w) { bw = it2.w; bh = bw / ar; } // 原寸超え拡大はしない(preview到着時と同サイズ=揺れゼロ)
+        img.width = Math.round(bw);
+        img.height = Math.round(bh);
+      }
+      img.dataset.tier = 'thumb'; // 仮画像の印(開くアニメの着地判定はこれを待つ。swap時に箱は外れる)
       img.src = '/thumb/' + sha;
     };
     if (!dir) place(); else lbShow._grace = setTimeout(place, 150);
@@ -1931,7 +1944,7 @@ async function lbShow(i, dir) {
     })();
     const line1 = `<b>${lbIdx + 1} / ${items.length}</b> · ${m.w}×${m.h} · ${(m.bytes / 1024).toFixed(0)}KB · ${esc(m.source || '')} ·
       <span class="tag" style="cursor:pointer" title="AIの判定ミスはクリックで修正(実写→イラスト→アニメ絵→3DCGの順に切替)"
-        onclick="cycleStyle('${sha}')">${kind}</span>${eds.length ? ` · <span class="tag">調整${eds.length}手</span>` : ''}`;
+        onclick="cycleStyle('${sha}')">${kind}</span>${eds.length ? ` · <span class="tag">調整${eds.length}手</span>` : ''}<span id="lbwho" style="margin-left:6px"></span>`;
     const vlmHtml = v => (v.caption ? `<br>${esc(v.caption)}<br>` : '<br>') +
       (v.tags || []).map(t => `<span class="tag ${personSet.has(t) ? 'ptag' : ''}" style="cursor:pointer" data-t="${esc(t)}"
         title="${personSet.has(t) ? '顔IDで本人確認済み · ' : ''}クリックで削除" onclick="tagDel('${sha}', this.dataset.t)">${personSet.has(t) ? ic('bot', 10) + ' ' : ''}${esc(t)}</span>`).join('') +
@@ -1939,6 +1952,19 @@ async function lbShow(i, dir) {
         onclick="event.stopPropagation()" onkeydown="if(event.key==='Enter'){event.preventDefault(); tagAdd('${sha}', this.value); this.value='';}"></span>`;
     const v = m.vlm || {};
     $('lbmeta').innerHTML = line1 + vlmHtml(v);
+    // 顔IDの自動表示: 台帳に誰か登録されていれば、開いた瞬間に「この顔は誰か」を照合して出す
+    // (登録UIを押すまで分からないのは不親切、の指摘 2026-09-03)
+    if (personSet.size) (async () => {
+      try {
+        const fs = await faceIdOf(sha);
+        if (items[lbIdx]?.sha1 !== sha) return;
+        const chips = fs.filter(f => f.person || f.maybe).map(f => f.person
+          ? `<span class="tag ptag" title="顔IDで本人確認(類似${f.sim})">${ic('bot', 10)} ${esc(f.person)}</span>`
+          : `<span class="tag" style="opacity:.7" title="似ているが確定閾値未満(類似${f.sim})">${esc(f.maybe)}?</span>`).join('');
+        const el = document.getElementById('lbwho');
+        if (el && chips) el.innerHTML = '顔ID: ' + chips;
+      } catch (e) {}
+    })();
     // 開いたのにマスクが無い→その場で勝手に切る(遅延マスク)。属性が要るのでエンリッチ後に発火
     const autoSeg = async (meta) => {
       if (meta.seg || lbShow._segging?.has(sha)) return;
@@ -2225,6 +2251,14 @@ async function cycleStyle(sha) {
 // ================= お気に入り / 削除 =================
 // ---- 顔ID台帳(登録済み人物の一覧/管理 2026-09-03要望) ----
 let personSet = new Set(); // 登録済み人物名(画像側で顔IDタグを金色にする用)
+const faceIdCache = new Map(); // sha→照合結果(登録変更でclear)
+async function faceIdOf(sha) {
+  if (faceIdCache.has(sha)) return faceIdCache.get(sha);
+  const r = await j('/api/faces/detect', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({sha1: sha})});
+  faceIdCache.set(sha, r.faces || []);
+  return faceIdCache.get(sha);
+}
 async function loadPersonSet() {
   try { personSet = new Set((await j('/api/faces?album=')).map(x => x.person)); } catch (e) {}
 }
@@ -2275,6 +2309,7 @@ async function facesDelRef(album, person, sha1) {
     await j('/api/faces', {method: 'DELETE', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({album, person, sha1})});
     toast(`${person} の参照顔を1枚削除`);
+    faceIdCache.clear();
     facesOpen();
   } catch (e) { toast('❌ ' + e.message); }
 }
@@ -2283,6 +2318,7 @@ async function facesDelPerson(album, person) {
     const r = await j('/api/faces', {method: 'DELETE', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({album, person})});
     toast(`${person} を台帳から削除(参照${r.deleted}枚)`);
+    faceIdCache.clear();
     facesOpen();
   } catch (e) { toast('❌ ' + e.message); }
 }
@@ -2311,9 +2347,7 @@ async function lbFacePanel() {
   $('lbfacename').focus();
   const it = items[lbIdx]; if (!it) return;
   try {
-    const r = await j('/api/faces/detect', {method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({sha1: it.sha1})});
-    const fs = r.faces || [];
+    const fs = await faceIdOf(it.sha1);
     if (!fs.length) return toast('顔が見つかりませんでした');
     if (items[lbIdx]?.sha1 !== it.sha1 || $('lbfacebox').style.display === 'none') return; // 送り/閉じで無効化
     const rect = $('lbimg').getBoundingClientRect();
@@ -2325,6 +2359,11 @@ async function lbFacePanel() {
         left: rect.left + x0 * rect.width + 'px', top: rect.top + y0 * rect.height + 'px',
         width: (x1 - x0) * rect.width + 'px', height: (y1 - y0) * rect.height + 'px',
       });
+      // 照合済みなら枠に名前を出す(登録済みかどうか押す前に分かるように 2026-09-03指摘)
+      const lab = f.person ? {t: esc(f.person), c: '#f2c14e'}
+        : f.maybe ? {t: esc(f.maybe) + '?', c: '#aeb4c2'} : {t: '未登録', c: '#8a8f9c'};
+      d.innerHTML = `<span style="position:absolute; top:-21px; left:-2px; background:#000c; color:${lab.c};
+        font-size:11px; padding:1px 7px; border-radius:6px; white-space:nowrap; pointer-events:none">${lab.t}</span>`;
       d.onclick = e => {
         e.stopPropagation();
         document.querySelectorAll('.facebox').forEach(x => x.classList.remove('on'));
@@ -2356,6 +2395,7 @@ async function lbFaceEnroll() {
     if (r.enrolled) {
       toast(`顔ID登録: ${person} @ ${album} — 次の収集から別人を自動排除`);
       personSet.add(person);
+      faceIdCache.clear(); // 台帳が変わったので照合結果は引き直し
       $('lbfacename').value = ''; $('lbfacebox').style.display = 'none';
       clearFaceBoxes();
     } else toast('❌ 顔を検出できませんでした(顔がはっきり写った写真で)');
