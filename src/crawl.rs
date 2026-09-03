@@ -1398,6 +1398,9 @@ pub async fn run(
                                         "crawl": {"url": vurl, "landing": vurl, "title": title,
                                                   "query": q, "engine": eng, "album": album,
                                                   "tags": ctags}});
+                                    if let Some(w) = &face_who {
+                                        extra["face_ids"] = json!([w]); // 顔IDで本人確認済み(サイドカー正本に明示)
+                                    }
                                     if jc > 0.0 {
                                         extra["cost"] = json!({"usd": (jc * 10000.0).round() / 10000.0, "by": format!("boost:{}", limits.judge_model)});
                                     }
@@ -1661,6 +1664,9 @@ pub async fn run(
                                       "query": q, "engine": c.engine, "album": album,
                                       "tags": ctags},
                         });
+                        if let Some(w) = &face_who {
+                            extra["face_ids"] = json!([w]); // 顔IDで本人確認済み(サイドカー正本に明示)
+                        }
                         if jc > 0.0 {
                             // 画像単位の実費(ライトボックス取得費/facets累計に乗る)
                             extra["cost"] = json!({"usd": (jc * 10000.0).round() / 10000.0, "by": format!("boost:{}", limits.judge_model)});

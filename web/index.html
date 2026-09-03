@@ -1957,11 +1957,23 @@ async function lbShow(i, dir) {
     // (登録UIを押すまで分からないのは不親切、の指摘 2026-09-03)
     if (personSet.size) (async () => {
       try {
+        { // 判定中の可視化(「分かってるのに出ない」と見える無言の待ちを無くす 2026-09-03)
+          const el0 = document.getElementById('lbwho');
+          if (el0 && !faceIdCache.has(sha)) el0.innerHTML = '<span style="color:var(--faint)">顔ID判定中…</span>';
+        }
+        // 隣の画像の判定も先読み(previewの先読みと同じ流儀。送りで即表示になる)
+        [1, -1].forEach(d => {
+          const n = items[(lbIdx + d + items.length) % items.length];
+          if (n?.sha1 && !faceIdCache.has(n.sha1)) faceIdOf(n.sha1).catch(() => {});
+        });
         const fs = await faceIdOf(sha);
         if (items[lbIdx]?.sha1 !== sha) return;
-        const chips = fs.filter(f => f.person || f.maybe).map(f => f.person
-          ? `<span class="tag ptag" title="顔IDで本人確認(類似${f.sim})">${ic('bot', 10)} ${esc(f.person)}</span>`
-          : `<span class="tag" style="opacity:.7" title="似ているが確定閾値未満(類似${f.sim})">${esc(f.maybe)}?</span>`).join('');
+        const chips = fs.filter(f => f.person || f.maybe).map(f => {
+          const nm = f.person || f.maybe, conf = !!f.person;
+          return `<span class="tag ${conf ? 'ptag' : ''}" style="cursor:pointer${conf ? '' : '; opacity:.7'}"
+            title="${conf ? `顔ID一致(類似${f.sim})` : `似ている(類似${f.sim}・確定閾値未満)`} — クリックで確定タグとして保存"
+            onclick="faceConfirm('${sha}', '${esc(nm)}')">${conf ? ic('bot', 10) + ' ' : ''}${esc(nm)}${conf ? '' : '?'}</span>`;
+        }).join('');
         const el = document.getElementById('lbwho');
         if (el && chips) el.innerHTML = '顔ID: ' + chips;
         // ツールバーの顔IDボタンにも本人名を出す(押さなくても分かるように 2026-09-03要望)
@@ -2268,6 +2280,23 @@ async function loadPersonSet() {
   try { personSet = new Set((await j('/api/faces?album=')).map(x => x.person)); } catch (e) {}
 }
 function facesClose() { $('facesovl').style.display = 'none'; }
+// 顔ID表示チップのクリック=この画像に確定タグとして保存(表示だけ→永続化の「確定」口 2026-09-03)
+async function faceConfirm(sha, person) {
+  try {
+    await j('/api/meta/patch', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({sha1: sha, add_tags: [person]})});
+    toast(`「${person}」を確定タグとして保存(検索/絞り込みに使えます)`);
+    if (items[lbIdx]?.sha1 === sha) lbShow(lbIdx, 0);
+  } catch (e) { toast('❌ ' + e.message); }
+}
+// 人物名クリック→その人の画像だけに絞り込み(顔IDタグで検索できない不満への回答 2026-09-03)
+function facesFilter(person) {
+  facesClose();
+  if ($('lb').classList.contains('show')) closeLb();
+  chipFilters.tag = person;
+  go({type: 'lib', key: 'all', criteria: {}}, {keepChips: true});
+  toast(`「${person}」で絞り込み中(タグパネルで解除できます)`);
+}
 async function facesOpen() {
   $('facesovl').style.display = 'block';
   const el = $('facesbody');
@@ -2292,7 +2321,8 @@ async function facesOpen() {
         </div>
         ${ps.map(r => `
           <div style="display:flex; align-items:center; gap:8px; padding:6px 0; border-top:1px solid #22242e">
-            <b style="min-width:90px; color:#f2c14e">${esc(r.person)}</b>
+            <b style="min-width:90px; color:#f2c14e; cursor:pointer" title="クリックでこの人の画像だけに絞り込み"
+              onclick="facesFilter('${esc(r.person)}')">${esc(r.person)}</b>
             <span style="color:var(--faint)">参照${r.refs}枚</span>
             <span style="display:flex; gap:4px; flex:1; overflow-x:auto">
               ${r.shas.map(s => `<span style="position:relative; flex:none">

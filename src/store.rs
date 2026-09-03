@@ -32,6 +32,12 @@ pub fn ensure_schema(db: &Connection) {
     let _ = db.execute_batch(SCHEMA);
     let _ = db.execute("ALTER TABLE images ADD COLUMN keep INT", []);
     let _ = db.execute("ALTER TABLE images ADD COLUMN cost REAL", []); // 獲得コストUSD(生成/VLM/クロールの実費。金かけて集めた事を見える化)
+    // 画像内の顔(位置+ArcFace埋め込み)の永続キャッシュ。開くたび再計算で遅い問題の根治(2026-09-03)。
+    // 台帳(faces)と独立な生データなので、人物の登録/削除では無効化不要。idx=-1空行=顔なしの印
+    let _ = db.execute(
+        "CREATE TABLE IF NOT EXISTS img_faces(sha1 TEXT, idx INT, bbox TEXT, emb BLOB, PRIMARY KEY(sha1, idx))",
+        [],
+    );
     // CLIP埋め込み512×f32LE(似た画像)。空BLOB=読めない画像の印。
     // imagesに焼くと1行2KB×12万で全表スキャン(一覧/facet/COUNT)が30倍遅くなった実害(2026-09-03)→別テーブル分離
     let _ = db.execute("CREATE TABLE IF NOT EXISTS embs(sha1 TEXT PRIMARY KEY, emb BLOB)", []);
@@ -575,6 +581,7 @@ pub fn prune(
         crate::edits::clear_renders(root, sha1);
         let _ = db.execute("DELETE FROM images WHERE sha1=?", [sha1.as_str()]);
         let _ = db.execute("DELETE FROM embs WHERE sha1=?", [sha1.as_str()]);
+        let _ = db.execute("DELETE FROM img_faces WHERE sha1=?", [sha1.as_str()]);
         let _ = db.execute("DELETE FROM tags WHERE sha1=?", [sha1.as_str()]);
         let _ = db.execute("DELETE FROM captions WHERE sha1=?", [sha1.as_str()]);
         moved += 1;
@@ -662,6 +669,7 @@ pub fn trash_shas(root: &Path, db: &Connection, shas: &[String]) -> usize {
         crate::edits::clear_renders(root, sha1);
         let rows = db.execute("DELETE FROM images WHERE sha1=?", [sha1.as_str()]).unwrap_or(0);
         let _ = db.execute("DELETE FROM embs WHERE sha1=?", [sha1.as_str()]);
+        let _ = db.execute("DELETE FROM img_faces WHERE sha1=?", [sha1.as_str()]);
         let _ = db.execute("DELETE FROM tags WHERE sha1=?", [sha1.as_str()]);
         let _ = db.execute("DELETE FROM captions WHERE sha1=?", [sha1.as_str()]);
         if removed || rows > 0 {

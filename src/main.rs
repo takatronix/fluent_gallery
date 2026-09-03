@@ -170,8 +170,10 @@ fn build_where(q: &Q) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
         args.push(Box::new(q.tag.to_lowercase()));
     }
     if !q.q.is_empty() {
-        wh.push("sha1 IN (SELECT sha1 FROM captions WHERE captions MATCH ?)".into());
+        // キャプションFTSに加えてタグ(顔IDの人物名/手動タグ)もヒットさせる(2026-09-03要望)
+        wh.push("(sha1 IN (SELECT sha1 FROM captions WHERE captions MATCH ?) OR sha1 IN (SELECT sha1 FROM tags WHERE tag LIKE ?))".into());
         args.push(Box::new(q.q.clone()));
+        args.push(Box::new(format!("%{}%", q.q.trim().to_lowercase())));
     }
     (wh.join(" AND "), args)
 }
@@ -849,21 +851,43 @@ async fn api_faces_detect(State(app): S, Json(p): Json<FaceDetectIn>) -> impl In
             .unwrap_or(("jpg".into(), String::new()));
         let album = source.strip_prefix("crawl:").unwrap_or("").to_string();
         let refs = store::face_refs(&db, &album);
-        let img = image::open(store::image_path(&root, &p.sha1, &ext)).ok()?;
-        let (w, h) = (img.width() as f32, img.height() as f32);
-        let faces = faceid::detect_faces(&img);
-        Some(json!({"faces": faces.iter().map(|f| {
+        // 顔の位置/埋め込みは画像につき一度だけ計算してimg_facesへ永続(2回目以降は数ms)。
+        // 台帳と独立な生データなので人物登録の増減で無効化不要。idx=-1空行=顔なし済みの印
+        let mut stored: Vec<(String, Vec<u8>)> = db
+            .prepare("SELECT bbox, emb FROM img_faces WHERE sha1=?1 ORDER BY idx")
+            .and_then(|mut st| {
+                st.query_map([&p.sha1], |r| Ok((r.get(0)?, r.get(1)?))).map(|rs| rs.flatten().collect())
+            })
+            .unwrap_or_default();
+        if stored.is_empty() {
+            let img = image::open(store::image_path(&root, &p.sha1, &ext)).ok()?;
+            let (w, h) = (img.width() as f32, img.height() as f32);
+            let faces = faceid::detect_faces(&img);
+            if faces.is_empty() {
+                let _ = db.execute("INSERT OR REPLACE INTO img_faces VALUES(?1, -1, '', x'')", [&p.sha1]);
+            }
+            for (i, f) in faces.iter().take(8).enumerate() {
+                let bb = json!([f.bbox[0] / w, f.bbox[1] / h, f.bbox[2] / w, f.bbox[3] / h]).to_string();
+                let eb: Vec<u8> = faceid::embed_face(&img, &f.kps)
+                    .map(|e| e.iter().flat_map(|x| x.to_le_bytes()).collect())
+                    .unwrap_or_default();
+                let _ = db.execute("INSERT OR REPLACE INTO img_faces VALUES(?1, ?2, ?3, ?4)",
+                                   rusqlite::params![p.sha1, i as i64, bb, eb]);
+                stored.push((bb, eb));
+            }
+        }
+        Some(json!({"faces": stored.iter().filter(|(b, _)| !b.is_empty()).map(|(bb, eb)| {
+            let bbox: Vec<f32> = serde_json::from_str(bb).unwrap_or_default();
+            let e: Vec<f32> = eb.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
             let (mut who, mut best) = (None::<String>, -1.0f32);
-            if !refs.is_empty() {
-                if let Some(e) = faceid::embed_face(&img, &f.kps) {
-                    for (nm, rs) in &refs {
-                        let s = faceid::best_sim(&e, rs);
-                        if s > best { best = s; who = Some(nm.clone()); }
-                    }
+            if !refs.is_empty() && e.len() >= 512 {
+                for (nm, rs) in &refs {
+                    let s = faceid::best_sim(&e, rs);
+                    if s > best { best = s; who = Some(nm.clone()); }
                 }
             }
             json!({
-                "bbox": [f.bbox[0] / w, f.bbox[1] / h, f.bbox[2] / w, f.bbox[3] / h],
+                "bbox": bbox,
                 "person": who.as_ref().filter(|_| best >= faceid::FACE_SAME),
                 "maybe": who.as_ref().filter(|_| best >= faceid::FACE_DIFF && best < faceid::FACE_SAME),
                 "sim": (best * 100.0).round() / 100.0,
