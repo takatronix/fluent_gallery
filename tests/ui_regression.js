@@ -113,7 +113,28 @@ const check = (name, ok, detail = '') => {
   });
   check('押しっぱなし送り(最終画像が出る)', hold.ok, hold.src);
 
-  // 8) 連続削除: 5連打で5枚消え、詰まらない
+  // 8) キーボードカーソル: 矢印移動→Spaceで開く→Spaceで閉じる→Shift+矢印で範囲選択
+  const kb = await p.evaluate(() => new Promise(async done => {
+    const key = (k, opts) => document.dispatchEvent(new KeyboardEvent('keydown', {key: k, bubbles: true, ...opts}));
+    key('ArrowRight'); key('ArrowRight');
+    await new Promise(r => setTimeout(r, 200));
+    const curOk = curSha === items[Math.max(0, vStart) + 1]?.sha1 || curIndex() >= 0;
+    key(' ');
+    await new Promise(r => setTimeout(r, 800));
+    const opened = $('lb').classList.contains('show');
+    key(' ');
+    await new Promise(r => setTimeout(r, 500));
+    const closed = !$('lb').classList.contains('show');
+    key('ArrowRight', {shiftKey: true}); key('ArrowRight', {shiftKey: true});
+    await new Promise(r => setTimeout(r, 200));
+    const selN = sel.size;
+    sel.clear(); document.querySelectorAll('.cell.sel').forEach(x => x.classList.remove('sel'));
+    done({curOk, opened, closed, selN});
+  }));
+  check('キーボード(矢印/Space開閉/Shift範囲選択)', kb.curOk && kb.opened && kb.closed && kb.selN >= 2,
+    `sel=${kb.selN}`);
+
+  // 9) 連続削除: 5連打で5枚消え、詰まらない
   const del = await p.evaluate(async () => {
     openLb(0); await new Promise(r => setTimeout(r, 600));
     const start = items.length;

@@ -159,6 +159,8 @@
   body.selmode .ck { opacity:1; }
   .cell.sel .ck { opacity:1; background:var(--acc); border-color:var(--acc); color:#fff; }
   .cell.sel { outline:2px solid var(--acc); outline-offset:-2px; }
+  .cell.cur { outline:2px solid #ffffffd8; outline-offset:-2px; } /* キーボードカーソル(Finder流) */
+  .cell.sel.cur { outline:2px solid var(--acc); box-shadow:inset 0 0 0 2px #ffffff90; }
   .cell.sel img { transform:scale(.94); border-radius:4px; transition:transform .15s ease; }
   .cell .badge { position:absolute; top:7px; right:7px; z-index:2; color:#aeb4c2; opacity:0;
                  cursor:pointer; filter:drop-shadow(0 1px 3px #000c);
@@ -1169,11 +1171,21 @@ const lbView = {
   box(nw, nh) {
     const img = $('lbimg');
     if (!nw || !nh) { img.removeAttribute('width'); img.removeAttribute('height'); return; }
+    // 全画面(imm)中は画面いっぱい、通常はバー/メタの余白を残す
+    const imm = $('lb').classList.contains('imm');
+    const mw = imm ? innerWidth : innerWidth * .94;
+    const mh = imm ? innerHeight : innerHeight * .74;
     const ar = nw / nh;
-    let bw = Math.min(innerWidth * .94, innerHeight * .74 * ar), bh = bw / ar;
-    if (bh > innerHeight * .74) { bh = innerHeight * .74; bw = bh * ar; }
+    let bw = Math.min(mw, mh * ar), bh = bw / ar;
+    if (bh > mh) { bh = mh; bw = bh * ar; }
     img.width = Math.round(bw);
     img.height = Math.round(bh);
+  },
+  // 全画面切替などで箱だけ引き直す(中身はそのまま)
+  refit() {
+    const img = $('lbimg');
+    if (this.tier === 'render') return; // 編集レンダは自然寸法のまま
+    if (img.naturalWidth) this.box(img.naturalWidth, img.naturalHeight);
   },
   // 唯一のsrc書き込み口。デコード完了後に差し替える=空白フレームを出さない
   async apply(gen, url, tier, nw, nh) {
@@ -1285,7 +1297,7 @@ function flipRender() {
 }
 function cellHtml(it) {
   if (it._trash) { // ゴミ箱: クリック=選択(戻す対象を選ぶ)。残り日数を出す
-    return `<div class="cell ${sel.has(it.sha1) ? 'sel in' : ''}" id="c_${it.sha1}"
+    return `<div class="cell ${sel.has(it.sha1) ? 'sel in' : ''} ${it.sha1 === curSha ? 'cur' : ''}" id="c_${it.sha1}"
         onclick="ckSelSha('${it.sha1}', event)" style="cursor:pointer">
       <img loading="lazy" src="/trash/img/${it.sha1}" style="background:var(--panel); filter:saturate(.5) brightness(.8)">
       <span class="ck">${ic('check', 12)}</span>
@@ -1302,7 +1314,7 @@ function cellHtml(it) {
   const src = fchips.seg
     ? `/render/${it.sha1}?w=${big ? 1080 : 360}&seg=1&v=${it.erev || 0}`
     : `${tier}${it.sha1}${ver}`;
-  return `<div class="cell ${sel.has(it.sha1) ? 'sel in' : ''}" id="c_${it.sha1}" onclick="openLbSha('${it.sha1}')"
+  return `<div class="cell ${sel.has(it.sha1) ? 'sel in' : ''} ${it.sha1 === curSha ? 'cur' : ''}" id="c_${it.sha1}" onclick="openLbSha('${it.sha1}')"
       draggable="true" ondragstart="dragShas(event, '${it.sha1}')">
     <img loading="lazy" decoding="async" src="${src}" style="background:var(--panel)">
     <span class="ck" onclick="event.stopPropagation(); ckSelSha('${it.sha1}', event)">${ic('check', 12)}</span>
@@ -1620,6 +1632,7 @@ $('lbbar').innerHTML = `
     <button class="ghost" onclick="event.stopPropagation(); lbFaceEnroll()">${ic('check', 12)} 登録</button>
   </span>
   <button class="ghost" id="edbtn" onclick="edToggle()" title="非破壊調整のOn/Off (E)">${ic('sliders', 13)} 編集</button>
+  <button class="ghost" onclick="immToggle()" title="全画面 — UIを消して画像だけ(戻る: クリック/Space/Esc)">${ic('box', 13)} 全画面</button>
   <button class="ghost" id="lbsel" onclick="lbSel()" title="選択に加える (X)">${ic('circle', 13)} 選択</button>
   <button class="ghost" id="edcompare" style="display:none"
     onpointerdown="edCompare(true)" onpointerup="edCompare(false)" onpointerleave="edCompare(false)"
@@ -1877,6 +1890,12 @@ function closeLb() {
   }
   lb.animate([{opacity: 1}, {opacity: 0}], {duration: 240, easing: 'ease-in'}).onfinish = () => {
     lb.classList.remove('show'); syncHash();
+    // 閉じたらカーソル(=最後に見ていた画像)をグリッドで見える位置へ
+    if (curSha) {
+      const el = document.getElementById('c_' + curSha);
+      if (el) { el.classList.add('cur'); el.scrollIntoView({block: 'nearest'}); }
+      else setCur(curIndex());
+    }
   };
 }
 async function lbShow(i, dir) {
@@ -1886,6 +1905,7 @@ async function lbShow(i, dir) {
   { const fb = document.getElementById('lbfacebtn'); if (fb) fb.innerHTML = ic('bot', 13) + ' 顔ID'; } // ボタン表記も画像単位で戻す
   lbIdx = (i + items.length) % items.length;
   const sha = items[lbIdx].sha1;
+  setCur(lbIdx, {scroll: false}); // カーソルはLBの現在地に追従(閉じた時そこに居る)
   lbMeta = null; edReset(); zReset(); $('edcompare').style.display = 'none'; edHist([]); lbKeepBtn(); lbSelBtn();
   $('lbinfo').style.display = 'none';
   $('lbsrcbtn').style.display = 'none';
@@ -2862,27 +2882,81 @@ async function watchActivity() {
 // ================= キーボード / 無限スクロール / 起動 =================
 new IntersectionObserver(es => { if (es[0].isIntersecting) loadMore(); },
   {root: $('gridwrap'), rootMargin: '700px'}).observe($('more'));
+// ================= キーボードカーソル(Finder流 2026-09-03要望) =================
+// 矢印=カーソル移動 / Shift+矢印=範囲選択しながら移動 / Space=クイックルック開閉 / X・Enter=選択トグル
+let curSha = null;
+function curIndex() { return curSha ? items.findIndex(x => x.sha1 === curSha) : -1; }
+function setCur(i, opts = {}) {
+  if (!items.length) { curSha = null; return; }
+  i = Math.max(0, Math.min(items.length - 1, i));
+  document.querySelectorAll('.cell.cur').forEach(el => el.classList.remove('cur'));
+  curSha = items[i].sha1;
+  let el = document.getElementById('c_' + curSha);
+  if (!el && opts.scroll !== false) {
+    // 仮想窓の外→その行へスクロールして描かせる
+    const n = gridCols(), ch = cellPitch();
+    $('gridwrap').scrollTop = Math.max(0, contentTop() + Math.floor(i / n) * ch - $('gridwrap').clientHeight / 2);
+    updateWindow(true);
+    el = document.getElementById('c_' + curSha);
+  }
+  if (el) {
+    el.classList.add('cur');
+    if (opts.scroll !== false) el.scrollIntoView({block: 'nearest'});
+  }
+}
+function immToggle() {
+  $('lb').classList.toggle('imm');
+  lbView.refit(); // 箱を全画面/通常サイズへ引き直す
+}
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && $('ovl').classList.contains('show')) { closeIngest(); return; }
+  if (e.key === 'Escape' && $('facesovl').style.display !== 'none') { facesClose(); return; }
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
   if (e.key === '/') { e.preventDefault(); $('q').focus(); return; }
   if (!$('lb').classList.contains('show')) {
-    if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); delSelected(); }
-    else if (e.key === 'z' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); undoTrash(); }
-    // X=カーソルが乗っているサムネの選択トグル(ホバー拡大でチェックが押しにくい問題の回避 2026-09-03)
-    else if ((e.key === 'x' || e.key === 'X') && window._hoverSha) {
+    // ---- グリッド ----
+    if (e.key.startsWith('Arrow')) {
       e.preventDefault();
-      ckSelSha(window._hoverSha, e); // Shift+Xで範囲選択も効く
+      const d = e.key === 'ArrowLeft' ? -1 : e.key === 'ArrowRight' ? 1
+              : e.key === 'ArrowUp' ? -gridCols() : gridCols();
+      const from = curIndex();
+      const to = from < 0 ? Math.max(0, vStart) : from + d;
+      if (e.shiftKey && from >= 0) { // 通過した画像を選択に加える(Finderの範囲選択)
+        const lo = Math.max(0, Math.min(from, to)), hi = Math.min(items.length - 1, Math.max(from, to));
+        for (let k = lo; k <= hi; k++) {
+          sel.add(items[k].sha1);
+          document.getElementById('c_' + items[k].sha1)?.classList.add('sel', 'in');
+        }
+        document.body.classList.add('selmode');
+        drawSelbar();
+      }
+      setCur(to);
     }
+    else if (e.key === ' ') { // Space=クイックルックで開く
+      e.preventDefault();
+      const sha = curSha || window._hoverSha;
+      if (sha) openLbSha(sha);
+    }
+    else if (e.key === 'Enter' || e.key === 'x' || e.key === 'X') { // 選択トグル(カーソル優先、無ければホバー)
+      const sha = (e.key === 'Enter' ? curSha : (window._hoverSha || curSha));
+      if (sha) { e.preventDefault(); ckSelSha(sha, e); }
+    }
+    else if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); delSelected(); }
+    else if (e.key === 'z' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); undoTrash(); }
     return;
   }
-  if (e.key === 'Escape') closeLb();
-  if ((e.key === 'o' || e.key === 'O') && $('lb').classList.contains('show')) lbOpenSource();
+  // ---- ライトボックス ----
+  if (e.key === 'Escape' || e.key === ' ') { // Space/Esc=戻る(全画面中はまず全画面解除)
+    e.preventDefault();
+    if ($('lb').classList.contains('imm')) immToggle();
+    else closeLb();
+  }
+  else if (e.key === 'o' || e.key === 'O') lbOpenSource();
   else if (e.key === 'ArrowRight' || e.key === 'f') lbGo(1);
   else if (e.key === 'ArrowLeft' || e.key === 'd') lbGo(-1);
   else if (e.key === 'e') edToggle();
   else if (e.key === 's') lbKeep();
-  else if (e.key === 'x' || e.key === ' ') { e.preventDefault(); lbSel(); }
+  else if (e.key === 'x') { e.preventDefault(); lbSel(); }
   else if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); lbDel(); }
   else if (e.key === 'z' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); edUndo(); }
 });
