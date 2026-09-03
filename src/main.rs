@@ -1329,7 +1329,7 @@ async fn api_album_move(State(app): S, AxPath(name): AxPath<String>, Json(p): Js
 }
 
 #[derive(Deserialize)]
-struct FolderRenameIn { from: String, #[serde(default)] to: String }
+struct FolderRenameIn { from: String, #[serde(default)] to: String, #[serde(default)] kind: String }
 
 /// グループ(ツリーの中間ノード)の改名と移動。実体は各フォルダのfolderパスの前方一致置換
 async fn api_folder_rename(State(app): S, Json(p): Json<FolderRenameIn>) -> impl IntoResponse {
@@ -1346,6 +1346,26 @@ async fn api_folder_rename(State(app): S, Json(p): Json<FolderRenameIn>) -> impl
     }
     let prefix = format!("{from}/");
     let mut changed = 0usize;
+    // 出荷(データセット)の棚。名札はmanifest.folderにあり、ディレクトリは動かさない
+    if p.kind == "dataset" {
+        if let Ok(rd) = std::fs::read_dir(app.root.join("store/datasets")) {
+            for e in rd.flatten() {
+                let mf = e.path().join("manifest.json");
+                let Some(mut m) = std::fs::read_to_string(&mf).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) else { continue };
+                let cur = m["folder"].as_str().unwrap_or("").to_string();
+                let next = if cur == from {
+                    to.clone()
+                } else if let Some(rest) = cur.strip_prefix(&prefix) {
+                    if to.is_empty() { rest.to_string() } else { format!("{to}/{rest}") }
+                } else {
+                    continue;
+                };
+                m["folder"] = json!(folder_norm(&next));
+                if std::fs::write(&mf, serde_json::to_string_pretty(&m).unwrap()).is_ok() { changed += 1; }
+            }
+        }
+        return Json(json!({"ok": true, "changed": changed, "to": to})).into_response();
+    }
     for a in load_albums(&app.root) {
         let cur = a["folder"].as_str().unwrap_or("").to_string();
         let next = if cur == from {
@@ -2218,6 +2238,60 @@ async fn api_dataset_del(State(app): S, AxPath(name): AxPath<String>) -> impl In
     Json(json!({"ok": true})).into_response()
 }
 
+// データセット(出荷)の棚整理。実体はディレクトリ名+manifest。中身(symlink)は触らない
+fn dataset_slug(name: &str) -> String {
+    let s: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .take(48)
+        .collect();
+    if s.is_empty() { "dataset".into() } else { s }
+}
+
+async fn api_dataset_rename(State(app): S, AxPath(name): AxPath<String>, Json(p): Json<AlbumRenameIn>) -> impl IntoResponse {
+    if name.contains('/') || p.to.trim().is_empty() {
+        return err_json(StatusCode::BAD_REQUEST, "新しい名前をください");
+    }
+    let dir = app.root.join("store/datasets");
+    let (old, new) = (dir.join(&name), dir.join(dataset_slug(p.to.trim())));
+    if !old.exists() {
+        return err_json(StatusCode::NOT_FOUND, "データセットが見つかりません");
+    }
+    if old == new {
+        return Json(json!({"ok": true, "name": name})).into_response();
+    }
+    if new.exists() {
+        return err_json(StatusCode::CONFLICT, "その名前のデータセットはもうあります");
+    }
+    if std::fs::rename(&old, &new).is_err() {
+        return err_json(StatusCode::INTERNAL_SERVER_ERROR, "名前を変えられませんでした");
+    }
+    let slug = new.file_name().unwrap().to_string_lossy().to_string();
+    let mf = new.join("manifest.json");
+    if let Some(mut m) = std::fs::read_to_string(&mf).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) {
+        m["name"] = json!(slug);
+        let _ = std::fs::write(&mf, serde_json::to_string_pretty(&m).unwrap());
+    }
+    Json(json!({"ok": true, "name": slug})).into_response()
+}
+
+async fn api_dataset_move(State(app): S, AxPath(name): AxPath<String>, Json(p): Json<AlbumMoveIn>) -> impl IntoResponse {
+    if name.contains('/') {
+        return err_json(StatusCode::BAD_REQUEST, "名前が不正です");
+    }
+    let mf = app.root.join("store/datasets").join(&name).join("manifest.json");
+    let mut m = match std::fs::read_to_string(&mf).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) {
+        Some(m) => m,
+        None => return err_json(StatusCode::NOT_FOUND, "データセットが見つかりません"),
+    };
+    let folder = folder_norm(&p.folder);
+    m["folder"] = json!(folder);
+    if std::fs::write(&mf, serde_json::to_string_pretty(&m).unwrap()).is_err() {
+        return err_json(StatusCode::INTERNAL_SERVER_ERROR, "保存に失敗しました");
+    }
+    Json(json!({"ok": true, "name": name, "folder": folder})).into_response()
+}
+
 async fn api_dataset_shas(State(app): S, AxPath(name): AxPath<String>) -> impl IntoResponse {
     let d = app.root.join("store/datasets").join(&name);
     if name.contains('/') || !d.exists() {
@@ -2641,6 +2715,8 @@ async fn main() {
         .route("/api/datasets", post(api_dataset_make).get(api_datasets))
         .route("/api/datasets/{name}", delete(api_dataset_del))
         .route("/api/datasets/{name}/shas", get(api_dataset_shas))
+        .route("/api/datasets/{name}/rename", post(api_dataset_rename))
+        .route("/api/datasets/{name}/move", post(api_dataset_move))
         .route("/api/enrich", post(api_enrich))
         .route("/api/enrich/one", post(api_enrich_one))
         .route("/api/meta/patch", post(api_meta_patch))

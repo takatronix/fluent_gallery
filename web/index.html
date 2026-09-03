@@ -322,7 +322,8 @@
        ondragover="navOver(event, 'root', '')" ondragleave="navLeave(event)" ondrop="navDrop(event, 'root', '')">フォルダ <span id="fold_folders_ic"></span><span class="add" id="addfolder" title="新規フォルダ(空で生まれます)"></span></div>
   <div id="nav_folders"></div>
   <div id="nav_sources_sec"></div>
-  <div class="sec">出荷 — データセット</div>
+  <div class="sec" title="ここへ落とすと一番上の階層へ移動します"
+       ondragover="navOver(event, 'dsroot', '')" ondragleave="navLeave(event)" ondrop="navDrop(event, 'dsroot', '')">出荷 — データセット</div>
   <div id="nav_datasets"></div>
   <div class="sec" style="display:flex; align-items:center">AI稼働状況
     <span id="facesbtn" style="margin-left:auto; cursor:pointer; opacity:.7; display:flex; align-items:center; gap:3px"
@@ -549,7 +550,7 @@ let prevLoc = null; // 検索から戻る先
 let items = [], total = 0, sel = new Set(), lastCk = -1;
 let chipFilters = {tag: '', scene: '', subject: '', style: '', gender: '', framing: '', age_group: '', people_count: '', animal: ''};
 let fchips = {origin: '', q8: false, safe: false, clean: false};
-let albumsCache = [], facetsCache = null;
+let albumsCache = [], facetsCache = null, datasetsCache = [];
 
 const LIB = [
   {key: 'all', icon: 'img', label: 'すべて', criteria: {}},
@@ -673,16 +674,18 @@ function treeHtml(node, item, depth = 0, key = '', kind = '') {
   let h = '';
   for (const name of Object.keys(node.f).sort()) {
     const k = key + '/' + name, open = !folded.has(k), path = k.slice(1);
-    const dnd = kind === 'folder'
-      ? ` data-grp="${esc(path)}" draggable="true" ondragstart="dragNav(event, 'group', this.dataset.grp)"
-         ondragend="dragEnd(event)" ondragover="navOver(event, 'group', this.dataset.grp)"
-         ondragleave="navLeave(event)" ondrop="navDrop(event, 'group', this.dataset.grp)"` : '';
+    const gk = kind === 'folder' ? 'group' : kind === 'dataset' ? 'dsgroup' : '';
+    const dnd = gk
+      ? ` data-grp="${esc(path)}" draggable="true" ondragstart="dragNav(event, '${gk}', this.dataset.grp)"
+         ondragend="dragEnd(event)" ondragover="navOver(event, '${gk}', this.dataset.grp)"
+         ondragleave="navLeave(event)" ondrop="navDrop(event, '${gk}', this.dataset.grp)"` : '';
     h += `<div class="nav"${dnd} style="padding-left:${10 + depth * 13}px" onclick="toggleFold('${k.replace(/'/g, "\\'")}')">
       ${ic(open ? 'chevD' : 'chevR', 13)}<span class="nm" style="color:var(--faint)"${
-        kind === 'folder' ? ` ondblclick="startRename(event, 'group', this.closest('.nav').dataset.grp)"` : ''}>${esc(name)}</span>` +
-      (kind === 'folder' ? `<span class="del" title="グループ名を変える(ダブルクリックでも)"
-        onclick="startRename(event, 'group', this.closest('.nav').dataset.grp)">${ic('pen', 12)}</span>` : '') +
-      `<span class="del" title="この中に新規フォルダを作る" onclick="event.stopPropagation(); newInFolder('${k.slice(1).replace(/'/g, "\\'")}')">${ic('plus', 12)}</span></div>`;
+        gk ? ` ondblclick="startRename(event, '${gk}', this.closest('.nav').dataset.grp)"` : ''}>${esc(name)}</span>` +
+      (gk ? `<span class="del" title="棚の名前を変える(ダブルクリックでも)"
+        onclick="startRename(event, '${gk}', this.closest('.nav').dataset.grp)">${ic('pen', 12)}</span>` : '') +
+      (kind === 'folder' ? `<span class="del" title="この中に新規フォルダを作る" onclick="event.stopPropagation(); newInFolder('${k.slice(1).replace(/'/g, "\\'")}')">${ic('plus', 12)}</span>` : '') +
+      `</div>`;
     if (open) h += treeHtml(node.f[name], item, depth + 1, k, kind);
   }
   return h + node.items.map(it => item(it, depth)).join('');
@@ -820,24 +823,29 @@ function dragEnd(ev) {
   document.querySelectorAll('.dropon, .mergeon').forEach(e => e.classList.remove('dropon', 'mergeon'));
 }
 function albumFolder(name) { return albumsCache.find(x => x.name === name)?.folder || ''; }
+function dsFolder(name) { return datasetsCache.find(x => x.name === name)?.folder || ''; }
 function parentOf(path) { return path.split('/').slice(0, -1).join('/'); }
+// フォルダの木(f)と出荷の木(d)。木をまたぐD&Dは無効(データセットをフォルダの棚には入れない)
+const TREE = {album: 'f', group: 'f', root: 'f', source: 'f', dataset: 'd', dsgroup: 'd', dsroot: 'd'};
 // 落とせるか+何になるか。落とせる時だけカーソルが「置ける」に変わる(できない所に落とせる嘘をつかない)
 function dropKind(target, key) {
   const d = dragNav_;
-  if (!d) return null;
+  if (!d || TREE[d.kind] !== TREE[target]) return null;
   if (d.kind === 'album') {
     if (target === 'source') return null;                          // 取り込み元は自動グループ(受け皿ではない)
     if (target === 'album') return d.key === key ? null : 'merge'; // フォルダ→フォルダ = 合流
     return albumFolder(d.key) === (target === 'root' ? '' : key) ? null : 'move';
   }
-  if (d.kind === 'group') {
-    if (target === 'album' || target === 'source') return null;    // グループはフォルダの中に入らない
-    const to = target === 'root' ? '' : key;
-    if (to === d.key || to.startsWith(d.key + '/')) return null;   // 自分の中へは移せない
-    if (parentOf(d.key) === to) return null;                       // すでにそこにいる
-    return 'move';
+  if (d.kind === 'dataset') {
+    if (target === 'dataset') return null;                         // 出荷済みスナップショット同士は合流しない
+    return dsFolder(d.key) === (target === 'dsroot' ? '' : key) ? null : 'move';
   }
-  return null;
+  // 棚(グループ)はフォルダ側も出荷側も同じ規則
+  if (target === 'album' || target === 'dataset' || target === 'source') return null;
+  const to = (target === 'root' || target === 'dsroot') ? '' : key;
+  if (to === d.key || to.startsWith(d.key + '/')) return null;     // 自分の中へは移せない
+  if (parentOf(d.key) === to) return null;                         // すでにそこにいる
+  return 'move';
 }
 function navOver(ev, target, key) {
   if (dragNav_) {
@@ -861,8 +869,18 @@ function navDrop(ev, target, key) {
   dragNav_ = null;
   if (!k) return;
   if (k === 'merge') return mergeAlbums(d.key, key);
-  const to = target === 'root' ? '' : key;
-  return d.kind === 'album' ? moveAlbum(d.key, to) : moveGroup(d.key, to);
+  const to = (target === 'root' || target === 'dsroot') ? '' : key;
+  if (d.kind === 'album') return moveAlbum(d.key, to);
+  if (d.kind === 'dataset') return moveDataset(d.key, to);
+  return moveGroup(d.key, to, d.kind === 'dsgroup' ? 'dataset' : '');
+}
+async function moveDataset(name, folder) {
+  try {
+    await j('/api/datasets/' + encodeURIComponent(name) + '/move', {method: 'POST',
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify({folder})});
+    toast(`「${name}」を${folder ? `「${folder}」の棚へ` : '一番上へ'}移しました`);
+    await loadDatasets();
+  } catch (e) { toast('❌ ' + e.message); }
 }
 async function moveAlbum(name, folder) {
   try {
@@ -872,14 +890,14 @@ async function moveAlbum(name, folder) {
     await loadAlbums();
   } catch (e) { toast('❌ ' + e.message); }
 }
-async function moveGroup(from, toParent) {
+async function moveGroup(from, toParent, kind = '') {
   const to = (toParent ? toParent + '/' : '') + from.split('/').pop();
   try {
     const r = await j('/api/folders/rename', {method: 'POST',
-      headers: {'Content-Type': 'application/json'}, body: JSON.stringify({from, to})});
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify({from, to, kind})});
     refoldPrefix(from, r.to || to);
-    toast(`グループ「${from.split('/').pop()}」を${toParent ? `「${toParent}」の中へ` : '一番上へ'}移しました(${r.changed}個)`);
-    await loadAlbums();
+    toast(`${kind === 'dataset' ? '棚' : 'グループ'}「${from.split('/').pop()}」を${toParent ? `「${toParent}」の中へ` : '一番上へ'}移しました(${r.changed}個)`);
+    await (kind === 'dataset' ? loadDatasets() : loadAlbums());
   } catch (e) { toast('❌ ' + e.message); }
 }
 // 開いている/畳んでいるの記憶も名前について行かせる(移動後に勝手に畳まれない)
@@ -934,13 +952,21 @@ async function endRename(inp, kind, key) {
       toast(`「${key}」→「${r.name}」に変更${r.moved ? `(中身${r.moved}枚も一緒に引っ越し)` : ''}`);
       await loadAlbums();
       if (loc.type === 'folder' && loc.key === key) openFolder(r.name);
+    } else if (kind === 'dataset') {
+      const r = await j('/api/datasets/' + encodeURIComponent(key) + '/rename', {method: 'POST',
+        headers: {'Content-Type': 'application/json'}, body: JSON.stringify({to: v})});
+      // 出荷先は学習ツールが読むディレクトリ名なので英数字だけ(日本語は_になる)。結果をそのまま見せる
+      toast(`データセット「${key}」→「${r.name}」に変更`);
+      await loadDatasets();
+      if (loc.type === 'dataset' && loc.key === key) openDataset(r.name);
     } else {
       const to = (parentOf(key) ? parentOf(key) + '/' : '') + v;
-      const r = await j('/api/folders/rename', {method: 'POST',
-        headers: {'Content-Type': 'application/json'}, body: JSON.stringify({from: key, to})});
+      const ds = kind === 'dsgroup';
+      const r = await j('/api/folders/rename', {method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({from: key, to, kind: ds ? 'dataset' : ''})});
       refoldPrefix(key, r.to || to);
-      toast(`グループ「${cur}」→「${v}」に変更(${r.changed}個のフォルダ)`);
-      await loadAlbums();
+      toast(`${ds ? '棚' : 'グループ'}「${cur}」→「${v}」に変更(${r.changed}個)`);
+      await (ds ? loadDatasets() : loadAlbums());
     }
   } catch (e) { toast('❌ ' + e.message); restore(); }
 }
@@ -2855,11 +2881,21 @@ async function makeDataset() {
   } catch (e) { toast('❌ ' + e.message); }
 }
 async function loadDatasets() {
+  if (renaming) return; // 名前を書いている最中に描き替えない
   try {
     const ds = await j('/api/datasets');
-    $('nav_datasets').innerHTML = treeHtml(buildTree(ds.filter(d => !d.name.startsWith('_refs_'))), (d, dep) =>
-      `<div class="nav" data-loc="dataset:${esc(d.name)}" style="padding-left:${10 + dep * 13}px" onclick="openDataset('${esc(d.name)}')">
-        ${ic('box', 13)}<span class="nm">${esc(d.name)}</span><span class="n">${d.count}</span></div>`)
+    datasetsCache = ds.filter(d => !d.name.startsWith('_refs_'));
+    $('nav_datasets').innerHTML = treeHtml(buildTree(datasetsCache), (d, dep) =>
+      `<div class="nav" data-loc="dataset:${esc(d.name)}" data-ds="${esc(d.name)}" style="padding-left:${10 + dep * 13}px"
+         title="出荷済みデータセット\n掴んで棚へ=移動"
+         draggable="true" ondragstart="dragNav(event, 'dataset', this.dataset.ds)" ondragend="dragEnd(event)"
+         ondragover="navOver(event, 'dataset', this.dataset.ds)" ondragleave="navLeave(event)"
+         ondrop="navDrop(event, 'dataset', this.dataset.ds)"
+         onclick="openDataset(this.dataset.ds)">
+        ${ic('box', 13)}<span class="nm"
+          ondblclick="startRename(event, 'dataset', this.closest('.nav').dataset.ds)">${esc(d.name)}</span><span class="n">${d.count}</span>
+        <span class="del" title="名前を変える(ダブルクリックでも)"
+          onclick="startRename(event, 'dataset', this.closest('.nav').dataset.ds)">${ic('pen', 12)}</span></div>`, 0, '', 'dataset')
       || '<div class="nav" style="pointer-events:none"><span class="nm sub">選択→データセット化</span></div>';
   } catch (e) {}
 }

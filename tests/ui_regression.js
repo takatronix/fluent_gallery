@@ -16,6 +16,11 @@ const check = (name, ok, detail = '') => {
   // テストデータ収蔵
   // 前回が途中で落ちていると掃除が走っていないので、まず残骸を消す(次の実行を巻き添えにしない)
   for (const al of ['_uitest', '_uitest2', '_uitest_b']) await fetch(BASE + '/api/albums/' + al, {method: 'DELETE'});
+  for (const src of ['crawl:_uitest', 'crawl:_uitest2', 'crawl:_uitest_b']) { // 前回の画像が残っていると枚数の検算が狂う
+    await fetch(BASE + '/api/source/trash', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({source: src})});
+  }
+  for (const ds of ['_uitest_ds', '_uitest_ds2', '_uitest_ds_b']) await fetch(BASE + '/api/datasets/' + ds, {method: 'DELETE'});
   const fx = path.join(__dirname, 'fixtures');
   await fetch(BASE + '/api/ingest', {method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({path: fx, source: 'crawl:_uitest', move: false})});
@@ -296,6 +301,43 @@ const check = (name, ok, detail = '') => {
   check('合流(画像は消えず移る)', mg.gone && mg.before > 0 && mg.after === mg.before && mg.leftover === 0,
     `${mg.before}枚→${mg.after}枚 置き去り${mg.leftover}`);
 
+  // 14) 出荷(データセット)の棚も同じように整理できる+木をまたぐD&Dは無効
+  const dsT = await p.evaluate(async () => {
+    const imgs = (await (await fetch('/api/images?limit=2')).json()).items.map(i => i.sha1);
+    const mk = (name, folder) => fetch('/api/datasets', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name, folder, shas: imgs})}); // q は flatten なので送らない(送ると422)
+    await mk('_uitest_ds', '');
+    await mk('_uitest_ds_b', '_uitest棚d');
+    await loadDatasets();
+    const row = document.querySelector('.nav[data-ds="_uitest_ds"]');
+    row.querySelector('.nm').dispatchEvent(new MouseEvent('dblclick', {bubbles: true}));
+    const inp = row.querySelector('input.rn');
+    inp.value = '_uitest_ds2';
+    inp.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true}));
+    await until(() => datasetsCache.some(d => d.name === '_uitest_ds2'), 12000);
+    const renamed = datasetsCache.some(d => d.name === '_uitest_ds2') && !datasetsCache.some(d => d.name === '_uitest_ds');
+    // 棚へD&D
+    const drag = (from, to) => {
+      const dt = new DataTransfer();
+      from.dispatchEvent(new DragEvent('dragstart', {bubbles: true, dataTransfer: dt}));
+      to?.dispatchEvent(new DragEvent('dragover', {bubbles: true, dataTransfer: dt}));
+      const lit = !!to?.classList.contains('dropon');
+      if (lit) to.dispatchEvent(new DragEvent('drop', {bubbles: true, dataTransfer: dt}));
+      from.dispatchEvent(new DragEvent('dragend', {bubbles: true, dataTransfer: dt}));
+      return lit;
+    };
+    const lit = drag(document.querySelector('.nav[data-ds="_uitest_ds2"]'),
+                     document.querySelector('#nav_datasets .nav[data-grp="_uitest棚d"]'));
+    await until(() => datasetsCache.find(d => d.name === '_uitest_ds2')?.folder === '_uitest棚d', 8000);
+    const moved = datasetsCache.find(d => d.name === '_uitest_ds2')?.folder;
+    // 木をまたぐ(データセット→フォルダ側のグループ)は受け付けない
+    const crossLit = drag(document.querySelector('.nav[data-ds="_uitest_ds2"]'),
+                          document.querySelector('#nav_folders .nav[data-grp]'));
+    return {renamed, lit, moved, crossLit};
+  });
+  check('データセットの改名/棚へD&D', dsT.renamed && dsT.lit && dsT.moved === '_uitest棚d', `folder=${dsT.moved}`);
+  check('木をまたぐD&Dは無効', dsT.crossLit === false);
+
   check('JSエラーなし', jsErrors.length === 0, jsErrors.slice(0, 3).join(' | '));
   await b.close();
 
@@ -306,6 +348,9 @@ const check = (name, ok, detail = '') => {
   }
   for (const al of ['_uitest', '_uitest2', '_uitest_b']) {
     await fetch(BASE + '/api/albums/' + al, {method: 'DELETE'});
+  }
+  for (const ds of ['_uitest_ds', '_uitest_ds2', '_uitest_ds_b']) {
+    await fetch(BASE + '/api/datasets/' + ds, {method: 'DELETE'});
   }
 
   const ng = results.filter(r => !r.ok);
