@@ -49,9 +49,13 @@
   .nav .n { margin-left:auto; font-size:10px; color:var(--faint); font-variant-numeric:tabular-nums;
             padding-left:6px; flex:none; max-width:46%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .nav .st { margin-left:auto; flex:none; display:flex; align-items:center; color:var(--ok); }
-  .nav .del { display:none; margin-left:4px; color:var(--faint); }
+  .nav .del { display:none; margin-left:0; color:var(--faint); }
   .nav:hover .del { display:inline-flex; }
   .nav .del:hover { color:var(--tx); }
+  /* ホバー中は枚数を隠し、間隔も詰めて操作アイコン(改名/新規/複製/削除)4つ分の居場所を作る */
+  .nav:hover .n { display:none; }
+  .nav:hover { gap:5px; }
+  .nav:hover .nm { min-width:56px; }
 
   /* ---- メイン ---- */
   main { display:flex; flex-direction:column; overflow:hidden; }
@@ -291,13 +295,31 @@
   body.dense .cell img { transition: none; }
   /* D&D: 落とせる場所のハイライト */
   .nav.dropon { outline:1px dashed #7aa2f7; background:#7aa2f722; }
+  /* 合流(フォルダ→フォルダ)は移動と別色。落とすと確認ポップアップが出る */
+  .nav.mergeon { outline:1px solid #e5c07b; background:#e5c07b22; }
+  .sec.dropon { outline:1px dashed #7aa2f7; background:#7aa2f722; border-radius:6px; }
+  .nav.dragging { opacity:.45; }
+  /* インライン改名(prompt禁止=憲法5条。その場で名前を書き換える) */
+  .nav input.rn { flex:1; min-width:40px; width:100%; font:inherit; color:var(--tx); background:#0d0f14;
+                  border:1px solid var(--acc); border-radius:5px; padding:1px 5px; outline:none; }
+  /* 確認ポップアップ(戻せない操作だけに出す) */
+  #cfovl { position:fixed; inset:0; background:#000000a6; z-index:40; display:flex; align-items:center; justify-content:center; }
+  #cfovl .box { width:min(440px, 92vw); background:var(--bg2,#14161c); border:1px solid #2a2d38; border-radius:14px;
+                padding:16px 18px; box-shadow:0 20px 60px #000b; }
+  #cfovl .t { font-size:14px; font-weight:600; color:var(--tx); display:flex; align-items:center; gap:7px; }
+  #cfovl .b { margin-top:10px; font-size:12px; line-height:1.7; color:var(--tx); }
+  #cfovl .b .sub { color:var(--faint); font-size:11px; }
+  #cfovl .a { margin-top:16px; display:flex; gap:8px; justify-content:flex-end; }
+  #cfovl button.danger { background:#a33333; border:1px solid #c04b4b; color:#fff; }
 </style>
 
 <aside id="side">
   <div id="sideresize" title="ドラッグで幅を変える(ダブルクリックで既定に戻す)"></div>
   <div class="brand">fluent_gallery</div>
   <div id="nav_lib"></div>
-  <div class="sec" style="cursor:pointer" onclick="toggleFold('/folders')">フォルダ <span id="fold_folders_ic"></span><span class="add" id="addfolder" title="新規フォルダ(空で生まれます)"></span></div>
+  <div class="sec" style="cursor:pointer" onclick="toggleFold('/folders')"
+       title="ここへ落とすと一番上の階層へ移動します"
+       ondragover="navOver(event, 'root', '')" ondragleave="navLeave(event)" ondrop="navDrop(event, 'root', '')">フォルダ <span id="fold_folders_ic"></span><span class="add" id="addfolder" title="新規フォルダ(空で生まれます)"></span></div>
   <div id="nav_folders"></div>
   <div id="nav_sources_sec"></div>
   <div class="sec">出荷 — データセット</div>
@@ -512,6 +534,8 @@ const I = {
   grid3:'<rect x="4" y="4" width="4.5" height="4.5" rx="1"/><rect x="10" y="4" width="4.5" height="4.5" rx="1"/><rect x="16" y="4" width="4.5" height="4.5" rx="1"/><rect x="4" y="10" width="4.5" height="4.5" rx="1"/><rect x="10" y="10" width="4.5" height="4.5" rx="1"/><rect x="16" y="10" width="4.5" height="4.5" rx="1"/><rect x="4" y="16" width="4.5" height="4.5" rx="1"/><rect x="10" y="16" width="4.5" height="4.5" rx="1"/><rect x="16" y="16" width="4.5" height="4.5" rx="1"/>',
   grid2:'<rect x="4" y="4" width="7" height="7" rx="1.2"/><rect x="13" y="4" width="7" height="7" rx="1.2"/><rect x="4" y="13" width="7" height="7" rx="1.2"/><rect x="13" y="13" width="7" height="7" rx="1.2"/>',
   grid1:'<rect x="4" y="4" width="16" height="16" rx="2"/>',
+  pen:'<path d="M4 20h4l10-10a2.1 2.1 0 0 0-3-3L5 17z"/><path d="M13.5 6.5l4 4"/>',
+  merge:'<path d="M7 21V9a4 4 0 0 1 4-4h6"/><path d="M13.5 1.5 17.5 5l-4 3.5"/><path d="M7 13h4a4 4 0 0 0 4-4"/>',
   none:'',
 };
 function ic(name, size = 15) {
@@ -644,14 +668,22 @@ function buildTree(list) {
   }
   return root;
 }
-function treeHtml(node, item, depth = 0, key = '') {
+// kind='folder' のグループ行だけ、掴んで動かせる/名前を変えられる(データセットの棚は読み取り専用)
+function treeHtml(node, item, depth = 0, key = '', kind = '') {
   let h = '';
   for (const name of Object.keys(node.f).sort()) {
-    const k = key + '/' + name, open = !folded.has(k);
-    h += `<div class="nav" style="padding-left:${10 + depth * 13}px" onclick="toggleFold('${k.replace(/'/g, "\\'")}')">
-      ${ic(open ? 'chevD' : 'chevR', 13)}<span class="nm" style="color:var(--faint)">${esc(name)}</span>
-      <span class="del" title="この中に新規フォルダを作る" onclick="event.stopPropagation(); newInFolder('${k.slice(1).replace(/'/g, "\\'")}')">${ic('plus', 12)}</span></div>`;
-    if (open) h += treeHtml(node.f[name], item, depth + 1, k);
+    const k = key + '/' + name, open = !folded.has(k), path = k.slice(1);
+    const dnd = kind === 'folder'
+      ? ` data-grp="${esc(path)}" draggable="true" ondragstart="dragNav(event, 'group', this.dataset.grp)"
+         ondragend="dragEnd(event)" ondragover="navOver(event, 'group', this.dataset.grp)"
+         ondragleave="navLeave(event)" ondrop="navDrop(event, 'group', this.dataset.grp)"` : '';
+    h += `<div class="nav"${dnd} style="padding-left:${10 + depth * 13}px" onclick="toggleFold('${k.replace(/'/g, "\\'")}')">
+      ${ic(open ? 'chevD' : 'chevR', 13)}<span class="nm" style="color:var(--faint)"${
+        kind === 'folder' ? ` ondblclick="startRename(event, 'group', this.closest('.nav').dataset.grp)"` : ''}>${esc(name)}</span>` +
+      (kind === 'folder' ? `<span class="del" title="グループ名を変える(ダブルクリックでも)"
+        onclick="startRename(event, 'group', this.closest('.nav').dataset.grp)">${ic('pen', 12)}</span>` : '') +
+      `<span class="del" title="この中に新規フォルダを作る" onclick="event.stopPropagation(); newInFolder('${k.slice(1).replace(/'/g, "\\'")}')">${ic('plus', 12)}</span></div>`;
+    if (open) h += treeHtml(node.f[name], item, depth + 1, k, kind);
   }
   return h + node.items.map(it => item(it, depth)).join('');
 }
@@ -662,6 +694,7 @@ function splitPath(s) {
 }
 
 function renderSide() {
+  if (renaming) return; // 名前を書いている最中に描き替えると入力が消える
   $('nav_lib').innerHTML = LIB.map(l =>
     `<div class="nav" data-loc="lib:${l.key}" onclick="go({type:'lib', key:'${l.key}', criteria:${esc(JSON.stringify(l.criteria))}})">
       ${ic(l.icon)}<span class="nm">${l.label}</span><span class="n" id="n_${l.key}"></span></div>`).join('') +
@@ -671,12 +704,15 @@ function renderSide() {
   $('fold_folders_ic').innerHTML = ic(foldersOpen ? 'chevD' : 'chevR', 11);
   $('nav_folders').style.display = foldersOpen ? '' : 'none';
   $('nav_folders').innerHTML = treeHtml(buildTree(albumsCache), (a, d) =>
-    `<div class="nav" data-loc="folder:${esc(a.name)}" style="padding-left:${10 + d * 13}px" title="${esc(a.goal || 'スマートフォルダ(条件)')}"
+    `<div class="nav" data-loc="folder:${esc(a.name)}" data-album="${esc(a.name)}" style="padding-left:${10 + d * 13}px"
+       title="${esc(a.goal || 'スマートフォルダ(条件)')}\n掴んでグループへ=移動 / 他のフォルダへ=合流"
        data-dsrc="${esc(a.criteria?.source || (a.goal ? 'crawl:' + a.name : ''))}"
-       ondragover="if(this.dataset.dsrc){event.preventDefault(); this.classList.add('dropon')}"
-       ondragleave="this.classList.remove('dropon')" ondrop="dropShas(event, this.dataset.dsrc)"
-       onclick="openFolder('${esc(a.name)}')">
-      ${ic(a.goal ? 'bot' : 'smart')}<span class="nm">${esc(a.name)}</span>
+       draggable="true" ondragstart="dragNav(event, 'album', this.dataset.album)" ondragend="dragEnd(event)"
+       ondragover="navOver(event, 'album', this.dataset.album)"
+       ondragleave="navLeave(event)" ondrop="navDrop(event, 'album', this.dataset.album)"
+       onclick="openFolder(this.dataset.album)">
+      ${ic(a.goal ? 'bot' : 'smart')}<span class="nm"
+        ondblclick="startRename(event, 'album', this.closest('.nav').dataset.album)">${esc(a.name)}</span>
       ${a.running ? `<span class="st">${ic('play', 11)}</span>` : (a.agent?.auto ? `<span class="st">${ic('loop', 11)}</span>` : '')}
       <span class="n">${(a.agent?.spent_usd || 0) > 0
         ? `${a.count ?? 0} · <span style="color:#e5c07b; cursor:pointer" onclick="cycleCostMode(event)"
@@ -685,8 +721,10 @@ function renderSide() {
         a.last_run?.ingested > 0 && a.last_run.ts > (seenMap[seenKey(a)] || 0)
           ? ` <b style="color:var(--ok)" title="前回見てから増えた分">+${a.last_run.ingested}</b>` : ''}</span>
       <span class="del" title="この中に新規フォルダを作る" onclick="event.stopPropagation(); newInFolder('${esc((a.folder ? a.folder + '/' : '') + a.name)}')">${ic('plus', 12)}</span>
+      <span class="del" title="名前を変える(ダブルクリックでも)"
+        onclick="startRename(event, 'album', this.closest('.nav').dataset.album)">${ic('pen', 12)}</span>
       <span class="del" title="レシピごと複製(目標を書き換えて増殖)" onclick="event.stopPropagation(); copyAlbum('${esc(a.name)}')">${ic('copy', 12)}</span>
-      <span class="del" onclick="event.stopPropagation(); delAlbum('${esc(a.name)}')">${ic('x', 12)}</span></div>`)
+      <span class="del" onclick="event.stopPropagation(); delAlbum('${esc(a.name)}')">${ic('x', 12)}</span></div>`, 0, '', 'folder')
     || '<div class="nav" style="pointer-events:none"><span class="nm sub">＋で新規フォルダ</span></div>';
   // 💰フォルダ合計(各フォルダの累計使用額の総和)を一覧の下に常時表示
   const spentSum = albumsCache.reduce((t, a) => t + (a.agent?.spent_usd || 0), 0);
@@ -702,8 +740,8 @@ function renderSide() {
       <span class="add" title="ディレクトリ取り込み" onclick="event.stopPropagation(); openIngest()">${ic('upload', 13)}</span></div>` +
     (open ? srcs.map(([s, n]) =>
       `<div class="nav" data-loc="source:${esc(s)}" data-dsrc="${esc(s)}"
-        ondragover="event.preventDefault(); this.classList.add('dropon')" ondragleave="this.classList.remove('dropon')"
-        ondrop="dropShas(event, this.dataset.dsrc)"
+        ondragover="navOver(event, 'source', this.dataset.dsrc)" ondragleave="navLeave(event)"
+        ondrop="navDrop(event, 'source', this.dataset.dsrc)"
         onclick="go({type:'source', key:'${esc(s)}', criteria:{source:'${esc(s)}'}})">
         ${ic(s.startsWith('crawl') ? 'globe' : s.includes('gen') ? 'spark' : 'upload', 13)}
         <span class="nm" title="${esc(s)}">${esc(s)}</span><span class="n">${n}</span>
@@ -762,6 +800,195 @@ async function dropShas(ev, source) {
     toast(`${r.moved}枚を「${source.replace(/^crawl:/, '')}」へ移動しました`);
     sel.clear(); refreshFacets(); loadAlbums(); reload();
   } catch (e) { toast('❌ 移動失敗: ' + e.message); }
+}
+
+// ================= サイドバーの整理: 改名 / D&D移動 / 合流(2026-09-04) =================
+// 掴んでいる物はJS変数で覚える(dragover中はdataTransferの中身を読めないブラウザ仕様のため)
+let dragNav_ = null;
+let renaming = null; // 改名中はサイドバーを描き替えない目印
+function dragNav(ev, kind, key) {
+  if (renaming) { ev.preventDefault(); return; }
+  dragNav_ = {kind, key};
+  ev.dataTransfer.setData(kind === 'group' ? 'text/group' : 'text/album', key);
+  ev.dataTransfer.effectAllowed = 'move';
+  ev.currentTarget.classList.add('dragging');
+  ev.stopPropagation();
+}
+function dragEnd(ev) {
+  dragNav_ = null;
+  ev.currentTarget.classList.remove('dragging');
+  document.querySelectorAll('.dropon, .mergeon').forEach(e => e.classList.remove('dropon', 'mergeon'));
+}
+function albumFolder(name) { return albumsCache.find(x => x.name === name)?.folder || ''; }
+function parentOf(path) { return path.split('/').slice(0, -1).join('/'); }
+// 落とせるか+何になるか。落とせる時だけカーソルが「置ける」に変わる(できない所に落とせる嘘をつかない)
+function dropKind(target, key) {
+  const d = dragNav_;
+  if (!d) return null;
+  if (d.kind === 'album') {
+    if (target === 'source') return null;                          // 取り込み元は自動グループ(受け皿ではない)
+    if (target === 'album') return d.key === key ? null : 'merge'; // フォルダ→フォルダ = 合流
+    return albumFolder(d.key) === (target === 'root' ? '' : key) ? null : 'move';
+  }
+  if (d.kind === 'group') {
+    if (target === 'album' || target === 'source') return null;    // グループはフォルダの中に入らない
+    const to = target === 'root' ? '' : key;
+    if (to === d.key || to.startsWith(d.key + '/')) return null;   // 自分の中へは移せない
+    if (parentOf(d.key) === to) return null;                       // すでにそこにいる
+    return 'move';
+  }
+  return null;
+}
+function navOver(ev, target, key) {
+  if (dragNav_) {
+    const k = dropKind(target, key);
+    if (!k) return;
+    ev.preventDefault();
+    ev.currentTarget.classList.add(k === 'merge' ? 'mergeon' : 'dropon');
+    return;
+  }
+  if (!ev.currentTarget.dataset.dsrc) return; // 画像のD&D: バケツを持つ行だけ受ける(従来どおり)
+  ev.preventDefault();
+  ev.currentTarget.classList.add('dropon');
+}
+function navLeave(ev) { ev.currentTarget.classList.remove('dropon', 'mergeon'); }
+function navDrop(ev, target, key) {
+  ev.preventDefault(); ev.stopPropagation();
+  ev.currentTarget.classList.remove('dropon', 'mergeon');
+  const d = dragNav_;
+  if (!d) return dropShas(ev, ev.currentTarget.dataset.dsrc); // 画像の移動(従来)
+  const k = dropKind(target, key);
+  dragNav_ = null;
+  if (!k) return;
+  if (k === 'merge') return mergeAlbums(d.key, key);
+  const to = target === 'root' ? '' : key;
+  return d.kind === 'album' ? moveAlbum(d.key, to) : moveGroup(d.key, to);
+}
+async function moveAlbum(name, folder) {
+  try {
+    await j('/api/albums/' + encodeURIComponent(name) + '/move', {method: 'POST',
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify({folder})});
+    toast(`「${name}」を${folder ? `「${folder}」の中へ` : '一番上へ'}移しました`);
+    await loadAlbums();
+  } catch (e) { toast('❌ ' + e.message); }
+}
+async function moveGroup(from, toParent) {
+  const to = (toParent ? toParent + '/' : '') + from.split('/').pop();
+  try {
+    const r = await j('/api/folders/rename', {method: 'POST',
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify({from, to})});
+    refoldPrefix(from, r.to || to);
+    toast(`グループ「${from.split('/').pop()}」を${toParent ? `「${toParent}」の中へ` : '一番上へ'}移しました(${r.changed}個)`);
+    await loadAlbums();
+  } catch (e) { toast('❌ ' + e.message); }
+}
+// 開いている/畳んでいるの記憶も名前について行かせる(移動後に勝手に畳まれない)
+function refoldPrefix(from, to) {
+  const a = '/' + from, b = to ? '/' + to : '';
+  const next = new Set();
+  for (const k of folded) next.add(k === a ? b : (k.startsWith(a + '/') ? b + k.slice(a.length) : k));
+  folded = next;
+  localStorage.setItem('fg_fold', JSON.stringify([...folded]));
+}
+
+// ---- インライン改名(prompt禁止=憲法5条。その場で書き換えてEnter/フォーカスアウトで確定、Escで取消) ----
+function startRename(ev, kind, key) {
+  ev.stopPropagation(); ev.preventDefault();
+  const row = ev.currentTarget.closest('.nav');
+  const nm = row?.querySelector('.nm');
+  if (!nm || renaming) return;
+  renaming = {kind, key};
+  row.draggable = false;
+  nm.textContent = '';
+  const inp = document.createElement('input');
+  inp.className = 'rn';
+  inp.value = kind === 'group' ? key.split('/').pop() : key;
+  inp.spellcheck = false;
+  nm.appendChild(inp);
+  const stop = e => e.stopPropagation();
+  inp.onclick = stop; inp.onmousedown = stop; inp.ondblclick = stop;
+  inp.onkeydown = e => {
+    e.stopPropagation(); // グリッドのキーボード操作に食われない
+    if (e.key === 'Enter') { e.preventDefault(); inp.blur(); }
+    else if (e.key === 'Escape') { e.preventDefault(); inp.dataset.cancel = '1'; inp.blur(); }
+  };
+  inp.onblur = () => endRename(inp, kind, key);
+  inp.focus(); inp.select();
+}
+async function endRename(inp, kind, key) {
+  if (inp.dataset.done) return; // Enter→blur で二重に走らせない
+  inp.dataset.done = '1';
+  const v = inp.value.trim(), cancelled = inp.dataset.cancel === '1';
+  const cur = kind === 'group' ? key.split('/').pop() : key;
+  renaming = null;
+  if (cancelled || !v || v === cur) { renderSide(); return; }
+  try {
+    if (kind === 'album') {
+      const r = await j('/api/albums/' + encodeURIComponent(key) + '/rename', {method: 'POST',
+        headers: {'Content-Type': 'application/json'}, body: JSON.stringify({to: v})});
+      toast(`「${key}」→「${r.name}」に変更${r.moved ? `(中身${r.moved}枚も一緒に引っ越し)` : ''}`);
+      await loadAlbums();
+      if (loc.type === 'folder' && loc.key === key) openFolder(r.name);
+    } else {
+      const to = (parentOf(key) ? parentOf(key) + '/' : '') + v;
+      const r = await j('/api/folders/rename', {method: 'POST',
+        headers: {'Content-Type': 'application/json'}, body: JSON.stringify({from: key, to})});
+      refoldPrefix(key, r.to || to);
+      toast(`グループ「${cur}」→「${v}」に変更(${r.changed}個のフォルダ)`);
+      await loadAlbums();
+    }
+  } catch (e) { toast('❌ ' + e.message); renderSide(); }
+}
+
+// ---- 確認ポップアップ(ネイティブconfirm禁止=憲法5条。戻すのが大変な操作にだけ出す) ----
+function confirmBox({title, body, ok = 'OK', danger = false, icon = 'merge'}) {
+  return new Promise(resolve => {
+    $('cfovl')?.remove();
+    const ovl = document.createElement('div');
+    ovl.id = 'cfovl';
+    ovl.innerHTML = `<div class="box"><div class="t">${ic(icon, 15)}${title}</div>
+      <div class="b">${body}</div>
+      <div class="a"><button class="ghost" data-no>やめる</button>
+        <button class="${danger ? 'danger' : 'pri'}" data-yes>${ok}</button></div></div>`;
+    const key = e => {
+      if (e.key !== 'Escape' && e.key !== 'Enter') return;
+      e.preventDefault(); e.stopPropagation();
+      done(e.key === 'Enter');
+    };
+    const done = v => { document.removeEventListener('keydown', key, true); ovl.remove(); resolve(v); };
+    ovl.onclick = e => { if (e.target === ovl) done(false); };
+    ovl.querySelector('[data-no]').onclick = () => done(false);
+    ovl.querySelector('[data-yes]').onclick = () => done(true);
+    document.addEventListener('keydown', key, true);
+    document.body.appendChild(ovl);
+    // 危ない方のボタンにフォーカスを置かない(Enterは効くがカーソルは中立)
+    const box = ovl.querySelector('.box');
+    box.tabIndex = -1; box.style.outline = 'none'; box.focus();
+  });
+}
+
+// ---- 合流(フォルダに別のフォルダを落とす) ----
+async function mergeAlbums(from, into) {
+  const a = albumsCache.find(x => x.name === from), b = albumsCache.find(x => x.name === into);
+  if (!a || !b) return;
+  const na = a.count ?? 0, nb = b.count ?? 0;
+  const ok = await confirmBox({
+    title: 'フォルダを合流しますか?',
+    body: `<b>${esc(from)}</b>(${na}枚)の中身を <b>${esc(into)}</b>(${nb}枚)へ移します。<br>
+      合流後は <b>${esc(into)}</b> が <b>${na + nb}枚</b>、<b>${esc(from)}</b> は無くなります。<br><br>
+      <span class="sub">画像は1枚も消えません(置き場所が変わるだけ)。集めた履歴・キーワード・使ったコストも引き継ぎます。
+      元に戻すには、また分けて集め直す必要があります。</span>`,
+    ok: '合流する', danger: true});
+  if (!ok) return;
+  try {
+    const r = await j('/api/albums/merge', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({from, into})});
+    toast(`${r.moved}枚を「${into}」へ合流しました`);
+    const wasHere = loc.type === 'folder' && loc.key === from;
+    await loadAlbums();
+    refreshFacets();
+    if (wasHere) openFolder(into); else reload();
+  } catch (e) { toast('❌ ' + e.message); }
 }
 $('searchico').innerHTML = ic('search', 14);
 $('fitbtn').innerHTML = ic('img', 14);

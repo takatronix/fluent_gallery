@@ -163,12 +163,105 @@ const check = (name, ok, detail = '') => {
   });
   check('連続削除(5連打)', del.start - del.end === 5, `${del.start}→${del.end}`);
 
+  // 10) フォルダ改名: 名前を変えると中身(画像のsource)も一緒に引っ越す
+  const ren = await p.evaluate(async () => {
+    const mk = (name, folder) => fetch('/api/albums', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name, folder, goal: '', criteria: {source: 'crawl:' + name}, agent: {}, keywords: [], engines: []})});
+    await mk('_uitest', '');
+    await mk('_uitest_b', '_uitest棚');
+    await loadAlbums();
+    const before = (await (await fetch('/api/images?limit=1&source=crawl%3A_uitest')).json()).total;
+    const row = document.querySelector('.nav[data-album="_uitest"]');
+    row.querySelector('.nm').dispatchEvent(new MouseEvent('dblclick', {bubbles: true}));
+    const inp = row.querySelector('input.rn');
+    const shown = !!inp;
+    inp.value = '_uitest2';
+    inp.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true}));
+    await until(() => albumsCache.some(a => a.name === '_uitest2'), 15000);
+    const after = (await (await fetch('/api/images?limit=1&source=crawl%3A_uitest2')).json()).total;
+    return {shown, before, after, gone: !albumsCache.some(a => a.name === '_uitest')};
+  });
+  check('フォルダ改名(中身ごと引っ越す)', ren.shown && ren.gone && ren.before > 0 && ren.after === ren.before,
+    `${ren.before}枚→${ren.after}枚`);
+
+  // 11) D&Dでグループへ移動
+  const dnd = await p.evaluate(async () => {
+    const drag = (fromSel, toSel) => {
+      const dt = new DataTransfer();
+      const a = document.querySelector(fromSel), b = document.querySelector(toSel);
+      a.dispatchEvent(new DragEvent('dragstart', {bubbles: true, dataTransfer: dt}));
+      b.dispatchEvent(new DragEvent('dragover', {bubbles: true, dataTransfer: dt}));
+      const lit = b.classList.contains('dropon') || b.classList.contains('mergeon');
+      b.dispatchEvent(new DragEvent('drop', {bubbles: true, dataTransfer: dt}));
+      a.dispatchEvent(new DragEvent('dragend', {bubbles: true, dataTransfer: dt}));
+      return lit;
+    };
+    const lit = drag('.nav[data-album="_uitest2"]', '.nav[data-grp="_uitest棚"]');
+    await until(() => albumsCache.find(a => a.name === '_uitest2')?.folder === '_uitest棚', 8000);
+    const moved = albumsCache.find(a => a.name === '_uitest2')?.folder;
+    // 12) グループ改名: 中のフォルダのパスが全部ついてくる
+    const g = document.querySelector('.nav[data-grp="_uitest棚"]');
+    g.querySelector('.nm').dispatchEvent(new MouseEvent('dblclick', {bubbles: true}));
+    const gi = g.querySelector('input.rn');
+    gi.value = '_uitest棚2';
+    gi.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true}));
+    await until(() => albumsCache.filter(a => a.folder === '_uitest棚2').length === 2, 8000);
+    return {lit, moved, renamed: albumsCache.filter(a => a.folder === '_uitest棚2').map(a => a.name).sort()};
+  });
+  check('D&Dでグループへ移動', dnd.lit && dnd.moved === '_uitest棚', `folder=${dnd.moved}`);
+  check('グループ改名(中のフォルダごと)', dnd.renamed.length === 2, dnd.renamed.join(','));
+
+  // 13) 合流: 確認ポップアップ→やめるで何も起きない→もう一度で合流(画像は消えない)
+  const mg = await p.evaluate(async () => {
+    const dropAlbum = () => {
+      const dt = new DataTransfer();
+      const a = document.querySelector('.nav[data-album="_uitest2"]');
+      const b = document.querySelector('.nav[data-album="_uitest_b"]');
+      a.dispatchEvent(new DragEvent('dragstart', {bubbles: true, dataTransfer: dt}));
+      b.dispatchEvent(new DragEvent('dragover', {bubbles: true, dataTransfer: dt}));
+      const warn = b.classList.contains('mergeon');
+      b.dispatchEvent(new DragEvent('drop', {bubbles: true, dataTransfer: dt}));
+      a.dispatchEvent(new DragEvent('dragend', {bubbles: true, dataTransfer: dt}));
+      return warn;
+    };
+    const warn = dropAlbum();
+    await until(() => !!$('cfovl'), 4000);
+    const popup = !!$('cfovl');
+    $('cfovl').querySelector('[data-no]').click();          // やめる
+    await new Promise(r => setTimeout(r, 400));
+    const cancelled = !$('cfovl') && albumsCache.some(a => a.name === '_uitest2');
+    // 前段の連続削除がまだ落ちきっていないと枚数が動く(偽の失敗になる)ので、止まるまで待つ
+    const count = async src => (await (await fetch('/api/images?limit=1&source=' + encodeURIComponent(src))).json()).total;
+    let before = await count('crawl:_uitest2');
+    for (let k = 0; k < 20; k++) {
+      await new Promise(r => setTimeout(r, 400));
+      const now = await count('crawl:_uitest2');
+      if (now === before) break;
+      before = now;
+    }
+    dropAlbum();
+    await until(() => !!$('cfovl'), 4000);
+    $('cfovl').querySelector('[data-yes]').click();         // 合流する
+    await until(() => !albumsCache.some(a => a.name === '_uitest2'), 15000);
+    const after = await count('crawl:_uitest_b');
+    const leftover = await count('crawl:_uitest2'); // 元のバケツに置き去りが無いこと
+    return {warn, popup, cancelled, before, after, leftover, gone: !albumsCache.some(a => a.name === '_uitest2')};
+  });
+  check('合流の確認ポップアップ(やめる=無変更)', mg.warn && mg.popup && mg.cancelled);
+  check('合流(画像は消えず移る)', mg.gone && mg.before > 0 && mg.after === mg.before && mg.leftover === 0,
+    `${mg.before}枚→${mg.after}枚 置き去り${mg.leftover}`);
+
   check('JSエラーなし', jsErrors.length === 0, jsErrors.slice(0, 3).join(' | '));
   await b.close();
 
   // 掃除(テストソースごとゴミ箱へ)
-  await fetch(BASE + '/api/source/trash', {method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({source: 'crawl:_uitest'})});
+  for (const src of ['crawl:_uitest', 'crawl:_uitest2', 'crawl:_uitest_b']) {
+    await fetch(BASE + '/api/source/trash', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({source: src})});
+  }
+  for (const al of ['_uitest', '_uitest2', '_uitest_b']) {
+    await fetch(BASE + '/api/albums/' + al, {method: 'DELETE'});
+  }
 
   const ng = results.filter(r => !r.ok);
   console.log(ng.length ? `\n❌ ${ng.length}件失敗 — デプロイ禁止` : '\n✅ 全部通過 — デプロイOK');

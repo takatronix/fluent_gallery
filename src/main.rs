@@ -1199,6 +1199,252 @@ async fn api_album_del(State(app): S, AxPath(name): AxPath<String>) -> impl Into
     Json(json!({"ok": true})).into_response()
 }
 
+// ---------- フォルダの整理: 改名 / 移動 / 合流(2026-09-04) ----------
+// 名前はAIフォルダの持ち物の鍵(画像のsource="crawl:<name>" / 収集台帳 / 顔ID登録)。
+// 改名では鍵を全部まとめて付け替える(片方だけ変えると画像が迷子になる)。
+
+fn album_path(root: &std::path::Path, name: &str) -> PathBuf {
+    album_dir(root).join(format!("{}.json", album_slug(name)))
+}
+fn load_album(root: &std::path::Path, name: &str) -> Option<Value> {
+    std::fs::read_to_string(album_path(root, name)).ok().and_then(|t| serde_json::from_str(&t).ok())
+}
+fn save_album(root: &std::path::Path, rec: &Value) -> bool {
+    let _ = std::fs::create_dir_all(album_dir(root));
+    let name = rec["name"].as_str().unwrap_or("");
+    !name.is_empty()
+        && std::fs::write(album_path(root, name), serde_json::to_string_pretty(rec).unwrap()).is_ok()
+}
+fn ledger_file(root: &std::path::Path, name: &str) -> PathBuf {
+    root.join("store/crawl").join(format!("{}.ledger.json", album_slug(name)))
+}
+/// 収集中/順番待ちのフォルダは触らせない(走っている足元の床は張り替えない)
+fn album_busy(app: &App, name: &str) -> bool {
+    let slug = album_slug(name);
+    let running = app.crawl.alive.load(Relaxed) && album_slug(&app.crawl.album.lock().unwrap()) == slug;
+    running || app.crawl_queue.lock().unwrap().iter().any(|c| album_slug(&c.album) == slug)
+}
+fn err_json(code: StatusCode, msg: &str) -> axum::response::Response {
+    (code, Json(json!({"detail": msg}))).into_response()
+}
+/// 指定shaのsourceを付け替える(DB+サイドカーの両方。片方だけだと再構築で元に戻る)
+fn retag_shas(root: &std::path::Path, db: &Connection, shas: &[String], to: &str) -> usize {
+    let origin = store::infer_origin(to);
+    let mut n = 0usize;
+    for sha in shas {
+        if db.execute("UPDATE images SET source=?1, origin=?2 WHERE sha1=?3",
+                      rusqlite::params![to, origin, sha]).unwrap_or(0) > 0 {
+            if let Some(mut m) = store::load_meta(root, sha) {
+                m["source"] = json!(to);
+                m["origin"] = json!(origin);
+                let _ = store::save_meta(root, &m);
+            }
+            n += 1;
+        }
+    }
+    n
+}
+fn retag_source(root: &std::path::Path, from: &str, to: &str) -> usize {
+    let db = match Connection::open(root.join("store/index.sqlite")) { Ok(d) => d, Err(_) => return 0 };
+    store::ensure_schema(&db);
+    let shas: Vec<String> = db
+        .prepare("SELECT sha1 FROM images WHERE source=?1")
+        .ok()
+        .and_then(|mut st| st.query_map([from], |r| r.get::<_, String>(0)).ok().map(|rs| rs.flatten().collect()))
+        .unwrap_or_default();
+    retag_shas(root, &db, &shas, to)
+}
+
+#[derive(Deserialize)]
+struct AlbumRenameIn { to: String }
+
+async fn api_album_rename(State(app): S, AxPath(name): AxPath<String>, Json(p): Json<AlbumRenameIn>) -> impl IntoResponse {
+    let old = album_slug(&name);
+    if p.to.trim().is_empty() {
+        return err_json(StatusCode::BAD_REQUEST, "新しい名前をください");
+    }
+    let new = album_slug(p.to.trim());
+    let mut rec = match load_album(&app.root, &old) {
+        Some(r) => r,
+        None => return err_json(StatusCode::NOT_FOUND, "フォルダが見つかりません"),
+    };
+    if new == old {
+        return Json(json!({"ok": true, "name": old, "moved": 0})).into_response();
+    }
+    if album_path(&app.root, &new).exists() {
+        return err_json(StatusCode::CONFLICT, "その名前のフォルダはもうあります");
+    }
+    if album_busy(app, &old) {
+        return err_json(StatusCode::CONFLICT, "収集中(または順番待ち)のフォルダは名前を変えられません。止めてからどうぞ");
+    }
+    let old_src = format!("crawl:{old}");
+    let new_src = format!("crawl:{new}");
+    // 自分のバケツ(crawl:<自分の名前>)を持つフォルダだけ、中身のsourceも一緒に引っ越す
+    let owns = rec["criteria"]["source"].as_str() == Some(old_src.as_str());
+    rec["name"] = json!(new);
+    if owns { rec["criteria"]["source"] = json!(new_src.clone()); }
+    if !save_album(&app.root, &rec) {
+        return err_json(StatusCode::INTERNAL_SERVER_ERROR, "保存に失敗しました");
+    }
+    let _ = std::fs::remove_file(album_path(&app.root, &old));
+    let _ = std::fs::rename(ledger_file(&app.root, &old), ledger_file(&app.root, &new)); // 既読台帳も名前について行く
+    {
+        let db = app.db.lock().unwrap();
+        let _ = db.execute("UPDATE faces SET album=?1 WHERE album=?2", rusqlite::params![new, old]);
+    }
+    let moved = if owns {
+        let root = app.root.clone();
+        tokio::task::spawn_blocking(move || retag_source(&root, &old_src, &new_src)).await.unwrap_or(0)
+    } else { 0 };
+    Json(json!({"ok": true, "name": new, "moved": moved})).into_response()
+}
+
+#[derive(Deserialize)]
+struct AlbumMoveIn { #[serde(default)] folder: String }
+
+/// D&D: フォルダをグループへ入れる/外へ出す(folderは表示上の棚だけ。中身は動かない)
+async fn api_album_move(State(app): S, AxPath(name): AxPath<String>, Json(p): Json<AlbumMoveIn>) -> impl IntoResponse {
+    let slug = album_slug(&name);
+    let mut rec = match load_album(&app.root, &slug) {
+        Some(r) => r,
+        None => return err_json(StatusCode::NOT_FOUND, "フォルダが見つかりません"),
+    };
+    let folder = folder_norm(&p.folder);
+    rec["folder"] = json!(folder);
+    if !save_album(&app.root, &rec) {
+        return err_json(StatusCode::INTERNAL_SERVER_ERROR, "保存に失敗しました");
+    }
+    Json(json!({"ok": true, "name": slug, "folder": folder})).into_response()
+}
+
+#[derive(Deserialize)]
+struct FolderRenameIn { from: String, #[serde(default)] to: String }
+
+/// グループ(ツリーの中間ノード)の改名と移動。実体は各フォルダのfolderパスの前方一致置換
+async fn api_folder_rename(State(app): S, Json(p): Json<FolderRenameIn>) -> impl IntoResponse {
+    let from = folder_norm(&p.from);
+    let to = folder_norm(&p.to);
+    if from.is_empty() {
+        return err_json(StatusCode::BAD_REQUEST, "元のグループがありません");
+    }
+    if to == from {
+        return Json(json!({"ok": true, "changed": 0, "to": to})).into_response();
+    }
+    if to.starts_with(&format!("{from}/")) {
+        return err_json(StatusCode::BAD_REQUEST, "自分の中へは移せません");
+    }
+    let prefix = format!("{from}/");
+    let mut changed = 0usize;
+    for a in load_albums(&app.root) {
+        let cur = a["folder"].as_str().unwrap_or("").to_string();
+        let next = if cur == from {
+            to.clone()
+        } else if let Some(rest) = cur.strip_prefix(&prefix) {
+            if to.is_empty() { rest.to_string() } else { format!("{to}/{rest}") }
+        } else {
+            continue;
+        };
+        let mut rec = a.clone();
+        rec["folder"] = json!(folder_norm(&next));
+        if save_album(&app.root, &rec) { changed += 1; }
+    }
+    Json(json!({"ok": true, "changed": changed, "to": to})).into_response()
+}
+
+#[derive(Deserialize)]
+struct AlbumMergeIn { from: String, into: String }
+
+/// 合流: 元フォルダの中身を移動先のバケツへ移し、元フォルダ(条件と台帳)を畳む。画像は1枚も消えない
+async fn api_album_merge(State(app): S, Json(p): Json<AlbumMergeIn>) -> impl IntoResponse {
+    let from = album_slug(&p.from);
+    let into = album_slug(&p.into);
+    if from == into {
+        return err_json(StatusCode::BAD_REQUEST, "同じフォルダ同士は合流できません");
+    }
+    let src = match load_album(&app.root, &from) {
+        Some(r) => r,
+        None => return err_json(StatusCode::NOT_FOUND, "元のフォルダが見つかりません"),
+    };
+    let mut dst = match load_album(&app.root, &into) {
+        Some(r) => r,
+        None => return err_json(StatusCode::NOT_FOUND, "移動先のフォルダが見つかりません"),
+    };
+    if album_busy(app, &from) || album_busy(app, &into) {
+        return err_json(StatusCode::CONFLICT, "収集中(または順番待ち)のフォルダは合流できません。止めてからどうぞ");
+    }
+    let dst_src = dst["criteria"]["source"].as_str().unwrap_or("").to_string();
+    if dst_src.is_empty() {
+        return err_json(StatusCode::BAD_REQUEST, "移動先が条件フォルダなので受け皿がありません。取り込み先を持つフォルダへ合流してください");
+    }
+    // 条件が空(=ライブラリ全体)のフォルダを吸わせると全画像が付け替わる事故になるので断る
+    let crit = src["criteria"].clone();
+    let has_cond = crit.as_object().map(|o| o.iter().any(|(_, v)| match v {
+        Value::String(s) => !s.is_empty(),
+        Value::Null => false,
+        _ => true,
+    })).unwrap_or(false);
+    if !has_cond {
+        return err_json(StatusCode::BAD_REQUEST, "元フォルダの条件が空(=ライブラリ全体)なので合流できません");
+    }
+    let q = match serde_json::from_value::<Q>(crit) {
+        Ok(q) => q,
+        Err(_) => return err_json(StatusCode::BAD_REQUEST, "元フォルダの条件が読めません"),
+    };
+    let shas = query_shas(app, &q);
+    let root = app.root.clone();
+    let target = dst_src.clone();
+    let moved = tokio::task::spawn_blocking(move || {
+        let db = match Connection::open(root.join("store/index.sqlite")) { Ok(d) => d, Err(_) => return 0 };
+        store::ensure_schema(&db);
+        retag_shas(&root, &db, &shas, &target)
+    })
+    .await
+    .unwrap_or(0);
+    // 既読台帳を合流(同じURL/クエリを二度拾いに行かない)
+    {
+        let rd = |p: PathBuf| -> Value {
+            std::fs::read_to_string(p).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(json!({}))
+        };
+        let (a, b) = (rd(ledger_file(&app.root, &from)), rd(ledger_file(&app.root, &into)));
+        let strs = |v: &Value, k: &str| -> Vec<String> {
+            v[k].as_array().map(|x| x.iter().filter_map(|s| s.as_str().map(String::from)).collect()).unwrap_or_default()
+        };
+        let mut queries = strs(&b, "queries");
+        for x in strs(&a, "queries") { if !queries.contains(&x) { queries.push(x); } }
+        let mut urls: std::collections::HashSet<String> = strs(&b, "urls").into_iter().collect();
+        urls.extend(strs(&a, "urls"));
+        let brief = match b["brief"].as_str().unwrap_or("") {
+            "" => a["brief"].as_str().unwrap_or("").to_string(),
+            s => s.to_string(),
+        };
+        let lp = ledger_file(&app.root, &into);
+        let _ = std::fs::create_dir_all(lp.parent().unwrap());
+        let _ = std::fs::write(&lp, serde_json::to_string(&json!({"queries": queries, "urls": urls, "brief": brief})).unwrap());
+    }
+    // キーワードと使用済みコストも引き継ぐ(合流で予算の記憶を失わない)
+    {
+        let mut kw: Vec<String> = dst["keywords"].as_array()
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+        for k in src["keywords"].as_array().unwrap_or(&vec![]).iter().filter_map(|x| x.as_str()) {
+            if !kw.iter().any(|e| e == k) { kw.push(k.to_string()); }
+        }
+        dst["keywords"] = json!(kw);
+        let usd = dst["agent"]["spent_usd"].as_f64().unwrap_or(0.0) + src["agent"]["spent_usd"].as_f64().unwrap_or(0.0);
+        let tok = dst["agent"]["spent_tok"].as_u64().unwrap_or(0) + src["agent"]["spent_tok"].as_u64().unwrap_or(0);
+        if !dst["agent"].is_object() { dst["agent"] = json!({}); }
+        dst["agent"]["spent_usd"] = json!((usd * 1000.0).round() / 1000.0);
+        dst["agent"]["spent_tok"] = json!(tok);
+    }
+    save_album(&app.root, &dst);
+    let _ = std::fs::remove_file(album_path(&app.root, &from));
+    let _ = std::fs::remove_file(ledger_file(&app.root, &from));
+    {
+        let db = app.db.lock().unwrap();
+        let _ = db.execute("UPDATE faces SET album=?1 WHERE album=?2", rusqlite::params![into, from]);
+    }
+    Json(json!({"ok": true, "moved": moved, "into": into})).into_response()
+}
+
 // ---------- M5 クローラ(AIフォルダの▶) ----------
 
 #[derive(Deserialize, Clone)]
@@ -2304,6 +2550,10 @@ async fn main() {
         .route("/trash/img/{sha1}", get(trash_img))
         .route("/api/albums", post(api_album_make).get(api_albums))
         .route("/api/albums/{name}", delete(api_album_del))
+        .route("/api/albums/{name}/rename", post(api_album_rename))
+        .route("/api/albums/{name}/move", post(api_album_move))
+        .route("/api/albums/merge", post(api_album_merge))
+        .route("/api/folders/rename", post(api_folder_rename))
         .route("/api/prune", post(api_prune))
         .route("/api/crawl", post(api_crawl))
         .route("/api/crawl/status", get(api_crawl_status))
