@@ -214,7 +214,8 @@
   @keyframes lbin { from { opacity:0; } }
   #lb img#lbimg { max-width:94vw; max-height:74vh; border-radius:8px; box-shadow:0 24px 70px #000;
         cursor:zoom-out; animation:lbimg .3s cubic-bezier(.2,.9,.3,1); transition:filter .18s ease;
-        touch-action:none; user-select:none; -webkit-user-drag:none; }
+        touch-action:none; user-select:none; -webkit-user-drag:none;
+        object-fit:contain; } /* 箱と中身の縦横比が食い違っても絶対に引き伸ばさない(アスペクト崩れの構造的封じ 2026-09-03) */
   @keyframes lbimg { from { transform:scale(.92); opacity:.5; } }
   #lbinfo { position:absolute; top:14px; left:14px; z-index:2; max-width:320px; cursor:default;
             background:#000000b8; border:1px solid #ffffff1a; border-radius:10px;
