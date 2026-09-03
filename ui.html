@@ -1,0 +1,482 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>🖼 fluent_gallery</title>
+<style>
+  :root { --bg:#07090d; --panel:#10141c; --line:#1e2634; --tx:#e2e8f1; --dim:#78879a;
+          --acc:#3b82f6; --acc2:#8b5cf6; }
+  * { box-sizing:border-box; }
+  html { scroll-behavior:smooth; }
+  body { margin:0; background:var(--bg); color:var(--tx);
+         font:14px/1.6 -apple-system, "SF Pro Display", system-ui, sans-serif; }
+  ::selection { background:#3b82f688; }
+
+  /* ---- WebGPU流体ヘッダ ---- */
+  #hero { position:relative; height:148px; overflow:hidden; }
+  #gpu { position:absolute; inset:0; width:100%; height:100%; }
+  #hero .veil { position:absolute; inset:0; background:linear-gradient(180deg, transparent 20%, var(--bg)); }
+  #hero .inner { position:relative; z-index:2; max-width:1680px; margin:0 auto; padding:30px 26px 0;
+                 display:flex; align-items:baseline; gap:16px; flex-wrap:wrap; }
+  h1 { font-size:26px; margin:0; font-weight:800; letter-spacing:-.02em;
+       background:linear-gradient(90deg,#fff,#a5c8ff 60%,#c4b5fd); -webkit-background-clip:text;
+       background-clip:text; color:transparent; }
+  .sub { font-size:12px; color:var(--dim); }
+  .stat { margin-left:auto; font-size:13px; color:var(--dim); text-align:right; }
+  .stat b { color:var(--tx); font-variant-numeric:tabular-nums; font-size:15px; }
+
+  .wrap { max-width:1680px; margin:0 auto; padding:0 26px 90px; }
+
+  button { font:13px inherit; color:var(--tx); background:#1a2230; border:1px solid #2c3a50;
+           border-radius:11px; padding:8px 15px; cursor:pointer;
+           transition:transform .18s cubic-bezier(.2,.9,.25,1.2), background .18s, box-shadow .18s; }
+  button:hover { transform:translateY(-1.5px); box-shadow:0 6px 18px #0007; background:#212c3f; }
+  button:active { transform:translateY(0) scale(.97); }
+  button.primary { background:linear-gradient(135deg,#2563eb,#7c3aed); border:none; font-weight:700;
+                   box-shadow:0 4px 16px #2563eb44; }
+  button.primary:hover { box-shadow:0 8px 26px #2563eb66; }
+  button.ghost { background:transparent; border-color:transparent; }
+  input, select { background:var(--panel); color:var(--tx); border:1px solid var(--line);
+                  border-radius:11px; padding:8px 14px; font-size:13px; outline:none;
+                  transition:border-color .2s, box-shadow .2s; }
+  input:focus { border-color:var(--acc); box-shadow:0 0 0 3px #3b82f622; }
+
+  .toolbar { display:flex; gap:9px; align-items:center; flex-wrap:wrap; padding:14px 0 4px;
+             position:sticky; top:0; z-index:10; background:linear-gradient(180deg, var(--bg) 82%, transparent); }
+  .chips { display:flex; gap:6px; flex-wrap:wrap; padding:8px 0 14px; }
+  .chip { font-size:11.5px; padding:4px 12px; border-radius:999px; border:1px solid #263246;
+          background:#111722; color:#9fb2c8; cursor:pointer;
+          transition:all .18s cubic-bezier(.2,.9,.25,1.2); }
+  .chip:hover { transform:translateY(-1px); border-color:#3b82f688; color:#dbe6f5; }
+  .chip.on { background:linear-gradient(135deg,#2563eb,#7c3aed); border-color:transparent; color:#fff;
+             font-weight:700; transform:scale(1.05); box-shadow:0 3px 12px #2563eb55; }
+  .chip small { opacity:.55; margin-left:3px; }
+
+  /* ---- グリッド ---- */
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(158px,1fr)); gap:10px; }
+  .cell { position:relative; aspect-ratio:1; border-radius:14px; overflow:hidden; cursor:pointer;
+          background:var(--panel); opacity:0; transform:translateY(18px) scale(.96);
+          transition:opacity .5s ease, transform .55s cubic-bezier(.2,.9,.3,1),
+                     box-shadow .25s, outline-color .15s;
+          outline:2px solid transparent; outline-offset:-2px; }
+  .cell.in { opacity:1; transform:none; }
+  .cell:hover { transform:translateY(-4px) scale(1.025); box-shadow:0 14px 34px #000a; z-index:2; }
+  .cell img { width:100%; height:100%; object-fit:cover; display:block;
+              transition:transform .6s cubic-bezier(.2,.9,.3,1); }
+  .cell:hover img { transform:scale(1.07); }
+  .cell.sel { outline-color:var(--acc); }
+  .cell.sel::after { content:'✓'; position:absolute; top:7px; right:8px; width:22px; height:22px;
+                     background:linear-gradient(135deg,#2563eb,#7c3aed); border-radius:99px;
+                     display:flex; align-items:center; justify-content:center; font-size:12px;
+                     font-weight:800; color:#fff; animation:pop .28s cubic-bezier(.2,1.6,.4,1); }
+  @keyframes pop { from { transform:scale(0); } }
+  .cell .cap { position:absolute; inset-inline:0; bottom:0; padding:20px 9px 6px; font-size:10.5px;
+               color:#dbe6f5; background:linear-gradient(transparent,#000c);
+               transform:translateY(8px); opacity:0; transition:all .28s ease;
+               white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .cell:hover .cap { transform:none; opacity:1; }
+  .cell .novlm { position:absolute; top:7px; left:7px; font-size:9px; background:#0b0e13aa;
+                 backdrop-filter:blur(4px); border-radius:99px; padding:1px 8px; color:#93a3b5; }
+
+  /* ---- 選択バー ---- */
+  #selbar { position:fixed; bottom:18px; left:50%; transform:translate(-50%, 90px); z-index:15;
+            background:#141a26ee; border:1px solid #2c3a50; border-radius:18px;
+            backdrop-filter:blur(14px); padding:12px 18px; box-shadow:0 18px 50px #000b;
+            transition:transform .35s cubic-bezier(.2,.9,.3,1.1); width:min(860px, 94vw); }
+  #selbar.show { transform:translate(-50%, 0); }
+  #selbar .inner { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+
+  #enrichbar { display:none; background:var(--panel); border:1px solid #7c3aed55; border-radius:14px;
+               padding:10px 16px; margin-bottom:12px; font-size:13px;
+               box-shadow:inset 0 0 30px #7c3aed11; }
+  .pulse { display:inline-block; width:8px; height:8px; border-radius:99px; background:#a78bfa;
+           margin-right:8px; animation:pulse 1.2s ease infinite; }
+  @keyframes pulse { 50% { opacity:.3; transform:scale(.7); } }
+
+  /* ---- ライトボックス(モーフズーム) ---- */
+  #lb { position:fixed; inset:0; background:#000d; display:none; z-index:20; cursor:zoom-out;
+        align-items:center; justify-content:center; flex-direction:column; gap:12px;
+        backdrop-filter:blur(10px); }
+  #lb.show { display:flex; animation:lbin .25s ease; }
+  @keyframes lbin { from { opacity:0; } }
+  #lb img { max-width:92vw; max-height:78vh; border-radius:14px; box-shadow:0 30px 80px #000;
+            animation:lbimg .35s cubic-bezier(.2,.9,.3,1); }
+  @keyframes lbimg { from { transform:scale(.86); opacity:.4; } }
+  #lbmeta { max-width:88vw; font-size:12.5px; color:#b8c6d9; text-align:center; line-height:1.7; }
+  #lbmeta .tag { display:inline-block; background:#1a2230; border-radius:99px; padding:1px 10px;
+                 margin:2px 3px; font-size:11px; color:#9fb2c8; }
+
+  #toast { position:fixed; bottom:86px; left:50%; transform:translate(-50%, 20px); opacity:0;
+           background:linear-gradient(135deg,#2563eb,#7c3aed); color:#fff; padding:11px 26px;
+           border-radius:999px; font-size:13.5px; z-index:30; box-shadow:0 10px 34px #2563eb55;
+           transition:all .3s cubic-bezier(.2,.9,.3,1.2); pointer-events:none; }
+  #toast.show { transform:translate(-50%, 0); opacity:1; }
+  details { margin-top:18px; }
+  details summary { cursor:pointer; color:var(--dim); font-size:12.5px; }
+  .empty { grid-column:1/-1; text-align:center; color:var(--dim); padding:80px 0; }
+  .empty .big { font-size:56px; opacity:.35; }
+</style>
+
+<div id="hero">
+  <canvas id="gpu"></canvas>
+  <div class="veil"></div>
+  <div class="inner">
+    <h1>fluent_gallery</h1>
+    <span class="sub">収蔵 · VLM属性 · 検索 · 払い出し</span>
+    <span class="stat" id="stat"></span>
+  </div>
+</div>
+
+<div class="wrap">
+<div class="toolbar">
+  <input id="q" placeholder="🔍 キャプション検索" style="width:250px"
+    oninput="clearTimeout(window._qt); window._qt=setTimeout(reload, 300)">
+  <select id="f_source" onchange="reload()"><option value="">全ソース</option></select>
+  <select id="f_vlm" onchange="reload()">
+    <option value="">VLM: 全部</option><option value="done">✅ 属性あり</option><option value="none">⬜ 未付与</option>
+  </select>
+  <select id="f_origin" onchange="reload()">
+    <option value="">🧪/📷 全部</option>
+    <option value="real">📷 実写のみ</option>
+    <option value="synthetic">🧪 生成のみ</option>
+  </select>
+  <select id="f_nsfw" onchange="reload()">
+    <option value="">NSFW: 全部</option><option value="0">🟢 セーフ</option><option value="1">🔞 のみ</option>
+  </select>
+  <span style="margin-left:auto"></span>
+  <select id="en_backend" title="VLMバックエンド">
+    <option value="builtin">🏠 内蔵VLM (5秒/枚·無料)</option>
+    <option value="claude">🤖 Claude</option>
+    <option value="gpt">🤖 GPT</option>
+  </select>
+  <button class="primary" onclick="enrich()" title="絞り込み結果の未付与分に属性を付ける">⚡ 属性付け</button>
+</div>
+<div class="chips" id="chips"></div>
+<div id="enrichbar"><span class="pulse"></span><b>属性付け中</b> <span id="en_prog"></span>
+  <button class="ghost" style="float:right; padding:2px 10px" onclick="j('/api/enrich/stop',{method:'POST'})">⏹</button>
+  <div class="sub" id="en_last"></div></div>
+
+<div class="grid" id="grid"></div>
+<div id="more" style="height:1px"></div>
+
+<details><summary>📦 払い出し済みデータセット</summary><div id="dslist" style="margin-top:10px"></div></details>
+<details><summary>🎁 定番プリセットを収蔵する</summary>
+  <div id="presets" style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap"></div></details>
+<details><summary>📥 取り込み(ingest)</summary>
+  <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap">
+    <input id="ing_path" placeholder="サーバ上のディレクトリ" style="flex:1; min-width:320px">
+    <input id="ing_src" placeholder="ソース名 (例: atelier_gen:cats)" style="width:220px">
+    <button class="primary" onclick="ingest()">📥 取り込む</button>
+  </div><div class="sub" id="ing_msg" style="margin-top:6px"></div></details>
+</div>
+
+<div id="selbar"><div class="inner">
+  <b><span id="selcount">0</span>枚 選択中</b>
+  <button class="ghost" onclick="selectAllShown()">表示中を全選択</button>
+  <button class="ghost" onclick="clearSel()">解除</button>
+  <span style="margin-left:auto"></span>
+  <input id="ds_name" placeholder="データセット名" style="width:180px">
+  <button class="primary" onclick="makeDataset()">📦 データセット化</button>
+  <button onclick="genVar()" title="言語指示で変種を量産(工房のGPUで実行→完成後ここに自動収蔵)">🌱 指示で量産</button>
+</div></div>
+
+<div id="lb" onclick="if(event.target===this)this.classList.remove('show')">
+  <img id="lbimg" onclick="lbGo(1)" title="クリック=次 / ←→キー">
+  <div id="lbmeta"></div>
+</div>
+<div id="toast"></div>
+
+<script>
+async function j(u, opt) { const r = await fetch(u, opt);
+  if (!r.ok) { let m='HTTP '+r.status; try{m=(await r.json()).detail||m}catch(e){} throw new Error(m); }
+  return r.json(); }
+const $ = id => document.getElementById(id);
+let items = [], total = 0, sel = new Set(), chipFilters = {tag:'', scene:'', subject:'', style:''};
+
+function toast(m) { const t=$('toast'); t.textContent=m; t.classList.add('show');
+  clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove('show'), 3000); }
+
+// ---- WebGPU 流体背景(オーロラ)。非対応はCSSグラデにフォールバック ----
+(async () => {
+  const cv = $('gpu');
+  try {
+    const adapter = await navigator.gpu?.requestAdapter();
+    if (!adapter) throw 0;
+    const device = await adapter.requestDevice();
+    const ctx = cv.getContext('webgpu');
+    const fmt = navigator.gpu.getPreferredCanvasFormat();
+    const fit = () => { cv.width = cv.clientWidth * devicePixelRatio; cv.height = cv.clientHeight * devicePixelRatio; };
+    fit(); addEventListener('resize', fit);
+    ctx.configure({device, format: fmt, alphaMode: 'opaque'});
+    const shader = device.createShaderModule({code: `
+      struct U { t: f32, w: f32, h: f32, pad: f32 };
+      @group(0) @binding(0) var<uniform> u: U;
+      @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+        var p = array<vec2f,3>(vec2f(-1,-3), vec2f(-1,1), vec2f(3,1));
+        return vec4f(p[i], 0, 1);
+      }
+      fn hash(p: vec2f) -> f32 { return fract(sin(dot(p, vec2f(127.1, 311.7))) * 43758.5453); }
+      fn noise(p: vec2f) -> f32 {
+        let i = floor(p); let f = fract(p); let q = f * f * (3 - 2 * f);
+        return mix(mix(hash(i), hash(i + vec2f(1,0)), q.x),
+                   mix(hash(i + vec2f(0,1)), hash(i + vec2f(1,1)), q.x), q.y);
+      }
+      fn fbm(p0: vec2f) -> f32 {
+        var p = p0; var a = 0.5; var s = 0.0;
+        for (var k = 0; k < 5; k++) { s += a * noise(p); p *= 2.03; a *= 0.5; }
+        return s;
+      }
+      @fragment fn fs(@builtin(position) fc: vec4f) -> @location(0) vec4f {
+        let uv = vec2f(fc.x / u.w, fc.y / u.h);
+        let t = u.t * 0.08;
+        let q = vec2f(fbm(uv * 3 + vec2f(t, 0)), fbm(uv * 3 + vec2f(5.2, t * 1.3)));
+        let r = vec2f(fbm(uv * 3 + q * 1.6 + vec2f(1.7, 9.2)), fbm(uv * 3 + q * 1.6 + vec2f(8.3, 2.8)));
+        let v = fbm(uv * 3 + r * 1.9);
+        let c1 = vec3f(0.05, 0.09, 0.16);
+        let c2 = vec3f(0.12, 0.25, 0.65);
+        let c3 = vec3f(0.35, 0.2, 0.7);
+        var col = mix(c1, c2, clamp(v * 1.6, 0.0, 1.0));
+        col = mix(col, c3, clamp(q.y * r.x * 2.2, 0.0, 1.0));
+        col *= 0.55 + 0.45 * (1.0 - uv.y);
+        return vec4f(col, 1.0);
+      }`});
+    const ubuf = device.createBuffer({size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST});
+    const pipe = device.createRenderPipeline({layout: 'auto',
+      vertex: {module: shader, entryPoint: 'vs'},
+      fragment: {module: shader, entryPoint: 'fs', targets: [{format: fmt}]}});
+    const bind = device.createBindGroup({layout: pipe.getBindGroupLayout(0),
+      entries: [{binding: 0, resource: {buffer: ubuf}}]});
+    const t0 = performance.now();
+    (function frame() {
+      device.queue.writeBuffer(ubuf, 0, new Float32Array([(performance.now() - t0) / 1000, cv.width, cv.height, 0]));
+      const enc = device.createCommandEncoder();
+      const pass = enc.beginRenderPass({colorAttachments: [{view: ctx.getCurrentTexture().createView(),
+        loadOp: 'clear', storeOp: 'store', clearValue: {r: 0, g: 0, b: 0, a: 1}}]});
+      pass.setPipeline(pipe); pass.setBindGroup(0, bind); pass.draw(3); pass.end();
+      device.queue.submit([enc.finish()]);
+      requestAnimationFrame(frame);
+    })();
+  } catch (e) {   // フォールバック: CSSアニメグラデ
+    cv.style.background = 'linear-gradient(120deg,#0b1730,#1e2a6e,#3b2a7a,#0b1730)';
+    cv.style.backgroundSize = '300% 300%';
+    cv.animate([{backgroundPosition: '0% 50%'}, {backgroundPosition: '100% 50%'}, {backgroundPosition: '0% 50%'}],
+               {duration: 14000, iterations: Infinity});
+  }
+})();
+
+// ---- 出現アニメ(スタッガ) ----
+const appear = new IntersectionObserver(es => es.forEach(e => {
+  if (e.isIntersecting) {
+    const el = e.target;
+    el.style.transitionDelay = (el._stag || 0) + 'ms';
+    el.classList.add('in');
+    setTimeout(() => el.style.transitionDelay = '', 600);
+    appear.unobserve(el);
+  }
+}), {rootMargin: '80px'});
+
+function params(extra) {
+  return new URLSearchParams({q: $('q').value.trim(), source: $('f_source').value,
+    vlm_: $('f_vlm').value, nsfw: $('f_nsfw').value, origin: $('f_origin').value, tag: chipFilters.tag,
+    scene: chipFilters.scene, subject: chipFilters.subject, style: chipFilters.style, ...extra});
+}
+async function reload() {
+  const r = await j('/api/images?' + params({limit: 200, offset: 0}));
+  items = r.items; total = r.total; render(true);
+}
+async function loadMore() {
+  if (items.length >= total) return;
+  const r = await j('/api/images?' + params({limit: 200, offset: items.length}));
+  const start = items.length;
+  items = items.concat(r.items); render(false, start);
+}
+function cellHtml(it) {
+  return `<div class="cell ${sel.has(it.sha1) ? 'sel in' : ''}" id="c_${it.sha1}"
+       onclick="toggleSel('${it.sha1}')" oncontextmenu="return openLb(event,'${it.sha1}')"
+       title="クリック=選択 / 右クリック=拡大">
+    <img loading="lazy" src="/thumb/${it.sha1}">
+    ${it.origin === 'synthetic' ? '<span class="novlm" style="left:auto; right:7px; top:auto; bottom:7px">🧪</span>' : ''}
+    ${it.vlm_model ? '' : '<span class="novlm">未</span>'}
+    <div class="cap">${(it.caption || it.source || '')}</div>
+  </div>`;
+}
+function render(fresh, from = 0) {
+  if (fresh) {
+    $('grid').innerHTML = items.map(cellHtml).join('') ||
+      `<div class="empty"><div class="big">🖼</div>画像がありません。下の📥取り込みから</div>`;
+    [...$('grid').children].forEach((el, i) => { el._stag = (i % 24) * 22; appear.observe(el); });
+  } else {
+    const tmp = document.createElement('div');
+    tmp.innerHTML = items.slice(from).map(cellHtml).join('');
+    [...tmp.children].forEach((el, i) => { el._stag = (i % 24) * 22; $('grid').appendChild(el); appear.observe(el); });
+  }
+  drawSelbar();
+}
+function drawSelbar() {
+  $('selbar').classList.toggle('show', sel.size > 0);
+  $('selcount').textContent = sel.size;
+}
+function toggleSel(sha) {
+  sel.has(sha) ? sel.delete(sha) : sel.add(sha);
+  const c = $('c_' + sha); if (c) c.classList.toggle('sel');
+  drawSelbar();
+}
+function selectAllShown() { items.forEach(it => sel.add(it.sha1));
+  document.querySelectorAll('.cell').forEach(c => c.classList.add('sel')); drawSelbar(); }
+function clearSel() { sel.clear();
+  document.querySelectorAll('.cell.sel').forEach(c => c.classList.remove('sel')); drawSelbar(); }
+
+let lbIdx = -1;
+async function lbShow(i, dir) {
+  if (!items.length) return;
+  lbIdx = (i + items.length) % items.length;
+  const sha = items[lbIdx].sha1;
+  const img = $('lbimg');
+  // ひゅんっと送り: 方向つきスライド+フェード
+  if (dir) {
+    img.animate([{transform: `translateX(${dir * 46}px)`, opacity: 0}, {transform: 'none', opacity: 1}],
+                {duration: 260, easing: 'cubic-bezier(.2,.9,.3,1)'});
+  }
+  img.src = '/img/' + sha;
+  [1, -1].forEach(d => { const n = items[(lbIdx + d + items.length) % items.length];
+    if (n) new Image().src = '/img/' + n.sha1; });     // 先読みで待たせない
+  $('lbmeta').innerHTML = `${lbIdx + 1} / ${items.length}`;
+  try {
+    const m = await j('/api/meta/' + sha);
+    const v = m.vlm || {};
+    $('lbmeta').innerHTML = `<b>${lbIdx + 1} / ${items.length}</b> · ${m.w}×${m.h} · ${(m.bytes/1024).toFixed(0)}KB · ${m.source || ''}${m.origin === 'synthetic' ? ' · 🧪生成' : ' · 📷実写'}` +
+      (v.caption ? `<br>${v.caption}<br>` + (v.tags||[]).map(t=>`<span class="tag">${t}</span>`).join('')
+                 : '<br><span class="tag">VLM属性なし</span>');
+  } catch (err) {}
+  if (lbIdx > items.length - 30) loadMore();           // 端に近づいたら裏で続きを取得
+}
+function lbGo(d) { lbShow(lbIdx + d, d); }
+function openLb(e, sha) {
+  e.preventDefault();
+  $('lb').classList.add('show');
+  lbShow(items.findIndex(x => x.sha1 === sha), 0);
+  return false;
+}
+
+async function refreshFacets() {
+  const f = await j('/api/facets');
+  $('stat').innerHTML = `<b>${f.total.toLocaleString()}</b> 枚 · ${(f.bytes/1073741824).toFixed(1)}GB · 属性 <b>${f.enriched.toLocaleString()}</b>`;
+  const srcSel = $('f_source'); const cur = srcSel.value;
+  srcSel.innerHTML = '<option value="">全ソース</option>' + Object.entries(f.sources)
+    .map(([s, n]) => `<option value="${s}" ${s===cur?'selected':''}>${s} (${n})</option>`).join('');
+  const chip = (kind, name, n) => `<span class="chip ${chipFilters[kind]===name?'on':''}"
+    onclick="chipFilters['${kind}'] = chipFilters['${kind}']==='${name}' ? '' : '${name}'; refreshFacets(); reload()">
+    ${name}<small>${n}</small></span>`;
+  $('chips').innerHTML =
+    Object.entries(f.scenes).map(([s,n]) => chip('scene', s, n)).join('') +
+    Object.entries(f.subjects).map(([s,n]) => chip('subject', s, n)).join('') +
+    Object.entries(f.styles).map(([s,n]) => chip('style', s, n)).join('') +
+    Object.entries(f.tags).slice(0, 22).map(([s,n]) => chip('tag', s, n)).join('');
+}
+
+async function enrich() {
+  const backend = $('en_backend').value;
+  try {
+    await j('/api/enrich', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({backend, q: $('q').value.trim(), source: $('f_source').value,
+                            tag: chipFilters.tag, only_missing: true})});
+    toast('⚡ 属性付けを始めました' + (backend==='builtin' ? '(初回は内蔵VLMのDLで数分)' : ''));
+  } catch (e) { alert(e.message); }
+}
+async function watchEnrich() {
+  try {
+    const s = await j('/api/enrich/status');
+    $('enrichbar').style.display = s.alive ? 'block' : 'none';
+    if (s.alive) {
+      $('en_prog').textContent = `${s.done}/${s.total} (失敗${s.errors}) — ${s.backend}`;
+      $('en_last').textContent = s.last || '';
+    } else if (watchEnrich._was) { refreshFacets(); reload(); }
+    watchEnrich._was = s.alive;
+  } catch (e) {}
+}
+
+async function makeDataset() {
+  const name = $('ds_name').value.trim();
+  if (!name) return alert('データセット名をください');
+  if (!sel.size) return alert('画像を選んでください');
+  try {
+    const r = await j('/api/datasets', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({name, shas: [...sel]})});
+    toast(`📦 ${r.name} (${r.count}枚) 払い出しました`);
+    clearSel(); loadDatasets();
+  } catch (e) { alert(e.message); }
+}
+async function genVar() {
+  if (!sel.size) return alert('参考にする画像を選んでください');
+  const instruction = prompt(`選択${sel.size}枚を参考に、どう作り変える?\n(例: 夜のネオン街に / 雨の日に / 別アングルで)`);
+  if (!instruction) return;
+  const per = parseInt(prompt('1枚あたり何変種? (1-32)', '4')) || 4;
+  try {
+    const r = await j('/api/genvar', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({shas: [...sel], instruction, per_ref: per})});
+    toast(`🌱 「${r.name}」${r.n}枚を工房に依頼 (~${r.est_minutes}分)。完成後ここに自動収蔵`);
+    clearSel();
+  } catch (e) { alert(e.message); }
+}
+async function loadDatasets() {
+  const ds = await j('/api/datasets');
+  $('dslist').innerHTML = ds.filter(d => !d.name.startsWith('_refs_')).map(d => `<div style="margin:5px 0">
+    📦 <b>${d.name}</b> <span class="sub">${d.count}枚 · ${d.dir}</span>
+    <button class="ghost" title="このデータセットをAIで拡張(言語指示で変種を量産)" onclick="expandDataset('${d.name}')">🌱 AIで増やす</button>
+    <button class="ghost" onclick="delDataset('${d.name}')">🗑</button></div>`).join('')
+    || '<span class="sub">まだありません</span>';
+}
+async function delDataset(n) {
+  if (!confirm(`データセット「${n}」を削除? (symlinkなので本体は消えません)`)) return;
+  await j('/api/datasets/' + n, {method:'DELETE'}); loadDatasets();
+}
+async function loadPresets() {
+  try {
+    const ps = await j('/api/presets');
+    $('presets').innerHTML = ps.map(p => `<button ${p.available ? '' : 'disabled style="opacity:.4"'}
+      onclick="ingestPreset('${p.id}', this)">${p.label}</button>`).join('');
+  } catch (e) {}
+}
+async function ingestPreset(id, btn) {
+  btn.disabled = true; btn.textContent = '📥 収蔵中…(重複は自動スキップ)';
+  try {
+    const r = await j('/api/presets/' + id, {method:'POST'});
+    toast(`🎁 追加${r.added.toLocaleString()} / 重複${r.dup.toLocaleString()}`);
+    refreshFacets(); reload();
+  } catch (e) { alert(e.message); }
+  loadPresets();
+}
+async function expandDataset(name) {
+  const instruction = prompt(`「${name}」をAIで拡張します。どう増やす?\n(例: 夜バージョンも / 雨天も / アングル違いを)`);
+  if (!instruction) return;
+  const per = parseInt(prompt('元1枚あたり何変種?', '3')) || 3;
+  try {
+    const s = await j('/api/datasets/' + name + '/shas');
+    const r = await j('/api/genvar', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({shas: s.shas, instruction, per_ref: per, name: name + '_x'})});
+    toast(`🌱 「${r.name}」${r.n}枚を工房に依頼 (~${r.est_minutes}分)`);
+  } catch (e) { alert(e.message); }
+}
+async function ingest() {
+  const path = $('ing_path').value.trim(), source = $('ing_src').value.trim() || 'import';
+  if (!path) return;
+  $('ing_msg').textContent = '取り込み中…';
+  try {
+    const r = await j('/api/ingest', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({path, source})});
+    $('ing_msg').textContent = `✅ 追加${r.added} / 重複${r.dup} / 読めず${r.bad}`;
+    refreshFacets(); reload();
+  } catch (e) { $('ing_msg').textContent = '❌ ' + e.message; }
+}
+
+new IntersectionObserver(es => { if (es[0].isIntersecting) loadMore(); },
+  {rootMargin: '700px'}).observe($('more'));
+document.addEventListener('keydown', e => {
+  if (!$('lb').classList.contains('show')) return;
+  if (e.key === 'Escape') $('lb').classList.remove('show');
+  else if (e.key === 'ArrowRight' || e.key === 'f') lbGo(1);
+  else if (e.key === 'ArrowLeft' || e.key === 'd') lbGo(-1);
+});
+
+refreshFacets(); reload(); loadDatasets(); loadPresets(); watchEnrich();
+setInterval(watchEnrich, 3000); setInterval(refreshFacets, 30000);
+</script>

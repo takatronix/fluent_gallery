@@ -1,0 +1,1284 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>fluent_gallery</title>
+<style>
+  /* ---- 静かな配色: 写真の色を邪魔しない無彩色ダーク + アクセント1色 ---- */
+  :root {
+    --bg:#0a0a0c; --side:#0e0f12; --panel:#14151a; --line:#232530; --hair:#1a1c24;
+    --tx:#e8e9ec; --dim:#8b8e98; --faint:#5c5f6a;
+    --acc:#4d9fff; --acc-soft:#4d9fff22;
+  }
+  * { box-sizing:border-box; margin:0; }
+  html, body { height:100%; }
+  body { background:var(--bg); color:var(--tx); overflow:hidden;
+         font:13px/1.55 -apple-system,"SF Pro Text","Hiragino Sans",system-ui,sans-serif;
+         display:grid; grid-template-columns:216px 1fr; }
+  ::selection { background:var(--acc-soft); }
+  button { font:12.5px inherit; color:var(--dim); background:none; border:1px solid var(--line);
+           border-radius:8px; padding:6px 12px; cursor:pointer; transition:color .15s, border-color .15s, background .15s; }
+  button:hover { color:var(--tx); border-color:#3a3d4a; }
+  button.pri { color:#fff; background:var(--acc); border-color:transparent; font-weight:600; }
+  button.pri:hover { filter:brightness(1.1); }
+  button.ghost { border-color:transparent; }
+  input, select { background:var(--panel); color:var(--tx); border:1px solid var(--line);
+                  border-radius:8px; padding:6px 11px; font-size:12.5px; outline:none; }
+  input:focus { border-color:var(--acc); }
+
+  /* ---- サイドバー: グループ3層(入荷=機械 / アルバム=意図 / 出荷=学習へ) ---- */
+  aside { background:var(--side); border-right:1px solid var(--hair); padding:14px 10px 20px;
+          overflow-y:auto; user-select:none; }
+  .brand { font-size:13.5px; font-weight:700; padding:2px 10px 10px; }
+  .brand small { color:var(--faint); font-weight:400; margin-left:6px; }
+  .sec { font-size:10px; font-weight:600; letter-spacing:.09em; color:var(--faint);
+         padding:16px 10px 4px; text-transform:uppercase; display:flex; align-items:center; }
+  .sec .add { margin-left:auto; cursor:pointer; font-size:12px; padding:0 4px; border-radius:5px; }
+  .sec .add:hover { color:var(--tx); background:#ffffff0c; }
+  .nav { display:flex; align-items:center; gap:8px; padding:5px 10px; border-radius:7px;
+         color:var(--dim); cursor:pointer; font-size:12.5px; white-space:nowrap; }
+  .nav:hover { background:#ffffff08; color:var(--tx); }
+  .nav.on { background:var(--acc-soft); color:var(--tx); }
+  .nav .ico { width:16px; text-align:center; opacity:.85; font-size:12px; flex:none; }
+  .nav .nm { overflow:hidden; text-overflow:ellipsis; }
+  .nav .n { margin-left:auto; font-size:10.5px; color:var(--faint); font-variant-numeric:tabular-nums; padding-left:6px; }
+  .nav .live { font-size:9px; border:1px solid var(--line); border-radius:4px; padding:0 4px;
+               color:var(--dim); margin-left:auto; flex:none; }
+  .nav .del { display:none; margin-left:4px; color:var(--faint); font-size:10px; }
+  .nav:hover .del { display:inline; }
+  .nav .del:hover { color:var(--tx); }
+
+  /* ---- メイン ---- */
+  main { display:flex; flex-direction:column; overflow:hidden; }
+  .top { display:flex; gap:8px; align-items:center; padding:10px 16px 8px; flex-wrap:wrap;
+         border-bottom:1px solid var(--hair); }
+  .search { flex:0 1 300px; min-width:180px; display:flex; align-items:center; gap:8px;
+            background:var(--panel); border:1px solid var(--line); border-radius:8px;
+            padding:6px 12px; color:var(--faint); }
+  .search input { background:none; border:none; padding:0; width:100%; }
+  .fchip { font-size:11.5px; padding:5px 11px; border-radius:7px; }
+  .fchip.on { color:var(--tx); border-color:var(--acc); background:var(--acc-soft); }
+  .sp { flex:1; }
+  .stats { font-size:11px; color:var(--faint); padding:8px 18px 0; }
+  .stats b { color:var(--dim); font-weight:600; }
+
+  /* フォルダ条件パネル: 1行目=名前+主操作 / 2行目=目標 / 3行目=キーワード / 下段=成績(脇役) */
+  #albumhead { display:none; margin:10px 16px 0; background:var(--panel); border:1px solid var(--line);
+               border-radius:12px; padding:12px 16px; }
+  #albumhead .row1 { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  #albumhead .ttl { font-size:14px; font-weight:700; }
+  #albumhead .frow { display:flex; gap:8px; align-items:center; margin-top:8px; }
+  #albumhead .frow .lbl { width:78px; text-align:right; flex:none; font-size:11px; color:var(--faint); }
+  #albumhead input { background:#0d0e12; }
+  #albumhead .goal { flex:1; min-width:220px; }
+  #albumhead .lbl { font-size:11px; color:var(--faint); }
+  #albumhead .last { font-size:11px; color:var(--faint); margin-top:9px; display:flex; align-items:center; gap:4px; }
+  #albumhead .last b { color:var(--dim); }
+
+  /* 🌱量産パネル(選択バーの上に出る小さなカード) */
+  #genpanel { display:none; position:fixed; bottom:74px; left:calc(216px + 16px); right:16px; z-index:12;
+              background:#16171de8; border:1px solid var(--line); border-radius:12px;
+              backdrop-filter:blur(16px); padding:10px 14px; box-shadow:0 12px 40px #000a; }
+  #genpanel .row1 { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  @media (max-width:780px) { #genpanel { left:10px; right:10px; } }
+  .chips { display:flex; gap:5px; flex-wrap:wrap; padding:8px 16px 2px; }
+  .chip { font-size:11px; padding:3px 10px; border-radius:999px; border:1px solid var(--hair);
+          background:none; color:var(--faint); cursor:pointer; transition:all .15s; }
+  .chip:hover { color:var(--tx); border-color:#3a3d4a; }
+  .chip.on { color:var(--tx); border-color:var(--acc); background:var(--acc-soft); }
+  .chip small { opacity:.6; margin-left:3px; }
+
+  #enrichbar { display:none; margin:8px 16px 0; background:var(--panel); border:1px solid var(--line);
+               border-radius:10px; padding:8px 14px; font-size:12px; color:var(--dim); }
+  .pulse { display:inline-block; width:7px; height:7px; border-radius:99px; background:var(--acc);
+           margin-right:8px; animation:pulse 1.2s ease infinite; }
+  @keyframes pulse { 50% { opacity:.3; transform:scale(.7); } }
+
+  /* ---- グリッド: クリック=開く。選択は◯だけ(Shift+◯=範囲) ---- */
+  .gridwrap { flex:1; overflow-y:auto; padding:10px 16px 90px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(var(--cell,168px),1fr)); gap:6px; }
+  .grid.fit img { object-fit:contain; }  /* ▣全体表示: 非正方形も切らずに見せる(余白はtint色) */
+  .cell { position:relative; aspect-ratio:1; border-radius:6px; overflow:hidden; cursor:zoom-in;
+          background:var(--panel); opacity:0; transform:translateY(14px) scale(.97);
+          transition:opacity .45s ease, transform .5s cubic-bezier(.2,.9,.3,1); }
+  .cell.in { opacity:1; transform:none; }
+  .cell img { width:100%; height:100%; object-fit:cover; display:block; }
+  .cell::after { content:''; position:absolute; inset:0; box-shadow:inset 0 0 0 1px #ffffff0d;
+                 border-radius:6px; pointer-events:none; }
+  .cell .ck { position:absolute; top:6px; left:6px; width:22px; height:22px; border-radius:99px;
+              border:1.5px solid #ffffffb0; background:#00000038; cursor:pointer; opacity:0;
+              transition:opacity .12s, background .12s, border-color .12s; z-index:2;
+              display:flex; align-items:center; justify-content:center; font-size:12px; color:transparent; }
+  @media (hover:hover) { .cell:hover .ck { opacity:1; } }
+  body.selmode .ck { opacity:1; }   /* 1枚でも選ぶと全カードに◯(選択モード) */
+  .cell.sel .ck { opacity:1; background:var(--acc); border-color:var(--acc); color:#fff; }
+  .cell.sel { outline:2px solid var(--acc); outline-offset:-2px; }
+  .cell.sel img { transform:scale(.94); border-radius:4px; transition:transform .15s ease; }
+  .cell .badge { position:absolute; top:7px; right:7px; font-size:11px; text-shadow:0 1px 4px #000; z-index:1; }
+  /* 収集の実況中継: 新着が宙から降ってくる */
+  .cell.drop { animation:dropIn .7s cubic-bezier(.2,1.5,.3,1); }
+  @keyframes dropIn {
+    0% { opacity:0; transform:translateY(-70px) scale(.5) rotate(-6deg); }
+    60% { opacity:1; transform:translateY(5px) scale(1.03) rotate(1.5deg); }
+    100% { opacity:1; transform:none; } }
+  .cell.drop::before { content:''; position:absolute; inset:0; border-radius:6px; z-index:2; pointer-events:none;
+    box-shadow:0 0 0 2px var(--acc), 0 0 26px var(--acc-soft); animation:dropGlow 1.8s ease forwards; }
+  @keyframes dropGlow { from { opacity:1; } to { opacity:0; } }
+  .cell .cap { position:absolute; inset-inline:0; bottom:0; padding:18px 8px 5px; font-size:10.5px;
+               color:#dfe2e8; background:linear-gradient(transparent,#000b); opacity:0;
+               white-space:nowrap; overflow:hidden; text-overflow:ellipsis; transition:opacity .2s; }
+  @media (hover:hover) { .cell:hover .cap { opacity:1; } }
+  .empty { grid-column:1/-1; text-align:center; color:var(--faint); padding:90px 0; }
+  .empty .big { font-size:52px; opacity:.3; }
+
+  /* ---- 下部ユーティリティ(取り込み等) ---- */
+  details { margin:14px 2px 0; }
+  details summary { cursor:pointer; color:var(--faint); font-size:12px; }
+  details[open] summary { color:var(--dim); }
+  .sub { font-size:11.5px; color:var(--faint); }
+
+  /* ---- 選択バー ---- */
+  #selbar { position:fixed; bottom:14px; left:calc(216px + 16px); right:16px; z-index:12;
+            display:none; align-items:center; gap:8px; flex-wrap:wrap;
+            background:#16171de8; border:1px solid var(--line); border-radius:12px;
+            backdrop-filter:blur(16px); padding:9px 14px; box-shadow:0 12px 40px #000a; }
+  #selbar.show { display:flex; }
+  #selbar .cnt { font-size:12.5px; font-weight:600; }
+
+  /* ---- ライトボックス + 非破壊調整 ---- */
+  #lb { position:fixed; inset:0; background:#000000e6; display:none; z-index:20; cursor:zoom-out;
+        align-items:center; justify-content:center; flex-direction:column; overflow:hidden;
+        backdrop-filter:blur(12px); }
+  #lb.show { display:flex; animation:lbin .22s ease; }
+  @keyframes lbin { from { opacity:0; } }
+  #lb img#lbimg { max-width:94vw; max-height:74vh; border-radius:8px; box-shadow:0 24px 70px #000;
+        cursor:default; animation:lbimg .3s cubic-bezier(.2,.9,.3,1); transition:filter .18s ease;
+        touch-action:none; user-select:none; -webkit-user-drag:none; }
+  #lb:fullscreen img#lbimg { max-width:100vw; max-height:88vh; }
+  /* 没入モード: 画像だけを画面いっぱいに。バー/情報は全部消える(クリックで一段戻る) */
+  #lb.imm #lbbar, #lb.imm #lbmeta, #lb.imm #editpanel { display:none; }
+  #lb.imm img#lbimg { max-width:100vw; max-height:100vh; border-radius:0; box-shadow:none; }
+  #lb.imm { background:#000; backdrop-filter:none; }
+  @keyframes lbimg { from { transform:scale(.92); opacity:.5; } }
+  #lbbar { display:flex; gap:6px; align-items:center; padding:11px 4px 0; cursor:default; flex-wrap:wrap; justify-content:center; }
+  #lbbar button { background:#ffffff0a; }
+  #lb.editing #edbtn { color:var(--acc); border-color:var(--acc); background:var(--acc-soft); }
+  /* 画像に重ねる情報カード(出典/権利/クエリ) — 左上に常時・控えめ */
+  #lbinfo { position:absolute; top:14px; left:14px; z-index:2; max-width:320px; cursor:default;
+            background:#000000b8; border:1px solid #ffffff1a; border-radius:10px;
+            backdrop-filter:blur(10px); padding:8px 12px; font-size:11.5px; line-height:1.6;
+            color:#c9cdd6; }
+  #lbinfo a { color:#8ab8ff; text-decoration:none; }
+  #lbinfo a:hover { text-decoration:underline; }
+  #lbinfo .r { display:flex; gap:6px; align-items:baseline; }
+  #lbinfo .k { color:var(--faint); flex:none; }
+  #lb.imm #lbinfo { display:none; }
+  #lbmeta { max-width:88vw; font-size:11.5px; color:var(--dim); text-align:center; line-height:1.7;
+            padding:6px 0; cursor:default; }
+  #lbmeta .tag { display:inline-block; background:#ffffff0c; border-radius:99px; padding:0 9px;
+                 margin:1px 2px; font-size:10.5px; color:var(--dim); }
+  #editpanel { display:none; cursor:default; background:#14151ae8; border:1px solid var(--line);
+               border-radius:14px; backdrop-filter:blur(14px); padding:12px 16px; margin-top:8px;
+               width:min(700px, 94vw); box-shadow:0 16px 46px #000a; }
+  #lb.editing #editpanel { display:block; animation:lbin .2s ease; }
+  #editpanel .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin:6px 0; }
+  #editpanel label { font-size:11px; color:var(--faint); width:50px; text-align:right; }
+  #editpanel input[type=range] { flex:1; min-width:110px; accent-color:var(--acc); padding:0; background:none; border:none; }
+  #editpanel .val { font-size:10.5px; color:var(--dim); width:30px; font-variant-numeric:tabular-nums; }
+  .fxchip { font-size:11px; padding:3px 11px; border-radius:999px; border:1px solid var(--line);
+            color:var(--dim); cursor:pointer; transition:all .15s; }
+  .fxchip:hover { color:var(--tx); border-color:var(--acc); }
+  #edhist { font-size:10.5px; color:var(--faint); }
+
+  #toast { position:fixed; bottom:80px; left:50%; transform:translate(-50%, 16px); opacity:0;
+           background:#1d1f27f0; border:1px solid var(--line); color:var(--tx); padding:9px 20px;
+           border-radius:999px; font-size:12.5px; z-index:30; box-shadow:0 10px 30px #000a;
+           transition:all .25s ease; pointer-events:none; }
+  #toast.show { transform:translate(-50%, 0); opacity:1; }
+
+  /* ---- モバイル: サイドバーは横帯化 ---- */
+  @media (max-width: 780px) {
+    body { grid-template-columns:1fr; grid-template-rows:auto 1fr; }
+    aside { display:flex; gap:2px; overflow-x:auto; border-right:none; padding:8px 10px;
+            border-bottom:1px solid var(--hair); align-items:center; }
+    .brand, .sec { display:none; }
+    .nav { flex:none; }
+    .nav .n, .nav .live { display:none; }
+    .grid { grid-template-columns:repeat(auto-fill,minmax(110px,1fr)); gap:4px; }
+    #selbar { left:10px; right:10px; }
+  }
+</style>
+
+<aside id="side">
+  <div class="brand">fluent_gallery <small id="vtag"></small></div>
+  <div class="nav on" id="nav_all" onclick="navTo('all')"><span class="ico">🖼</span><span class="nm">すべて</span><span class="n" id="n_all"></span></div>
+  <div class="nav" id="nav_keep" onclick="navTo('keep')"><span class="ico">⭐</span><span class="nm">お気に入り</span><span class="n" id="n_keep"></span></div>
+  <div class="nav" id="nav_novlm" onclick="navTo('novlm')"><span class="ico">◻</span><span class="nm">未属性</span><span class="n" id="n_novlm"></span></div>
+  <div class="sec">入荷 — 機械の入り口<span class="add" title="取り込み" onclick="openIngest()">＋</span></div>
+  <div id="nav_sources"></div>
+  <div class="sec">アルバム — 自分の意図<span class="add" title="今の絞り込みを動的アルバムに保存" onclick="makeAlbum()">＋</span></div>
+  <div id="nav_albums"></div>
+  <div class="sec">出荷 — 学習へ</div>
+  <div id="nav_datasets"></div>
+  <div class="sec">AI稼働状況</div>
+  <div id="ai_activity" style="padding:0 10px 6px; font-size:11px; color:var(--faint)"></div>
+</aside>
+
+<main>
+  <div class="top">
+    <div class="search">🔍<input id="q" placeholder="検索 (キャプション / タグ)"
+      oninput="clearTimeout(window._qt); window._qt=setTimeout(reload, 300)"></div>
+    <button class="fchip" id="fc_real" onclick="fcOrigin('real')">📷 実写</button>
+    <button class="fchip" id="fc_synth" onclick="fcOrigin('synthetic')">🧪 生成</button>
+    <button class="fchip" id="fc_q8" onclick="fc('q8')">品質8+</button>
+    <button class="fchip" id="fc_safe" onclick="fc('safe')">🟢 セーフ</button>
+    <input type="range" id="cellsize" min="96" max="300" step="4" style="width:90px; padding:0; accent-color:var(--acc)"
+      title="サムネサイズ(小さく大量↔大きく)" oninput="setCell(this.value)">
+    <button class="fchip" id="fitbtn" onclick="toggleFit()" title="◼=正方形に切り抜き / ▣=全体を見せる(非正方形も切らない)">◼</button>
+    <select id="sort" onchange="reload(true)" title="並び替え(FLIPで飛んで再配置)">
+      <option value="">↓ 新しい順</option>
+      <option value="old">↑ 古い順</option>
+      <option value="quality">★ 品質順</option>
+      <option value="big">◼ 大きい順</option>
+      <option value="cost">💸 コスト順</option>
+    </select>
+    <span class="sp"></span>
+    <select id="en_backend" title="VLMバックエンド">
+      <option value="builtin">🏠 内蔵VLM</option>
+      <option value="claude">Claude</option>
+      <option value="gpt">GPT</option>
+    </select>
+    <button onclick="enrich()" title="絞り込み結果の未付与分に属性を付ける">⚡ 属性付け</button>
+  </div>
+  <div class="chips" id="chips"></div>
+  <div id="enrichbar"><span class="pulse"></span><b>属性付け中</b> <span id="en_prog"></span>
+    <button class="ghost" style="float:right; padding:1px 8px" onclick="j('/api/enrich/stop',{method:'POST'})">⏹</button>
+    <div class="sub" id="en_last"></div></div>
+  <div id="crawlbar" style="display:none; margin:8px 16px 0; background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:8px 14px; font-size:12px; color:var(--dim)">
+    <span class="pulse"></span><b style="color:var(--tx)">🤖 収集中</b> <span id="cr_prog"></span>
+    <button class="ghost" style="float:right; padding:1px 8px" onclick="j('/api/crawl/stop',{method:'POST'})">⏹</button>
+    <div class="sub" id="cr_last"></div></div>
+  <div class="stats" id="stat"></div>
+  <div id="albumhead"></div>
+  <div id="ingestpanel" style="display:none; margin:10px 16px 0; background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:10px 14px">
+    <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center">
+      <span>📥</span>
+      <input id="ing_path" placeholder="サーバ上のディレクトリ" style="flex:1; min-width:240px">
+      <input id="ing_src" placeholder="ソース名 (例: crawl:aspara)" style="width:180px">
+      <button class="pri" onclick="ingest()">取り込む</button>
+      <span style="flex:1"></span>
+      <button class="ghost" onclick="$('ingestpanel').style.display='none'">✕</button>
+    </div>
+    <div class="sub" id="ing_msg" style="margin-top:6px"></div>
+    <div id="presets" style="margin-top:8px; display:flex; gap:6px; flex-wrap:wrap"></div>
+  </div>
+  <div class="gridwrap" id="gridwrap">
+    <div class="grid" id="grid"></div>
+    <div id="more" style="height:1px"></div>
+  </div>
+</main>
+
+<div id="genpanel" onclick="event.stopPropagation()">
+  <div class="row1">🌱
+    <input id="gen_instruction" type="text" placeholder="どう作り変える? (例: 夜のネオン街に / 雨の日に / 別アングルで)" style="flex:1; min-width:240px">
+    <span class="lbl" style="font-size:11px; color:var(--faint)">1枚あたり</span>
+    <input id="gen_per" type="number" value="4" min="1" max="32" style="width:60px">変種
+    <button class="pri" onclick="genRun()">🌱 量産開始</button>
+    <button class="ghost" onclick="$('genpanel').style.display='none'">✕</button>
+  </div>
+</div>
+<div id="selbar">
+  <span class="cnt"><span id="selcount">0</span>枚選択</span>
+  <button class="ghost" onclick="clearSel()">解除</button>
+  <button class="ghost" onclick="selectAllShown()">表示中を全部</button>
+  <button onclick="bulkKeep(true)" title="自動間引きから絶対保護">⭐ お気に入り</button>
+  <button onclick="bulkKeep(false)">☆ 解除</button>
+  <button onclick="delSelected()" title="ゴミ箱へ(DELキーでも。30日は戻せる)">🗑 消す</button>
+  <button onclick="genVar()" title="言語指示で変種を量産">🌱 指示で量産</button>
+  <span class="sp"></span>
+  <input id="ds_name" placeholder="データセット名" style="width:150px">
+  <button class="pri" onclick="makeDataset()">📦 データセット化</button>
+</div>
+
+<div id="lb" onclick="if(event.target===this)closeLb()">
+  <div id="lbinfo" onclick="event.stopPropagation()"></div>
+  <img id="lbimg" title="クリック=戻る / ダブルクリック=拡大 / ホイール=ズーム">
+  <div id="lbbar" onclick="event.stopPropagation()">
+    <button class="ghost" onclick="lbGo(-1)" title="← / D">‹ 前</button>
+    <button class="ghost" onclick="lbGo(1)" title="→ / F">次 ›</button>
+    <button class="ghost" id="lbkeep" onclick="lbKeep()" title="自動間引きから絶対保護 (S)">☆ お気に入り</button>
+    <button class="ghost" id="edbtn" onclick="edToggle()" title="非破壊調整のOn/Off (E)">🎨 編集</button>
+    <button class="ghost" id="lbsel" onclick="lbSel()" title="選択に加える (X)">◯ 選択</button>
+    <button class="ghost" id="edcompare" style="display:none"
+      onpointerdown="edCompare(true)" onpointerup="edCompare(false)" onpointerleave="edCompare(false)"
+      title="押している間だけ原本">👁 原本</button>
+    <button class="ghost" onclick="lbDel()" title="DELキーでも。30日は戻せる">🗑 削除</button>
+    <button class="ghost" onclick="lbFullscreen()" title="画像だけを画面いっぱいに(クリックで戻る)">⛶ 画像全画面</button>
+  </div>
+  <div id="editpanel" onclick="event.stopPropagation()">
+    <div class="row"><label>露出</label><input type="range" id="ed_exposure" min="-100" max="100" value="0"
+        oninput="edLive()"><span class="val" id="edv_exposure">0</span>
+      <label>ｺﾝﾄﾗｽﾄ</label><input type="range" id="ed_contrast" min="-100" max="100" value="0"
+        oninput="edLive()"><span class="val" id="edv_contrast">0</span></div>
+    <div class="row"><label>彩度</label><input type="range" id="ed_saturation" min="-100" max="100" value="0"
+        oninput="edLive()"><span class="val" id="edv_saturation">0</span>
+      <label>色温度</label><input type="range" id="ed_temperature" min="-100" max="100" value="0"
+        oninput="edLive()"><span class="val" id="edv_temperature">0</span></div>
+    <div class="row" id="edfilters"></div>
+    <div class="row">
+      <button class="pri" onclick="edApplyAdjust()">✔ 適用</button>
+      <button onclick="edPush({op:'auto', params:{}})" title="WB+レベル+彩度の自動補正(非破壊・1手として積まれる)">✨ 自動</button>
+      <button onclick="edPush({op:'rotate', params:{deg:90}})">⟳ 回転</button>
+      <button onclick="edPush({op:'flip', params:{dir:'h'}})">⇋ 反転</button>
+      <span class="sp"></span>
+      <button onclick="edUndo()" title="履歴を1手戻す (⌘Z)">↩ 一手戻す</button>
+      <button onclick="edClear()">🧼 原本に戻す</button>
+    </div>
+    <div class="row"><span id="edhist"></span></div>
+  </div>
+  <div id="lbmeta" onclick="event.stopPropagation()"></div>
+</div>
+<div id="toast"></div>
+
+<script>
+async function j(u, opt) { const r = await fetch(u, opt);
+  if (!r.ok) { let m='HTTP '+r.status; try{m=(await r.json()).detail||m}catch(e){} throw new Error(m); }
+  return r.json(); }
+const $ = id => document.getElementById(id);
+let items = [], total = 0, sel = new Set(), lastCk = -1;
+let chipFilters = {tag:'', scene:'', subject:'', style:''};
+let view = {mode:'all', source:''};   // サイドバーの現在地
+let fchips = {origin:'', q8:false, safe:false};
+
+function toast(m, actLabel, actFn) {
+  const t = $('toast');
+  t.innerHTML = m + (actLabel ? ` <b style="cursor:pointer; margin-left:10px; color:var(--acc)" onclick="toastAct()">${actLabel}</b>` : '');
+  t.style.pointerEvents = actLabel ? 'auto' : 'none';
+  window._toastFn = actFn;
+  t.classList.add('show');
+  clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), actLabel ? 6500 : 2800);
+}
+function toastAct() { const f = window._toastFn; window._toastFn = null; $('toast').classList.remove('show'); if (f) f(); }
+
+// ---- 検索パラメータ(サイドバー+チップ+属性チップの合算) ----
+function params(extra) {
+  return new URLSearchParams({q: $('q').value.trim(),
+    source: view.source, vlm_: view.mode === 'novlm' ? 'none' : '',
+    keep: view.mode === 'keep' ? '1' : '', sort: $('sort').value,
+    origin: fchips.origin, nsfw: fchips.safe ? '0' : '', min_quality: fchips.q8 ? 8 : 0,
+    tag: chipFilters.tag, scene: chipFilters.scene, subject: chipFilters.subject, style: chipFilters.style,
+    ...extra});
+}
+async function reload(flip) {
+  const r = await j('/api/images?' + params({limit: 200, offset: 0}));
+  items = r.items; total = r.total;
+  flip ? flipRender() : render(true);
+  $('stat').innerHTML = `<b>${total.toLocaleString()}</b>枚 — クリック=開く / ◯=選択 / Shift+◯=範囲`;
+  syncHash();
+}
+// FLIP: 並び替え/絞り込みで、居残る画像は消えずに新しい位置へ「飛ぶ」(Core Animationのあの感じ)
+function flipRender() {
+  const old = {};
+  document.querySelectorAll('.cell').forEach(el => { old[el.id] = el.getBoundingClientRect(); });
+  render(true, 0, true);
+  requestAnimationFrame(() => {
+    document.querySelectorAll('.cell').forEach(el => {
+      const o = old[el.id];
+      if (!o) {  // 新入りはふわっと
+        el.animate([{opacity: 0, transform: 'scale(.85)'}, {opacity: 1, transform: 'none'}],
+                   {duration: 350, easing: 'ease-out'});
+        return;
+      }
+      const n = el.getBoundingClientRect();
+      const dx = o.left - n.left, dy = o.top - n.top;
+      if (dx || dy) el.animate([{transform: `translate(${dx}px,${dy}px)`}, {transform: 'none'}],
+        {duration: 480, easing: 'cubic-bezier(.2,.9,.3,1)'});
+    });
+  });
+}
+async function loadMore() {
+  if (items.length >= total) return;
+  const r = await j('/api/images?' + params({limit: 200, offset: items.length}));
+  const start = items.length;
+  items = items.concat(r.items); render(false, start);
+}
+
+// ---- URL同期: 今の画面はいつでもURLで共有できる(コピペで同じ状態が開く) ----
+let curDataset = '';
+function syncHash() {
+  const o = {};
+  for (const [k, v] of params({})) if (v && v !== '0') o[k] = v;
+  if (curDataset) o.ds = curDataset;
+  if ($('lb').classList.contains('show') && items[lbIdx]) o.img = items[lbIdx].sha1;
+  history.replaceState(null, '', '#' + new URLSearchParams(o).toString());
+}
+
+// ---- サイドバー ----
+function navTo(mode, source) {
+  view = {mode: mode || 'all', source: source || ''};
+  curDataset = '';
+  hideAlbumHead();
+  document.querySelectorAll('.nav').forEach(n => n.classList.remove('on'));
+  const el = source ? document.querySelector(`.nav[data-src="${CSS.escape(source)}"]`) : $('nav_' + view.mode);
+  if (el) el.classList.add('on');
+  clearSel(); reload();
+}
+
+// フォルダツリー(ネスト自由)。開閉はlocalStorageに記憶
+let folded = new Set(JSON.parse(localStorage.getItem('fg_fold') || '[]'));
+function toggleFold(k) {
+  folded.has(k) ? folded.delete(k) : folded.add(k);
+  localStorage.setItem('fg_fold', JSON.stringify([...folded]));
+  loadAlbums(); loadDatasets();
+}
+function buildTree(list) {
+  const root = {f: {}, items: []};
+  for (const it of list) {
+    let n = root;
+    for (const part of (it.folder || '').split('/').filter(Boolean)) n = n.f[part] ??= {f: {}, items: []};
+    n.items.push(it);
+  }
+  return root;
+}
+function treeHtml(node, item, depth = 0, key = '') {
+  let h = '';
+  for (const name of Object.keys(node.f).sort()) {
+    const k = key + '/' + name, open = !folded.has(k);
+    h += `<div class="nav" style="padding-left:${10 + depth * 13}px" onclick="toggleFold('${k.replace(/'/g, "\\'")}')">
+      <span class="ico" style="opacity:.6">${open ? '▾' : '▸'}</span><span class="nm">📁 ${name}</span></div>`;
+    if (open) h += treeHtml(node.f[name], item, depth + 1, k);
+  }
+  return h + node.items.map(it => item(it, depth)).join('');
+}
+function splitPath(s) {  // "フォルダ/中/名前" → {folder, name}
+  const parts = s.split('/').map(x => x.trim()).filter(Boolean);
+  const name = parts.pop() || '';
+  return {folder: parts.join('/'), name};
+}
+const SRC_ICO = s => s.startsWith('atelier_gen') || s.startsWith('gen') ? '🌱'
+  : s.startsWith('crawl') ? '🌐' : s.startsWith('x:') ? '𝕏'
+  : s.startsWith('preset') ? '🎁' : s.includes('cam') ? '📷' : '📂';
+async function refreshFacets() {
+  const f = await j('/api/facets');
+  $('n_all').textContent = f.total.toLocaleString();
+  $('vtag').textContent = (f.bytes/1073741824).toFixed(1) + 'GB' +
+    (f.cost_usd > 0 ? ` · 💸$${f.cost_usd.toFixed(2)}` : '');
+  $('n_novlm').textContent = (f.total - f.enriched) || '';
+  $('nav_sources').innerHTML = Object.entries(f.sources).map(([s, n]) =>
+    `<div class="nav ${view.source===s?'on':''}" data-src="${s}" onclick="navTo('all','${s}')">
+       <span class="ico">${SRC_ICO(s)}</span><span class="nm" title="${s}">${s.replace(/^atelier_gen:/,'gen: ').replace(/^preset:/,'')}</span>
+       <span class="n">${n}</span></div>`).join('');
+  const chip = (kind, name, n) => `<span class="chip ${chipFilters[kind]===name?'on':''}"
+    onclick="chipFilters['${kind}'] = chipFilters['${kind}']==='${name}' ? '' : '${name}'; refreshFacets(); reload(true)">
+    ${name}<small>${n}</small></span>`;
+  $('chips').innerHTML =
+    Object.entries(f.scenes).map(([s,n]) => chip('scene', s, n)).join('') +
+    Object.entries(f.subjects).map(([s,n]) => chip('subject', s, n)).join('') +
+    Object.entries(f.styles).map(([s,n]) => chip('style', s, n)).join('') +
+    Object.entries(f.tags).slice(0, 18).map(([s,n]) => chip('tag', s, n)).join('');
+  try { const k = await j('/api/images?keep=1&limit=1'); $('n_keep').textContent = k.total || ''; } catch(e) {}
+}
+function fcOrigin(o) {
+  fchips.origin = fchips.origin === o ? '' : o;
+  $('fc_real').classList.toggle('on', fchips.origin === 'real');
+  $('fc_synth').classList.toggle('on', fchips.origin === 'synthetic');
+  reload(true);
+}
+function fc(k) { fchips[k] = !fchips[k]; $('fc_' + k).classList.toggle('on', fchips[k]); reload(true); }
+function openIngest() {
+  const p = $('ingestpanel');
+  p.style.display = p.style.display === 'none' || !p.style.display ? 'block' : 'none';
+  if (p.style.display === 'block') { $('gridwrap').scrollTop = 0; $('ing_path').focus(); }
+}
+
+// ---- グリッド(クリック=開く / ◯=選択) ----
+const appear = new IntersectionObserver(es => es.forEach(e => {
+  if (e.isIntersecting) {
+    const el = e.target;
+    el.style.transitionDelay = (el._stag || 0) + 'ms';
+    el.classList.add('in');
+    setTimeout(() => el.style.transitionDelay = '', 600);
+    appear.unobserve(el);
+  }
+}), {rootMargin: '80px'});
+
+function cellHtml(it) {
+  return `<div class="cell ${sel.has(it.sha1) ? 'sel in' : ''}" id="c_${it.sha1}" onclick="openLbSha('${it.sha1}')">
+    <img loading="lazy" src="/thumb/${it.sha1}" style="background:${it.tint || 'var(--panel)'}">
+    <span class="ck" onclick="event.stopPropagation(); ckSelSha('${it.sha1}', event)">✓</span>
+    ${it.keep ? '<span class="badge">⭐</span>' : it.origin === 'synthetic' ? '<span class="badge" style="opacity:.75">🧪</span>' : ''}
+    <div class="cap">${(it.caption || it.source || '')}</div>
+  </div>`;
+}
+function render(fresh, from = 0, instant = false) {
+  if (fresh) {
+    $('grid').innerHTML = items.map(cellHtml).join('') ||
+      `<div class="empty"><div class="big">🖼</div>画像がありません。左の＋から取り込み</div>`;
+    [...$('grid').children].forEach((el, i) => {
+      if (instant) { el.classList.add('in'); }         // FLIP時は即表示(飛ぶのはtransform側)
+      else { el._stag = (i % 24) * 18; appear.observe(el); }
+    });
+  } else {
+    const tmp = document.createElement('div');
+    tmp.innerHTML = items.slice(from).map(cellHtml).join('');
+    [...tmp.children].forEach((el, i) => { el._stag = (i % 24) * 18; $('grid').appendChild(el); appear.observe(el); });
+  }
+  drawSelbar();
+}
+// サムネサイズ+表示モード(記憶する)
+function setCell(v) {
+  document.documentElement.style.setProperty('--cell', v + 'px');
+  localStorage.setItem('fg_cell', v);
+}
+function toggleFit() {
+  const on = $('grid').classList.toggle('fit');
+  $('fitbtn').textContent = on ? '▣' : '◼';
+  localStorage.setItem('fg_fit', on ? '1' : '');
+  // 切替の馴染みアニメ(object-fitは遷移できないので、ふわっと収める)
+  document.querySelectorAll('.cell img').forEach((im, i) => {
+    im.animate([{transform: 'scale(.9)', opacity: .5}, {transform: 'none', opacity: 1}],
+               {duration: 280, delay: (i % 30) * 6, easing: 'cubic-bezier(.2,.9,.3,1)'});
+  });
+}
+{ const c = localStorage.getItem('fg_cell'); if (c) { $('cellsize').value = c; setCell(c); }
+  if (localStorage.getItem('fg_fit')) toggleFit(); }
+
+// 添字はクリック時にshaから引く(実況中継のprependで並びが動いても壊れない)
+function openLbSha(sha) { const i = items.findIndex(x => x.sha1 === sha); if (i >= 0) openLb(i); }
+function ckSelSha(sha, e) { const i = items.findIndex(x => x.sha1 === sha); if (i >= 0) ckSel(i, e); }
+function ckSel(i, e) {
+  if (e.shiftKey && lastCk >= 0) {
+    const [a, b] = [Math.min(lastCk, i), Math.max(lastCk, i)];
+    for (let k = a; k <= b; k++) setSel(items[k].sha1, true);
+  } else {
+    setSel(items[i].sha1, !sel.has(items[i].sha1));
+  }
+  lastCk = i; drawSelbar();
+}
+function setSel(sha, on) {
+  on ? sel.add(sha) : sel.delete(sha);
+  const c = $('c_' + sha); if (c) c.classList.toggle('sel', on);
+}
+function drawSelbar() {
+  $('selbar').classList.toggle('show', sel.size > 0);
+  document.body.classList.toggle('selmode', sel.size > 0);
+  $('selcount').textContent = sel.size;
+}
+function selectAllShown() { items.forEach(it => setSel(it.sha1, true)); drawSelbar(); }
+function clearSel() { [...sel].forEach(s => setSel(s, false)); sel.clear(); drawSelbar(); }
+
+// ---- ライトボックス(preview即出し→原寸へ昇格) ----
+let lbIdx = -1, lbMeta = null;
+function lbUrl(sha, w) {
+  const edited = lbMeta && lbMeta.sha1 === sha && (lbMeta.edits || []).length;
+  if (edited) return '/render/' + sha + '?v=' + lbMeta.edits_rev + (w ? '&w=' + w : '');
+  return w ? '/preview/' + sha : '/img/' + sha;
+}
+function openLb(i) {
+  const lb = $('lb');
+  lb.classList.remove('editing', 'imm'); // 前回の編集パネル/没入モードを持ち越さない
+  lb.classList.add('show');
+  lbShow(i, 0);
+}
+function closeLb() {
+  const lb = $('lb');
+  if (!lb.classList.contains('show')) return;
+  // ひゅっと戻る(開きのlbimgアニメと対称)
+  $('lbimg').animate([{transform: 'none', opacity: 1}, {transform: 'scale(.9)', opacity: 0}],
+                     {duration: 170, easing: 'ease-in'});
+  lb.animate([{opacity: 1}, {opacity: 0}], {duration: 180, easing: 'ease-in'}).onfinish = () => {
+    lb.classList.remove('show'); syncHash();
+  };
+}
+async function lbShow(i, dir) {
+  if (!items.length) return;
+  lbIdx = (i + items.length) % items.length;
+  const sha = items[lbIdx].sha1;
+  const img = $('lbimg');
+  lbMeta = null; edReset(); zReset(); $('edcompare').style.display = 'none'; edHist([]); lbKeepBtn(); lbSelBtn();
+  // チラつき防止: 次の画像はロード完了してから差し替える(前の絵は出したまま待つ)
+  const pv = new Image();
+  pv.src = '/preview/' + sha;
+  const swap = () => {
+    if (items[lbIdx]?.sha1 !== sha) return; // もう先へ送られていた
+    img.src = pv.src;
+    if (dir) {
+      img.animate([{transform: `translateX(${dir * 40}px)`, opacity: .3}, {transform: 'none', opacity: 1}],
+                  {duration: 220, easing: 'cubic-bezier(.2,.9,.3,1)'});
+    }
+  };
+  if (pv.complete) swap(); else { pv.onload = swap; pv.onerror = swap; }
+  [1, -1].forEach(d => { const n = items[(lbIdx + d + items.length) % items.length];
+    if (n) new Image().src = '/preview/' + n.sha1; });
+  $('lbmeta').innerHTML = `${lbIdx + 1} / ${items.length}`;
+  try {
+    const m = await j('/api/meta/' + sha);
+    if (items[lbIdx]?.sha1 !== sha) return;
+    lbMeta = m;
+    const eds = m.edits || [];
+    $('edcompare').style.display = eds.length ? '' : 'none';
+    edHist(eds);
+    if (eds.length) {
+      img.src = lbUrl(sha, 1600);
+    } else {
+      const full = new Image(); full.src = '/img/' + sha;
+      full.onload = () => { if (items[lbIdx]?.sha1 === sha && !(lbMeta?.edits || []).length) img.src = full.src; };
+    }
+    let prov = '';
+    if (m.crawl) { // クロール来歴: どこから・どのクエリで・権利状態
+      let dom = ''; try { dom = new URL(m.crawl.landing || m.crawl.url).hostname.replace(/^www\./, ''); } catch (e) {}
+      prov = ` · <a href="${esc(m.crawl.landing || m.crawl.url)}" target="_blank" rel="noopener"
+        style="color:var(--dim)" title="取得元ページを開く\nクエリ「${esc(m.crawl.query)}」 · ${esc(m.crawl.engine)}">🔗 ${esc(dom)}</a>` +
+        (m.rights && m.rights !== 'unknown' ? ` · <span class="tag">${esc(m.rights)}</span>` : ' · <span class="tag" title="一般Web取得 — 権利未確認(学習内部利用向け)">権利未確認</span>');
+    }
+    const line1 = `<b>${lbIdx + 1} / ${items.length}</b> · ${m.w}×${m.h} · ${(m.bytes/1024).toFixed(0)}KB · ${m.source || ''}${m.origin === 'synthetic' ? ' · 🧪生成' : ' · 📷実写'}${prov}${eds.length ? ` · <span class="tag">🎨 調整${eds.length}手</span>` : ''}`;
+    const vlmHtml = v => v.caption ? `<br>${v.caption}<br>` + (v.tags||[]).map(t=>`<span class="tag">${t}</span>`).join('') : '';
+    const v = m.vlm || {};
+    $('lbmeta').innerHTML = line1 + vlmHtml(v);
+    // 属性が無ければその場で自動で見る(遅延エンリッチ・裏で1枚だけ)
+    if (!v.caption && !lbShow._enriching?.has(sha)) {
+      (lbShow._enriching ??= new Set()).add(sha);
+      $('lbmeta').innerHTML = line1 + '<br><span class="tag">🔍 属性を見ています…</span>';
+      j('/api/enrich/one', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({sha1: sha})})
+        .then(m2 => {
+          const it = items.find(x => x.sha1 === sha);
+          if (it) { it.caption = m2.vlm?.caption; it.vlm_model = m2.vlm?.model; }
+          if (items[lbIdx]?.sha1 === sha) $('lbmeta').innerHTML = line1 + vlmHtml(m2.vlm || {});
+        })
+        .catch(() => { if (items[lbIdx]?.sha1 === sha) $('lbmeta').innerHTML = line1; })
+        .finally(() => lbShow._enriching.delete(sha));
+    }
+  } catch (err) {}
+  syncHash();
+  if (lbIdx > items.length - 30) loadMore();
+}
+function lbGo(d) { lbShow(lbIdx + d, d); }
+
+// ---- 拡大表示: ホイール/ダブルクリック/ピンチでズーム、ドラッグでパン、⛶で全画面 ----
+let zm = 1, zx = 0, zy = 0;
+function zApply(anim) {
+  const el = $('lbimg');
+  el.style.transition = anim ? 'transform .22s ease, filter .18s ease' : 'filter .18s ease';
+  el.style.transform = zm > 1.01 ? `translate(${zx}px,${zy}px) scale(${zm})` : '';
+  el.style.cursor = zm > 1.01 ? 'grab' : 'zoom-out'; // クリックで戻れる事をカーソルでも示す
+}
+function zReset() { zm = 1; zx = zy = 0; zApply(false); }
+// ⛶=「画像の全画面」(没入: UIを消して画像を画面いっぱいに)。ブラウザ全画面(F11)とは別物で、触らない
+function lbFullscreen() {
+  const lb = $('lb');
+  if (!lb.classList.toggle('imm')) return;
+  $('lbimg').animate([{transform: 'scale(.96)'}, {transform: 'none'}], {duration: 220, easing: 'ease-out'});
+}
+{
+  const el = $('lbimg');
+  el.addEventListener('wheel', e => {
+    e.preventDefault();
+    zm = Math.min(8, Math.max(1, zm * (e.deltaY < 0 ? 1.25 : 0.8)));
+    if (zm <= 1.01) { zx = zy = 0; }
+    zApply(true);
+  }, {passive: false});
+  // クリック=戻る(拡大中→等倍、等倍→閉じる)。ダブルクリック拡大とは230msで識別、パン後は無視
+  let clickTimer = null, downAt = null, movedFar = false;
+  el.addEventListener('click', e => {
+    e.stopPropagation();
+    if (movedFar) return;
+    clearTimeout(clickTimer);
+    clickTimer = setTimeout(() => {
+      if (zm > 1.01) { zm = 1; zx = zy = 0; zApply(true); }       // 拡大中→等倍へ
+      else if ($('lb').classList.contains('imm')) lbFullscreen(); // 没入中→通常表示へ
+      else closeLb();                                             // 通常→閉じる(常に一段ずつ戻る)
+    }, 230);
+  });
+  el.addEventListener('dblclick', e => {
+    e.preventDefault(); clearTimeout(clickTimer);
+    zm = zm > 1.01 ? 1 : 2.5; zx = zy = 0; zApply(true);
+  });
+  const pts = new Map();
+  let panFrom = null, pinchFrom = null;
+  el.addEventListener('pointerdown', e => {
+    pts.set(e.pointerId, e); el.setPointerCapture(e.pointerId);
+    downAt = {x: e.clientX, y: e.clientY}; movedFar = false;
+    if (pts.size === 1 && zm > 1.01) panFrom = {x: e.clientX - zx, y: e.clientY - zy};
+    if (pts.size === 2) {
+      const [a, b] = [...pts.values()];
+      pinchFrom = {d: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY), zm};
+      panFrom = null;
+    }
+  });
+  el.addEventListener('pointermove', e => {
+    if (!pts.has(e.pointerId)) return;
+    pts.set(e.pointerId, e);
+    if (downAt && Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y) > 6) movedFar = true;
+    if (pts.size === 2 && pinchFrom) {
+      const [a, b] = [...pts.values()];
+      zm = Math.min(8, Math.max(1, pinchFrom.zm * Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY) / pinchFrom.d));
+      zApply(false);
+    } else if (panFrom && zm > 1.01) {
+      zx = e.clientX - panFrom.x; zy = e.clientY - panFrom.y;
+      zApply(false);
+    }
+  });
+  ['pointerup', 'pointercancel'].forEach(ev => el.addEventListener(ev, e => {
+    pts.delete(e.pointerId);
+    if (pts.size < 2) pinchFrom = null;
+    if (!pts.size) panFrom = null;
+    if (zm <= 1.01) { zx = zy = 0; zApply(true); }
+  }));
+}
+function lbSelBtn() {
+  const it = items[lbIdx];
+  const on = it && sel.has(it.sha1);
+  $('lbsel').textContent = on ? '✓ 選択中' : '◯ 選択';
+  $('lbsel').style.color = on ? 'var(--acc)' : '';
+}
+function lbSel() {
+  const it = items[lbIdx]; if (!it) return;
+  setSel(it.sha1, !sel.has(it.sha1)); drawSelbar(); lbSelBtn();
+}
+
+// ---- 削除(DEL一発・ゴミ箱経由・undo可) ----
+let lastTrashed = [];
+async function trashShas(shas) {
+  try {
+    const r = await j('/api/trash', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({shas})});
+    lastTrashed = shas;
+    items = items.filter(it => !shas.includes(it.sha1));
+    total = Math.max(0, total - r.trashed);
+    shas.forEach(s => sel.delete(s));
+    render(true); refreshFacets();
+    toast(`🗑 ${r.trashed}枚をゴミ箱へ(30日は戻せます)`, '↩ 元に戻す', undoTrash);
+    return r.trashed;
+  } catch (e) { toast('❌ ' + e.message); return 0; }
+}
+async function undoTrash() {
+  if (!lastTrashed.length) return;
+  try {
+    const r = await j('/api/trash/restore', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({shas: lastTrashed})});
+    lastTrashed = [];
+    toast(`↩ ${r.restored}枚戻しました`);
+    reload(); refreshFacets();
+  } catch (e) { toast('❌ ' + e.message); }
+}
+function delSelected() { if (sel.size) trashShas([...sel]); }
+async function lbDel() {
+  const it = items[lbIdx]; if (!it) return;
+  const i = lbIdx;
+  const n = await trashShas([it.sha1]);
+  if (!n) return;
+  if (!items.length) closeLb();
+  else lbShow(Math.min(i, items.length - 1), 1);
+}
+
+// ---- ⭐keep ----
+async function setKeep(shas, keep) {
+  await j('/api/keep', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({shas, keep})});
+  items.forEach(it => { if (shas.includes(it.sha1)) it.keep = keep ? 1 : 0; });
+}
+function lbKeepBtn() {
+  const it = items[lbIdx];
+  $('lbkeep').textContent = it?.keep ? '⭐' : '☆';
+  $('lbkeep').style.color = it?.keep ? '#e8c35c' : '';
+}
+async function lbKeep() {
+  const it = items[lbIdx]; if (!it) return;
+  try {
+    await setKeep([it.sha1], !it.keep);
+    lbKeepBtn();
+    toast(it.keep ? '⭐ お気に入り — 自動間引きから保護' : '☆ 保護を外しました');
+  } catch (e) { toast('❌ ' + e.message); }
+}
+async function bulkKeep(keep) {
+  if (!sel.size) return;
+  try {
+    await setKeep([...sel], keep);
+    toast((keep ? '⭐ ' : '☆ ') + sel.size + '枚を' + (keep ? '保護' : '保護解除'));
+    render(true); refreshFacets();
+  } catch (e) { toast('❌ ' + e.message); }
+}
+
+// ---- 非破壊調整(M4) ----
+const ED_SLIDERS = ['exposure', 'contrast', 'saturation', 'temperature'];
+const ED_FILTERS = [
+  {name:'grayscale', label:'モノクロ', css:'grayscale(1)'},
+  {name:'sepia',     label:'セピア',   css:'sepia(1)'},
+  {name:'invert',    label:'反転',     css:'invert(1)'},
+  {name:'posterize', label:'ポスタライズ', css:'contrast(1.4) saturate(1.6)', params:{levels:5}},
+  {name:'vignette',  label:'ビネット', css:'brightness(.88)'},
+  {name:'sharpen',   label:'シャープ', css:'contrast(1.12)'},
+  {name:'blur',      label:'ぼかし',   css:'blur(2px)'},
+];
+$('edfilters').innerHTML = ED_FILTERS.map(f => `<span class="fxchip"
+  onmouseenter="$('lbimg').style.filter='${f.css}'" onmouseleave="edLive()"
+  onclick="edPush({op:'filter', params:${JSON.stringify({name: f.name, ...(f.params || {})}).replace(/"/g, '&quot;')}})">${f.label}</span>`).join('');
+
+function edToggle() { $('lb').classList.toggle('editing'); }
+function edVals() {
+  const o = {};
+  ED_SLIDERS.forEach(k => { const v = parseInt($('ed_' + k).value) / 100; if (Math.abs(v) > 0.004) o[k] = v; });
+  return o;
+}
+function edLive() {
+  ED_SLIDERS.forEach(k => $('edv_' + k).textContent = $('ed_' + k).value);
+  const v = edVals();
+  let f = '';
+  if (v.exposure) f += `brightness(${Math.pow(2, v.exposure * 2).toFixed(3)}) `;
+  if (v.contrast) f += `contrast(${(1 + v.contrast).toFixed(3)}) `;
+  if (v.saturation) f += `saturate(${(1 + v.saturation).toFixed(3)}) `;
+  if (v.temperature) f += v.temperature > 0 ? `sepia(${(v.temperature * 0.3).toFixed(3)})`
+                                            : `hue-rotate(${(v.temperature * 16).toFixed(1)}deg)`;
+  $('lbimg').style.filter = f.trim();
+}
+function edReset() {
+  ED_SLIDERS.forEach(k => { $('ed_' + k).value = 0; $('edv_' + k).textContent = '0'; });
+  $('lbimg').style.filter = '';
+}
+const ED_LABEL = {adjust:'🎚 調整', auto:'✨ 自動', filter:'🎨', rotate:'⟳ 回転', flip:'⇋ 反転', crop:'✂'};
+function edHist(list) {
+  $('edhist').innerHTML = list.length
+    ? '履歴: ' + list.map(e => `<span class="tag">${ED_LABEL[e.op] || e.op}${e.op === 'filter' ? ' ' + (e.params?.name || '') : ''}</span>`).join('') + ' <span style="opacity:.6">(原本は不変・1手ずつ戻せます)</span>'
+    : '<span style="opacity:.6">履歴なし = 原本そのまま</span>';
+}
+async function edMutate(body) {
+  const sha = items[lbIdx]?.sha1; if (!sha) return;
+  try {
+    const r = await j('/api/edits/' + sha, {method:'PUT', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body)});
+    if (items[lbIdx]?.sha1 !== sha) return;
+    lbMeta = {...(lbMeta || {}), sha1: sha, edits: r.edits, edits_rev: r.rev};
+    edReset(); edHist(r.edits);
+    $('edcompare').style.display = r.edits.length ? '' : 'none';
+    $('lbimg').src = r.edits.length ? lbUrl(sha, 1600) : '/preview/' + sha;
+  } catch (e) { toast('❌ ' + e.message); }
+}
+function edPush(edit) { edMutate({action: 'push', edit}); }
+function edUndo() { edMutate({action: 'pop'}); }
+function edClear() { edMutate({action: 'clear'}); }
+async function edApplyAdjust() {
+  const v = edVals();
+  if (!Object.keys(v).length) return toast('スライダを動かしてから ✔ 適用');
+  edPush({op: 'adjust', params: v});
+}
+function edCompare(on) {
+  const sha = items[lbIdx]?.sha1; if (!sha) return;
+  $('lbimg').src = on ? '/preview/' + sha : lbUrl(sha, 1600);
+}
+
+// ---- 動的アルバム(+AIフォルダの器) — 操作は全部上部の条件パネル、prompt()は使わない ----
+let albumsCache = [], curAlbum = null, headNew = null; // headNew={criteria} 作成/コピー中の下書き
+function openAlbum(name, el) {
+  const a = albumsCache.find(x => x.name === name); if (!a) return;
+  curAlbum = name; headNew = null;
+  applyAlbum(a.criteria);
+  if (el) markAlbum(el);
+  showAlbumHead(a, false);
+}
+function esc(s) { return String(s ?? '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;'); }
+function showAlbumHead(a, isNew) {
+  const h = $('albumhead');
+  h.style.display = 'block';
+  h.innerHTML = `
+    <div class="row1">
+      <span style="font-size:15px">${isNew ? '🆕' : (a.goal ? '🤖' : '☆')}</span>
+      ${isNew
+        ? `<input type="text" id="ah_name" value="${esc((a.folder ? a.folder + '/' : '') + (a.name || ''))}"
+             placeholder="フォルダ/名前 (例: AIフォルダ/かわいい猫)" style="width:240px">`
+        : `<span class="ttl">${esc(a.name)}</span>${a.folder ? `<span class="lbl">📁 ${esc(a.folder)}</span>` : ''}`}
+      <span style="flex:1"></span>
+      ${isNew ? '<button class="pri" onclick="saveAlbumHead(true)">作成</button>' : `
+      <button class="pri" onclick="runCrawlNow()" ${a.running ? 'disabled' : ''}
+        title="いますぐ1回収集(目標までの不足分・最大30枚)">${a.running ? '🟢 収集中' : '▶ 今すぐ集める'}</button>
+      <button onclick="toggleAutoHead()" ${a.agent?.auto ? 'style="color:#6ee7a0; border-color:#6ee7a055"' : ''}
+        title="ONの間は30分ごとに見回り、目標枚数まで勝手に集め続けます。消して減ったらまた補充">${a.agent?.auto ? '♻ 自動収集中' : '♻ 放置で集める'}</button>`}
+      <button class="ghost" onclick="hideAlbumHead()">✕</button>
+    </div>
+    <div class="frow">
+      <span class="lbl">目標</span>
+      <input type="text" id="ah_goal" class="goal" value="${esc(a.goal)}" ${isNew ? '' : 'oninput="headAutoSave()"'}
+        placeholder="何を集める? (例: 可愛い犬の実写。イラスト不可) — 空ならただの条件フォルダ">
+      <span class="lbl" style="width:auto">まで</span>
+      <input type="number" id="ah_target" value="${a.agent?.target || 200}" style="width:70px" ${isNew ? '' : 'oninput="headAutoSave()"'}>
+      <span class="lbl" style="width:auto">枚</span>
+    </div>
+    <div class="frow">
+      <span class="lbl">キーワード</span>
+      <input type="text" id="ah_keywords" style="flex:1" ${isNew ? '' : 'oninput="headAutoSave()"'}
+        placeholder="確実に検索したい語をカンマ区切りで(例: 柴犬 子犬, shiba puppy)。空=AIが目標文から考える"
+        value="${esc((a.keywords || []).join(', '))}">
+    </div>
+    ${!isNew && a.last_run ? `<div class="last">前回: <b>+${a.last_run.ingested}枚</b> · 検査${a.last_run.checked} · 通過率<b>${(a.last_run.pass_rate * 100 | 0)}%</b> · 💸$${(a.last_run.spent_usd || 0).toFixed(2)} · クエリ「${esc(a.last_run.query)}」
+      <span style="flex:1"></span>
+      <button class="ghost" style="padding:2px 9px; font-size:11px" onclick="resetLedger()"
+        title="使ったクエリ/見たURLの記録を忘れて、もう一度最初から探させる(収集が枯れた時に)">🔄 検索履歴リセット</button></div>` : ''}`;
+}
+function hideAlbumHead() { $('albumhead').style.display = 'none'; curAlbum = null; headNew = null; }
+// 自動保存(既存フォルダのみ・800msデバウンス・パネルは再描画しない=入力フォーカスを守る)
+function headAutoSave() {
+  clearTimeout(window._ahT);
+  window._ahT = setTimeout(async () => {
+    if (!curAlbum) return;
+    const src = albumsCache.find(x => x.name === curAlbum); if (!src) return;
+    const goal = $('ah_goal')?.value.trim() ?? '';
+    const target = parseInt($('ah_target')?.value) || 200;
+    const keywords = ($('ah_keywords')?.value ?? '').split(',').map(s => s.trim()).filter(Boolean);
+    const criteria = {...src.criteria};
+    if (goal && (!criteria.source || criteria.source.startsWith('crawl:'))) criteria.source = 'crawl:' + curAlbum;
+    try {
+      await j('/api/albums', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({name: curAlbum, folder: src.folder || '', goal,
+          agent: {auto: src.agent?.auto || false, target}, keywords, criteria})});
+      src.goal = goal; src.keywords = keywords; src.agent = {...(src.agent || {}), target};
+      toast('💾 保存');
+    } catch (e) { toast('❌ ' + e.message); }
+  }, 800);
+}
+async function saveAlbumHead(isNew) {
+  const {folder, name} = splitPath($('ah_name').value.trim());
+  if (!name) return toast('名前をください');
+  const goal = $('ah_goal').value.trim();
+  const target = parseInt($('ah_target').value) || 200;
+  const keywords = $('ah_keywords').value.split(',').map(s => s.trim()).filter(Boolean);
+  const src = albumsCache.find(x => x.name === curAlbum);
+  const criteria = isNew
+    ? {...(headNew?.criteria || Object.fromEntries([...params({})].filter(([, v]) => v !== '' && v !== '0')))}
+    : {...(src?.criteria || {})};
+  // AIフォルダの収蔵先は自分の名前に追従させる(⧉コピーが元フォルダに混ぜ込む事故の防止)
+  if (goal && (!criteria.source || criteria.source.startsWith('crawl:'))) {
+    criteria.source = 'crawl:' + name;
+  }
+  const agent = {auto: (!isNew && src?.agent?.auto) || false, target};
+  if (!isNew && src && goal && src.goal && goal !== src.goal && (src.count || 0) > 0) {
+    toast('⚠ 目標を変えました — 既存の画像と混ざります。分けたいなら⧉コピーが正解');
+  }
+  try {
+    const r = await j('/api/albums', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({name, folder, goal, agent, keywords, criteria})});
+    toast(isNew ? `${goal ? '🤖 AIフォルダ' : '📚 アルバム'}「${r.name}」作成` : '💾 保存しました');
+    curAlbum = r.name; headNew = null;
+    await loadAlbums();
+    const a = albumsCache.find(x => x.name === r.name);
+    if (a) showAlbumHead(a, false);
+  } catch (e) { toast('❌ ' + e.message); }
+}
+function makeAlbum() { // サイドバーの＋: 今の絞り込みを下書きにしてパネルを開く
+  curAlbum = null;
+  headNew = {criteria: Object.fromEntries([...params({})].filter(([, v]) => v !== '' && v !== '0'))};
+  showAlbumHead({name: '', folder: '', goal: '', agent: {target: 200}}, true);
+  $('gridwrap').scrollTop = 0;
+  $('ah_name').focus();
+}
+function copyAlbum(name) { // ⧉ レシピ複製 — 目標を書き換えれば「犬→猫」で別エージェント
+  const src = albumsCache.find(x => x.name === name); if (!src) return;
+  curAlbum = null; headNew = {criteria: src.criteria};
+  showAlbumHead({name: name + '_2', folder: src.folder, goal: src.goal, keywords: src.keywords,
+                 agent: {target: src.agent?.target || 200}}, true);
+  $('gridwrap').scrollTop = 0;
+  toast('⧉ レシピを複製 — 目標を書き換えて「作成」');
+}
+async function runCrawlNow() {
+  const a = albumsCache.find(x => x.name === curAlbum); if (!a) return;
+  const n = Math.max(5, Math.min(30, (a.agent?.target || 200) - (a.count || 0)));
+  try {
+    await j('/api/crawl', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({album: curAlbum, n})});
+    toast(`🤖 収集開始(+${n}枚目標) — ゲート通過だけ収蔵`);
+    await loadAlbums();
+    const x = albumsCache.find(y => y.name === curAlbum);
+    if (x) showAlbumHead(x, false);
+  } catch (e) { toast('❌ ' + e.message); }
+}
+async function toggleAutoHead() {
+  const a = albumsCache.find(x => x.name === curAlbum); if (!a) return;
+  const agent = {...(a.agent || {}), auto: !a.agent?.auto, target: a.agent?.target || 200};
+  try {
+    await j('/api/albums', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({name: a.name, folder: a.folder || '', goal: a.goal || '',
+                            agent, keywords: a.keywords || [], criteria: a.criteria})});
+    toast(agent.auto ? `♻ 自動補充ON — 目標${agent.target}枚まで置いとくと増えます` : '⏸ 自動補充OFF');
+    await loadAlbums();
+    const x = albumsCache.find(y => y.name === curAlbum);
+    if (x) showAlbumHead(x, false);
+  } catch (e) { toast('❌ ' + e.message); }
+}
+async function resetLedger() {
+  try {
+    await j('/api/crawl/ledger/clear', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({album: curAlbum})});
+    toast('🔄 台帳を捨てました — 次回はまっさらに探し直します');
+  } catch (e) { toast('❌ ' + e.message); }
+}
+function applyAlbum(c) {
+  curDataset = '';
+  $('q').value = c.q || '';
+  view = {mode: c.keep === '1' ? 'keep' : (c.vlm_ === 'none' ? 'novlm' : 'all'), source: c.source || ''};
+  fchips = {origin: c.origin || '', q8: (c.min_quality|0) >= 8, safe: c.nsfw === '0'};
+  $('fc_real').classList.toggle('on', fchips.origin==='real');
+  $('fc_synth').classList.toggle('on', fchips.origin==='synthetic');
+  $('fc_q8').classList.toggle('on', fchips.q8); $('fc_safe').classList.toggle('on', fchips.safe);
+  chipFilters = {tag: c.tag || '', scene: c.scene || '', subject: c.subject || '', style: c.style || ''};
+  refreshFacets(); reload();
+}
+async function loadAlbums() {
+  try {
+    albumsCache = await j('/api/albums');
+    $('nav_albums').innerHTML = treeHtml(buildTree(albumsCache), (a, d) =>
+      `<div class="nav" style="padding-left:${10 + d * 13}px" title="${esc(a.goal || '動的アルバム(条件保存)')}"
+         onclick="openAlbum('${a.name}', this)">
+        <span class="ico">${a.goal ? '🤖' : '☆'}</span><span class="nm">${a.name}</span>
+        ${a.running ? '<span class="live" style="color:#6ee7a0; border-color:#6ee7a055">🟢</span>'
+                    : (a.agent?.auto ? '<span class="live" style="color:#6ee7a0; border-color:#6ee7a055">♻</span>' : '')}
+        <span class="n">${a.count ?? ''}</span>
+        <span class="del" title="レシピごと複製(目標を書き換えて増殖)" onclick="event.stopPropagation(); copyAlbum('${a.name}')">⧉</span>
+        <span class="del" onclick="event.stopPropagation(); delAlbum('${a.name}')">✕</span></div>`)
+      || '<div class="nav" style="pointer-events:none"><span class="ico">·</span><span class="nm sub">絞り込んで＋で保存</span></div>';
+  } catch (e) {}
+}
+function markAlbum(el) {
+  document.querySelectorAll('.nav').forEach(n => n.classList.remove('on'));
+  el.classList.add('on');
+}
+async function delAlbum(n) {
+  if (!confirm(`アルバム「${n}」を削除?(条件の保存を消すだけ。画像は消えません)`)) return;
+  await j('/api/albums/' + n, {method:'DELETE'}); loadAlbums();
+}
+
+// ---- データセット ----
+async function makeDataset() {
+  const input = $('ds_name').value.trim();
+  if (!input) return alert('データセット名をください(「フォルダ/名前」でフォルダに入ります)');
+  if (!sel.size) return alert('画像を選んでください');
+  const {folder, name} = splitPath(input);
+  try {
+    const r = await j('/api/datasets', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({name, folder, shas: [...sel]})});
+    toast(`📦 ${r.name} (${r.count}枚) 払い出しました`);
+    clearSel(); loadDatasets();
+  } catch (e) { alert(e.message); }
+}
+async function loadDatasets() {
+  const ds = await j('/api/datasets');
+  $('nav_datasets').innerHTML = treeHtml(buildTree(ds.filter(d => !d.name.startsWith('_refs_'))), (d, dep) =>
+    `<div class="nav" style="padding-left:${10 + dep * 13}px" onclick="showDataset('${d.name}', this)">
+      <span class="ico">📦</span><span class="nm">${d.name}</span><span class="n">${d.count}</span>
+      <span class="del" title="AIで増やす" onclick="event.stopPropagation(); expandDataset('${d.name}')">🌱</span>
+      <span class="del" onclick="event.stopPropagation(); delDataset('${d.name}')">✕</span></div>`)
+    || '<div class="nav" style="pointer-events:none"><span class="ico">·</span><span class="nm sub">選択→データセット化</span></div>';
+}
+async function showDataset(name, el) {
+  try {
+    const s = await j('/api/datasets/' + name + '/shas');
+    items = s.shas.map(sha => ({sha1: sha})); total = items.length;
+    render(true); clearSel();
+    curDataset = name;
+    hideAlbumHead();
+    document.querySelectorAll('.nav').forEach(n => n.classList.remove('on'));
+    if (el) el.classList.add('on');
+    $('stat').innerHTML = `📦 <b>${name}</b> — ${total}枚(払い出し済みスナップショット)`;
+    syncHash();
+  } catch (e) { toast('❌ ' + e.message); }
+}
+async function delDataset(n) {
+  if (!confirm(`データセット「${n}」を削除? (symlinkなので本体は消えません)`)) return;
+  await j('/api/datasets/' + n, {method:'DELETE'}); loadDatasets();
+}
+async function expandDataset(name) {
+  try {
+    const s = await j('/api/datasets/' + name + '/shas');
+    genShas = s.shas;
+    $('genpanel').style.display = 'block';
+    $('gen_instruction').focus();
+    toast(`📦 「${name}」の${s.shas.length}枚を種に量産します — 指示をどうぞ`);
+  } catch (e) { toast('❌ ' + e.message); }
+}
+// 🌱量産 — 指示は選択バー上の小パネルで(prompt()は使わない)
+let genShas = null;
+function genVar() {
+  if (!sel.size) return toast('参考にする画像を選んでください');
+  genShas = [...sel];
+  $('genpanel').style.display = 'block';
+  $('gen_instruction').focus();
+}
+async function genRun() {
+  const instruction = $('gen_instruction').value.trim();
+  if (!instruction) return toast('どう作り変えるか書いてください');
+  if (!genShas?.length) return toast('種の画像がありません');
+  const per = parseInt($('gen_per').value) || 4;
+  try {
+    const r = await j('/api/genvar', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({shas: genShas, instruction, per_ref: per})});
+    toast(`🌱 「${r.name}」${r.n}枚を工房に依頼 (~${r.est_minutes}分)。完成後ここに自動収蔵`);
+    $('genpanel').style.display = 'none';
+    $('gen_instruction').value = '';
+    clearSel();
+  } catch (e) { toast('❌ ' + e.message); }
+}
+
+// ---- M5 クローラ(操作はフォルダ条件パネルの▶から) ----
+async function watchCrawl() {
+  try {
+    const s = await j('/api/crawl/status');
+    $('crawlbar').style.display = s.alive ? 'block' : 'none';
+    if (s.alive) {
+      $('cr_prog').textContent = `${s.album}: 候補${s.found} → 検査${s.checked} → 収蔵${s.ingested} (通過率${(s.pass_rate*100).toFixed(0)}%)` +
+        (s.spent_usd > 0 ? ` 💸$${s.spent_usd.toFixed(2)}` : '') + ` — 「${s.query}」`;
+      $('cr_last').textContent = s.last || '';
+      if (s.ingested !== watchCrawl._n) {
+        const add = s.ingested - (watchCrawl._n || 0);
+        watchCrawl._n = s.ingested;
+        if (add > 0) liveDrop(s.album, add + 2);
+        refreshFacets();
+      }
+    } else if (watchCrawl._was) { refreshFacets(); reload(); loadAlbums(); toast('🤖 収集おわり: ' + (s.last || '')); }
+    watchCrawl._was = s.alive;
+  } catch (e) {}
+}
+setInterval(watchCrawl, 2000);
+
+// ---- AI稼働状況(サイドバー常設): どのAIが今なにをしてるか ----
+async function watchActivity() {
+  try {
+    const a = await j('/api/activity');
+    const row = (icon, name, on, detail) => `<div style="display:flex; gap:6px; align-items:center; padding:2px 0">
+      <span style="flex:none; width:7px; height:7px; border-radius:99px; background:${on ? '#6ee7a0' : '#2a2d38'};${on ? 'box-shadow:0 0 8px #6ee7a077' : ''}"></span>
+      <span style="flex:none">${icon} ${name}</span>
+      <span style="margin-left:auto; opacity:.85; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:96px" title="${detail}">${detail}</span></div>`;
+    const c = a.crawl, e = a.enrich, l = a.llm, g = a.ingest, s = a.system || {};
+    const bar = (pct, hot) => `<span style="flex:1; height:4px; min-width:34px; border-radius:99px; background:#1c1e26; overflow:hidden">
+      <span style="display:block; width:${Math.min(100, pct).toFixed(0)}%; height:100%; border-radius:99px;
+        background:${hot ? '#e0a83c' : 'var(--acc)'}; transition:width .6s ease"></span></span>`;
+    const gpu = s.gpu ? `<div style="display:flex; gap:6px; align-items:center; padding:2px 0" title="GPU ${s.gpu.util}% · VRAM ${(s.gpu.vram_used_mb/1024).toFixed(1)}/${(s.gpu.vram_total_mb/1024).toFixed(0)}GB">
+      <span style="flex:none">🎛 GPU</span>${bar(s.gpu.util, s.gpu.util > 85)}
+      <span style="flex:none; font-variant-numeric:tabular-nums">${(s.gpu.vram_used_mb/1024).toFixed(1)}G</span></div>` : '';
+    const ram = s.ram ? `<div style="display:flex; gap:6px; align-items:center; padding:2px 0" title="RAM ${s.ram.used_gb.toFixed(0)}/${s.ram.total_gb.toFixed(0)}GB">
+      <span style="flex:none">🧮 RAM</span>${bar(100 * s.ram.used_gb / s.ram.total_gb, s.ram.used_gb / s.ram.total_gb > .85)}
+      <span style="flex:none; font-variant-numeric:tabular-nums">${s.ram.used_gb.toFixed(0)}G</span></div>` : '';
+    $('ai_activity').innerHTML =
+      row('🕷', '収集', c.alive, c.alive ? `${c.album} +${c.ingested}枚` : '待機') +
+      row('👁', 'VLM', e.alive, e.alive ? `属性付け ${e.done}/${e.total}` : '待機') +
+      row('🧠', 'LLM', l.busy || l.downloading, l.downloading ? `DL ${l.got_mb}/${l.total_mb}MB` : l.busy ? '生成中' : l.ready ? '常駐中' : '未ロード') +
+      row('📥', '取込', g.alive, g.alive ? `${g.done}/${g.total}` : '待機') + gpu + ram;
+  } catch (err) {}
+}
+watchActivity(); setInterval(watchActivity, 2000);
+// 実況中継: 収蔵されたての画像が宙から降ってくる(表示中のビューに合う時だけ)
+async function liveDrop(album, n) {
+  if (curDataset || view.mode !== 'all') return;
+  if (view.source && view.source !== 'crawl:' + album) return;
+  try {
+    const r = await j('/api/images?' + new URLSearchParams({source: 'crawl:' + album, limit: n, offset: 0}));
+    const fresh = r.items.filter(it => !items.some(x => x.sha1 === it.sha1));
+    if (!fresh.length) return;
+    items = fresh.concat(items); total += fresh.length;
+    const tmp = document.createElement('div');
+    tmp.innerHTML = fresh.map(cellHtml).join('');
+    [...tmp.children].reverse().forEach((el, k) => {
+      el.classList.add('in', 'drop');
+      el.style.animationDelay = (k * 120) + 'ms';
+      $('grid').prepend(el);
+    });
+  } catch (e) {}
+}
+
+// ---- enrich / ingest / presets ----
+async function enrich() {
+  const backend = $('en_backend').value;
+  try {
+    await j('/api/enrich', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({backend, q: $('q').value.trim(), source: view.source,
+                            tag: chipFilters.tag, only_missing: true})});
+    toast('⚡ 属性付けを始めました' + (backend==='builtin' ? '(初回は内蔵VLMのDLで数分)' : ''));
+  } catch (e) { alert(e.message); }
+}
+async function watchEnrich() {
+  try {
+    const s = await j('/api/enrich/status');
+    $('enrichbar').style.display = s.alive ? 'block' : 'none';
+    if (s.alive) {
+      $('en_prog').textContent = `${s.done}/${s.total} (失敗${s.errors}) — ${s.backend}`;
+      $('en_last').textContent = s.last || '';
+    } else if (watchEnrich._was) { refreshFacets(); reload(); }
+    watchEnrich._was = s.alive;
+  } catch (e) {}
+}
+async function ingest() {
+  const path = $('ing_path').value.trim(), source = $('ing_src').value.trim() || 'import';
+  if (!path) return;
+  try {
+    await j('/api/ingest', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({path, source})});
+    toast('📥 収蔵を始めました(裏で走ります)');
+  } catch (e) { $('ing_msg').textContent = '❌ ' + e.message; }
+}
+let _ingWas = false;
+async function watchIngest() {
+  try {
+    const s = await j('/api/ingest/status');
+    if (s.alive) {
+      const pct = s.total ? (100 * s.done / s.total).toFixed(0) : 0;
+      $('ing_msg').textContent = `📥 ${s.label}: ${s.done.toLocaleString()}/${s.total.toLocaleString()} (${pct}%) — 追加${s.added.toLocaleString()} 重複${s.dup.toLocaleString()}`;
+      if (s.done % 1000 < 300) { refreshFacets(); }
+    } else if (_ingWas) {
+      $('ing_msg').textContent = `✅ 完了: 追加${s.added.toLocaleString()} / 重複${s.dup.toLocaleString()} / 読めず${s.bad}`;
+      refreshFacets(); reload(); loadPresets();
+    }
+    _ingWas = s.alive;
+  } catch (e) {}
+}
+async function loadPresets() {
+  try {
+    const ps = await j('/api/presets');
+    $('presets').innerHTML = ps.map(p => `<button ${p.available ? '' : 'disabled style="opacity:.35"'}
+      onclick="ingestPreset('${p.id}', this)">${p.label}</button>`).join('');
+  } catch (e) {}
+}
+async function ingestPreset(id, btn) {
+  btn.disabled = true; btn.textContent = '📥 収蔵開始…';
+  try {
+    await j('/api/presets/' + id, {method:'POST'});
+    toast('🎁 収蔵を始めました — 触りながら待てます');
+  } catch (e) { alert(e.message); btn.disabled = false; }
+}
+
+// ---- キーボード / 無限スクロール ----
+new IntersectionObserver(es => { if (es[0].isIntersecting) loadMore(); },
+  {root: $('gridwrap'), rootMargin: '700px'}).observe($('more'));
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+  if (e.key === '/') { e.preventDefault(); $('q').focus(); return; }
+  if (!$('lb').classList.contains('show')) {
+    if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); delSelected(); }
+    else if (e.key === 'z' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); undoTrash(); }
+    return;
+  }
+  if (e.key === 'Escape') closeLb();
+  else if (e.key === 'ArrowRight' || e.key === 'f') lbGo(1);
+  else if (e.key === 'ArrowLeft' || e.key === 'd') lbGo(-1);
+  else if (e.key === 'e') edToggle();
+  else if (e.key === 's') lbKeep();
+  else if (e.key === 'x' || e.key === ' ') { e.preventDefault(); lbSel(); }
+  else if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); lbDel(); }
+  else if (e.key === 'z' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); edUndo(); }
+});
+setInterval(watchIngest, 1500);
+// 起動: URLハッシュに状態があれば復元(コピペしたURLで同じ画面が開く)
+(async function boot() {
+  refreshFacets(); loadDatasets(); loadPresets(); loadAlbums(); watchEnrich();
+  const h = new URLSearchParams(location.hash.slice(1));
+  if (h.get('ds')) {
+    await showDataset(h.get('ds'));
+  } else if ([...h].filter(([k]) => k !== 'img').length) {
+    applyAlbum(Object.fromEntries(h));
+  } else {
+    reload();
+  }
+  const img = h.get('img');
+  if (img) setTimeout(() => {
+    const i = items.findIndex(x => x.sha1 === img);
+    if (i >= 0) { openLb(i); }
+    else { items.unshift({sha1: img}); total++; render(true); openLb(0); }
+  }, 700);
+})();
+setInterval(watchEnrich, 3000); setInterval(refreshFacets, 30000);
+</script>

@@ -1,0 +1,2646 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>fluent_gallery</title>
+<style>
+  /* ==== v3「フォルダが主語」— 正本は docs/ui-v3.md。無彩色ダーク+アクセント1色+SVGアイコン ==== */
+  :root {
+    --bg:#0a0a0c; --side:#0e0f12; --panel:#14151a; --line:#232530; --hair:#1a1c24;
+    --tx:#e8e9ec; --dim:#8b8e98; --faint:#5c5f6a;
+    --acc:#4d9fff; --acc-soft:#4d9fff22; --ok:#6ee7a0;
+  }
+  * { box-sizing:border-box; margin:0; }
+  html, body { height:100%; }
+  body { background:var(--bg); color:var(--tx); overflow:hidden;
+         font:13px/1.55 -apple-system,"SF Pro Text","Hiragino Sans",system-ui,sans-serif;
+         display:grid; grid-template-columns:var(--sidew, 218px) 1fr; }
+  ::selection { background:var(--acc-soft); }
+  svg.ic { vertical-align:-2.5px; flex:none; }
+  button { font:12.5px inherit; color:var(--dim); background:none; border:1px solid var(--line);
+           border-radius:8px; padding:6px 12px; cursor:pointer; display:inline-flex; gap:6px;
+           align-items:center; transition:color .15s, border-color .15s, background .15s; }
+  button:hover { color:var(--tx); border-color:#3a3d4a; }
+  button.pri { color:#fff; background:var(--acc); border-color:transparent; font-weight:600; }
+  button.pri:hover { filter:brightness(1.1); }
+  button.ghost { border-color:transparent; }
+  button.on { color:var(--ok); border-color:#6ee7a055; }
+  input, select { background:#0d0e12; color:var(--tx); border:1px solid var(--line);
+                  border-radius:8px; padding:6px 11px; font-size:12.5px; outline:none; }
+  input:focus { border-color:var(--acc); }
+
+  /* ---- サイドバー ---- */
+  aside { background:var(--side); border-right:1px solid var(--hair); padding:14px 10px 16px;
+          overflow-y:auto; user-select:none; display:flex; flex-direction:column; position:relative; }
+  /* サイドバー幅のドラッグつまみ(右端)。掴むと出る・普段は透明 */
+  #sideresize { position:fixed; top:0; bottom:0; width:7px; cursor:col-resize; z-index:50;
+                left:calc(var(--sidew, 218px) - 3px); }
+  #sideresize:hover, #sideresize.on { background:#7aa2f744; }
+  .brand { font-size:13.5px; font-weight:700; padding:2px 10px 10px; }
+  .brand small { color:var(--faint); font-weight:400; margin-left:6px; }
+  .sec { font-size:10px; font-weight:600; letter-spacing:.09em; color:var(--faint);
+         padding:16px 10px 4px; text-transform:uppercase; display:flex; align-items:center; }
+  .sec .add { margin-left:auto; cursor:pointer; padding:0 4px; border-radius:5px; display:flex; }
+  .sec .add:hover { color:var(--tx); background:#ffffff0c; }
+  .nav { display:flex; align-items:center; gap:8px; padding:5px 10px; border-radius:7px;
+         color:var(--dim); cursor:pointer; font-size:12.5px; white-space:nowrap; }
+  .nav:hover { background:#ffffff08; color:var(--tx); }
+  .nav.on { background:var(--acc-soft); color:var(--tx); }
+  .nav .nm { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; min-width:76px; }
+  .nav .n { margin-left:auto; font-size:10px; color:var(--faint); font-variant-numeric:tabular-nums;
+            padding-left:6px; flex:none; max-width:46%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .nav .st { margin-left:auto; flex:none; display:flex; align-items:center; color:var(--ok); }
+  .nav .del { display:none; margin-left:4px; color:var(--faint); }
+  .nav:hover .del { display:inline-flex; }
+  .nav .del:hover { color:var(--tx); }
+
+  /* ---- メイン ---- */
+  main { display:flex; flex-direction:column; overflow:hidden; }
+  .top { display:flex; gap:8px; align-items:center; padding:10px 16px 8px; flex-wrap:wrap;
+         border-bottom:1px solid var(--hair); }
+  .search { flex:0 1 280px; min-width:170px; display:flex; align-items:center; gap:8px;
+            background:#0d0e12; border:1px solid var(--line); border-radius:8px;
+            padding:6px 12px; color:var(--faint); }
+  .search input { background:none; border:none; padding:0; width:100%; }
+  .fchip { font-size:11.5px; padding:5px 13px; border-radius:999px; } /* 丸く(2026-09-03指示) */
+  .fchip.on { color:var(--tx); border-color:var(--acc); background:var(--acc-soft); }
+  /* モードON中はページ背景もうっすら色づく(今どのモードで見ているか一目で分かる) */
+  body.f-clean { background: radial-gradient(1200px 500px at 50% -100px, #113d2422, transparent), var(--bg); }
+  body.f-safe { background: radial-gradient(1200px 500px at 50% -100px, #10365522, transparent), var(--bg); }
+  body.f-clean.f-safe { background:
+      radial-gradient(900px 420px at 30% -100px, #113d2422, transparent),
+      radial-gradient(900px 420px at 70% -100px, #10365522, transparent), var(--bg); }
+  /* 権利クリーン/セーフは意味が重要なチップ: ON時に色+太字で強調 */
+  #fc_clean.on { color:#6ee7a0; border-color:#6ee7a0; background:#6ee7a01c; font-weight:700; }
+  #fc_safe.on { color:#7ec8ff; border-color:#7ec8ff; background:#7ec8ff1c; font-weight:700; }
+  .sp { flex:1; }
+  .chips { display:flex; gap:5px; flex-wrap:wrap; padding:0 16px; max-height:0; overflow:hidden;
+           transition:max-height .25s ease, padding .25s ease; }
+  .chips.open { max-height:220px; padding:8px 16px 2px; overflow-y:auto; }
+  #chipsbtn .badge { background:var(--acc); color:#fff; border-radius:99px; font-size:10px;
+                     padding:0 6px; margin-left:2px; }
+  .chip { font-size:11px; padding:3px 10px; border-radius:999px; border:1px solid var(--hair);
+          background:none; color:var(--faint); cursor:pointer; transition:all .15s; }
+  .chip:hover { color:var(--tx); border-color:#3a3d4a; }
+  .chip.on { color:var(--tx); border-color:var(--acc); background:var(--acc-soft); }
+  .chip small { opacity:.6; margin-left:3px; }
+  .sub { font-size:11.5px; color:var(--faint); }
+
+  /* ---- ビューヘッダ(今いる場所の説明+操作) ---- */
+  #viewhead { display:none; margin:10px 16px 0; background:var(--panel); border:1px solid var(--line);
+              border-radius:12px; padding:12px 16px; }
+  #viewhead .row1 { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  #viewhead .ttl { font-size:14px; font-weight:700; display:flex; gap:8px; align-items:center; }
+  #viewhead .frow { display:flex; gap:8px; align-items:center; margin-top:8px; }
+  #viewhead .frow .lbl { width:76px; text-align:right; flex:none; font-size:11px; color:var(--faint); }
+  #viewhead .goal { flex:1; min-width:220px; }
+  #viewhead .lbl { font-size:11px; color:var(--faint); }
+  #viewhead .last { font-size:11px; color:var(--faint); margin-top:9px; display:flex; align-items:center; gap:4px; flex-wrap:wrap; }
+  #viewhead .last b { color:var(--dim); }
+  /* 自動収集はボタンでなくスイッチ(▶今すぐ1回とは役割が違うことを見た目で示す) */
+  .switch { display:inline-flex; gap:7px; align-items:center; cursor:pointer; font-size:12px;
+            color:var(--dim); border:1px solid transparent; padding:6px 10px; border-radius:8px; }
+  .switch:hover { color:var(--tx); }
+  .switch .track { width:30px; height:17px; border-radius:99px; background:#2a2d38; position:relative;
+                   transition:background .2s; flex:none; }
+  .switch .track::after { content:''; position:absolute; top:2px; left:2px; width:13px; height:13px;
+                          border-radius:99px; background:#8b8e98; transition:transform .2s, background .2s; }
+  .switch.on { color:var(--ok); }
+  .switch.on .track { background:#1d4230; }
+  .switch.on .track::after { transform:translateX(13px); background:var(--ok); }
+  /* 検索元チェック(うるさくない小チップ) */
+  .engchip { font-size:10.5px; padding:3px 11px; border-radius:99px; border:1px solid var(--hair);
+             color:var(--faint); cursor:pointer; display:inline-flex; gap:5px; align-items:center;
+             transition:all .15s; }
+  .engchip svg { opacity:.55; flex:none; }
+  /* ブーストの怪しいアイコン(2026-09-03指示「金と薬」): OFF=モノクロ、ON=フルカラー+金色の怪しい光 */
+  .boost-glyph { font-size:12px; line-height:1; filter:grayscale(1); opacity:.55; letter-spacing:-2px; }
+  .switch.on .boost-glyph { filter:none; opacity:1; text-shadow:0 0 9px #e5c07baa; }
+  .engchip .eng-glyph { font-size:12px; line-height:1; filter:grayscale(1); opacity:.5; }
+  .engchip.on .eng-glyph { filter:none; opacity:1; }
+  .engchip:hover { color:var(--dim); border-color:var(--line); }
+  .engchip.on { color:var(--tx); border-color:var(--acc); background:#4d9fff14; }
+  .engchip.on svg { opacity:1; color:var(--acc); }
+
+  #crawlbar { display:none; margin:8px 16px 0; background:var(--panel);
+    border:1px solid var(--line); border-radius:10px; padding:6px 12px; font-size:12px; color:var(--dim); }
+  #crawlbar.show { display:flex; }
+  /* フォルダパネルは1行に畳む(サムネの場所を食わない)。⌄で展開 */
+  #viewhead .details { display:none; }
+  #viewhead.open .details { display:block; }
+  /* 取り込みは呼んだ時だけの中央オーバーレイ(画面に居座らない) */
+  #ovl { position:fixed; inset:0; background:#00000090; z-index:18; display:none;
+         align-items:center; justify-content:center; backdrop-filter:blur(4px); }
+  #ovl.show { display:flex; animation:lbin .18s ease; }
+  #ingestpanel { width:min(680px, 92vw); background:var(--panel); border:1px solid var(--line);
+                 border-radius:14px; padding:16px 18px; font-size:12px; color:var(--dim);
+                 box-shadow:0 24px 70px #000b; }
+  .pulse { display:inline-block; width:7px; height:7px; border-radius:99px; background:var(--acc);
+           margin-right:8px; animation:pulse 1.2s ease infinite; }
+  @keyframes pulse { 50% { opacity:.3; transform:scale(.7); } }
+
+  /* ---- グリッド: クリック=開く / ◯=選択 ---- */
+  .gridwrap { flex:1; overflow-y:auto; padding:10px 16px 90px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(var(--cell,168px),1fr)); gap:6px; }
+  .grid.fit img { object-fit:contain; }
+  .cell { position:relative; aspect-ratio:1; border-radius:6px; overflow:hidden; cursor:pointer;
+    /* 画面外セルはレイアウト/描画/ラスタメモリごとスキップ(数千枚でも軽い)。サイズはヒントで確保 */
+    content-visibility:auto; contain-intrinsic-size:var(--cell,168px) var(--cell,168px);
+          background:var(--panel); opacity:0; transform:translateY(14px) scale(.97);
+          transition:opacity .45s ease, transform .5s cubic-bezier(.2,.9,.3,1); }
+  .cell.in { opacity:1; transform:none; }
+  .cell img { width:100%; height:100%; object-fit:cover; display:block; }
+  .cell::after { content:''; position:absolute; inset:0; box-shadow:inset 0 0 0 1px #ffffff0d;
+                 border-radius:6px; pointer-events:none; }
+  .cell .ck { position:absolute; top:6px; left:6px; width:22px; height:22px; border-radius:99px;
+              border:1.5px solid #ffffffb0; background:#00000038; cursor:pointer; opacity:0;
+              transition:opacity .12s, background .12s, border-color .12s; z-index:2;
+              display:flex; align-items:center; justify-content:center; color:transparent; }
+  @media (hover:hover) { .cell:hover .ck { opacity:1; } }
+  body.selmode .ck { opacity:1; }
+  .cell.sel .ck { opacity:1; background:var(--acc); border-color:var(--acc); color:#fff; }
+  .cell.sel { outline:2px solid var(--acc); outline-offset:-2px; }
+  .cell.sel img { transform:scale(.94); border-radius:4px; transition:transform .15s ease; }
+  .cell .badge { position:absolute; top:7px; right:7px; z-index:1; color:#f2c14e;
+                 filter:drop-shadow(0 1px 3px #000c); }
+  .cell .costb { position:absolute; top:5px; left:5px; z-index:1; font-size:8px; font-weight:600;
+                 background:#1a160abb; color:#e5c07b88; border-radius:99px; padding:0 5px; }
+  .cell .rclean { position:absolute; bottom:6px; right:6px; z-index:1; width:17px; height:17px;
+                  border-radius:50%; background:#123524d9; color:#6ee7a0; display:flex;
+                  align-items:center; justify-content:center; box-shadow:0 1px 3px #000a; }
+  .cell .newb { position:absolute; bottom:6px; left:6px; z-index:1; font-size:9px; font-weight:700;
+                letter-spacing:.05em; color:#fff; background:var(--acc); border-radius:5px;
+                padding:1px 6px; box-shadow:0 1px 5px #0009; }
+  .cell .cap { position:absolute; inset-inline:0; bottom:0; padding:18px 8px 5px; font-size:10.5px;
+               color:#dfe2e8; background:linear-gradient(transparent,#000b); opacity:0;
+               white-space:nowrap; overflow:hidden; text-overflow:ellipsis; transition:opacity .2s; }
+  @media (hover:hover) { .cell:hover .cap { opacity:1; } }
+  .empty { grid-column:1/-1; text-align:center; color:var(--faint); padding:80px 20px; line-height:2; }
+  .empty .big { opacity:.35; margin-bottom:6px; }
+  .cell.drop { animation:dropIn .7s cubic-bezier(.2,1.5,.3,1); }
+  @keyframes dropIn {
+    0% { opacity:0; transform:translateY(-70px) scale(.5) rotate(-6deg); }
+    60% { opacity:1; transform:translateY(5px) scale(1.03) rotate(1.5deg); }
+    100% { opacity:1; transform:none; } }
+  .cell.drop::before { content:''; position:absolute; inset:0; border-radius:6px; z-index:2; pointer-events:none;
+    box-shadow:0 0 0 2px var(--acc), 0 0 26px var(--acc-soft); animation:dropGlow 1.8s ease forwards; }
+  @keyframes dropGlow { from { opacity:1; } to { opacity:0; } }
+
+  /* ---- 選択バー / 量産パネル ---- */
+  #selbar { position:fixed; bottom:14px; left:calc(218px + 16px); right:16px; z-index:12;
+            display:none; align-items:center; gap:8px; flex-wrap:wrap;
+            background:#16171de8; border:1px solid var(--line); border-radius:12px;
+            backdrop-filter:blur(16px); padding:9px 14px; box-shadow:0 12px 40px #000a; }
+  #selbar.show { display:flex; }
+  #selbar .cnt { font-size:12.5px; font-weight:600; }
+  #genpanel { display:none; position:fixed; bottom:74px; left:calc(218px + 16px); right:16px; z-index:12;
+              background:#16171de8; border:1px solid var(--line); border-radius:12px;
+              backdrop-filter:blur(16px); padding:10px 14px; box-shadow:0 12px 40px #000a; }
+  #genpanel .row1 { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+
+  /* ---- ライトボックス ---- */
+  #lb { position:fixed; inset:0; background:#000000e6; display:none; z-index:20; cursor:zoom-out;
+        align-items:center; justify-content:center; flex-direction:column; overflow:hidden;
+        backdrop-filter:blur(12px); }
+  #lb.show { display:flex; animation:lbin .22s ease; }
+  @keyframes lbin { from { opacity:0; } }
+  #lb img#lbimg { max-width:94vw; max-height:74vh; border-radius:8px; box-shadow:0 24px 70px #000;
+        cursor:zoom-out; animation:lbimg .3s cubic-bezier(.2,.9,.3,1); transition:filter .18s ease;
+        touch-action:none; user-select:none; -webkit-user-drag:none; }
+  @keyframes lbimg { from { transform:scale(.92); opacity:.5; } }
+  #lbinfo { position:absolute; top:14px; left:14px; z-index:2; max-width:320px; cursor:default;
+            background:#000000b8; border:1px solid #ffffff1a; border-radius:10px;
+            backdrop-filter:blur(10px); padding:8px 12px; font-size:11.5px; line-height:1.6; color:#c9cdd6; }
+  #lbinfo a { color:#8ab8ff; text-decoration:none; }
+  #lbinfo a:hover { text-decoration:underline; }
+  #lbbar { display:flex; gap:6px; align-items:center; padding:11px 4px 0; cursor:default; flex-wrap:wrap; justify-content:center; }
+  #lbbar button { background:#ffffff0a; }
+  #lb.editing #edbtn { color:var(--acc); border-color:var(--acc); background:var(--acc-soft); }
+  #lbmeta { max-width:88vw; font-size:11.5px; color:var(--dim); text-align:center; line-height:1.7;
+            padding:6px 0; cursor:default; }
+  #lbmeta .tag { display:inline-block; background:#ffffff0c; border-radius:99px; padding:0 9px;
+                 margin:1px 2px; font-size:10.5px; color:var(--dim); }
+  #lb.imm #lbbar, #lb.imm #lbmeta, #lb.imm #editpanel, #lb.imm #lbinfo { display:none; }
+  #lb.imm img#lbimg { max-width:100vw; max-height:100vh; border-radius:0; box-shadow:none; }
+  #lb.imm { background:#000; backdrop-filter:none; }
+  #editpanel { display:none; cursor:default; background:#14151ae8; border:1px solid var(--line);
+               border-radius:14px; backdrop-filter:blur(14px); padding:12px 16px; margin-top:8px;
+               width:min(700px, 94vw); box-shadow:0 16px 46px #000a; }
+  #lb.editing #editpanel { display:block; animation:lbin .2s ease; }
+  #editpanel .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin:6px 0; }
+  #editpanel label { font-size:11px; color:var(--faint); width:50px; text-align:right; }
+  #editpanel input[type=range] { flex:1; min-width:110px; accent-color:var(--acc); padding:0; background:none; border:none; }
+  #editpanel .val { font-size:10.5px; color:var(--dim); width:30px; font-variant-numeric:tabular-nums; }
+  .fxchip { font-size:11px; padding:3px 11px; border-radius:999px; border:1px solid var(--line);
+            color:var(--dim); cursor:pointer; transition:all .15s; }
+  .fxchip:hover { color:var(--tx); border-color:var(--acc); }
+  #edhist { font-size:10.5px; color:var(--faint); }
+
+  #toast { position:fixed; bottom:80px; left:50%; transform:translate(-50%, 16px); opacity:0;
+           background:#1d1f27f0; border:1px solid var(--line); color:var(--tx); padding:9px 20px;
+           border-radius:999px; font-size:12.5px; z-index:30; box-shadow:0 10px 30px #000a;
+           transition:all .25s ease; pointer-events:none; }
+  #toast.show { transform:translate(-50%, 0); opacity:1; }
+
+  @media (max-width: 780px) {
+    body { grid-template-columns:1fr; grid-template-rows:auto 1fr; }
+    #sideresize { display:none; }
+    aside { flex-direction:row; gap:2px; overflow-x:auto; border-right:none; padding:8px 10px;
+            border-bottom:1px solid var(--hair); align-items:center; }
+    .brand, .sec, #ai_activity { display:none; }
+    .nav { flex:none; }
+    .nav .n { display:none; }
+    .grid { grid-template-columns:repeat(auto-fill,minmax(110px,1fr)); gap:4px; }
+    #selbar, #genpanel { left:10px; right:10px; }
+  }
+  /* iOS風スクロールバー: 細い丸棒・トラック透明(2026-09-03指示) */
+  * { scrollbar-width: thin; scrollbar-color: #ffffff2e transparent; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #ffffff24; border-radius: 99px;
+                              border: 2px solid transparent; background-clip: content-box; }
+  ::-webkit-scrollbar-thumb:hover { background: #ffffff4a; border: 2px solid transparent;
+                                    border-radius: 99px; background-clip: content-box; }
+  ::-webkit-scrollbar-corner { background: transparent; }
+
+  /* ホバーで「ひゅん」と少し寄る(実況ストリップは小さいので強め・グリッドは控えめ) */
+  #cr_strip img { transition:transform .16s cubic-bezier(.2,1.6,.3,1); }
+  #cr_strip img:hover { transform:scale(1.5); }
+  /* カーソル位置のセルが「やさしく手前に浮く」(拡大カーソルでなくアニメで応える 2026-09-03) */
+  /* 1.5倍はメニューに被って使いにくかった→1.15倍に(2026-09-03)。80ms遅延で素通り時のバタつき防止 */
+  .cell { transition: transform .16s ease-out, box-shadow .16s ease-out; }
+  .cell:hover { transform: scale(1.15); z-index: 5; box-shadow: 0 8px 26px #000a;
+                transition: transform .22s cubic-bezier(.2,1.25,.3,1) .06s, box-shadow .22s ease .06s; }
+  /* 選択作業中(1枚でも選択がある間)はホバー拡大を止め、チェックを正確に押せるようにする */
+  body.selmode .cell:hover { transform: none; box-shadow: none; }
+  /* 高密度モード(セル≤110px): 数百セルの個別アニメは主スレッドを殺すので演出を軽量化 */
+  body.dense .cell { transition: none; }
+  body.dense .cell:hover { transform: none; box-shadow: none; }
+  body.dense .cell img { transition: none; }
+  /* D&D: 落とせる場所のハイライト */
+  .nav.dropon { outline:1px dashed #7aa2f7; background:#7aa2f722; }
+</style>
+
+<aside id="side">
+  <div id="sideresize" title="ドラッグで幅を変える(ダブルクリックで既定に戻す)"></div>
+  <div class="brand">fluent_gallery</div>
+  <div id="nav_lib"></div>
+  <div class="sec" style="cursor:pointer" onclick="toggleFold('/folders')">フォルダ <span id="fold_folders_ic"></span><span class="add" id="addfolder" title="新規フォルダ(空で生まれます)"></span></div>
+  <div id="nav_folders"></div>
+  <div id="nav_sources_sec"></div>
+  <div class="sec">出荷 — データセット</div>
+  <div id="nav_datasets"></div>
+  <div class="sec">AI稼働状況</div>
+  <div id="ai_activity" style="padding:0 10px 6px; font-size:11px; color:var(--faint)"></div>
+  <div style="flex:1"></div>
+  <div class="sec">ストレージ</div>
+  <div id="storagebox" style="padding:0 10px 4px; font-size:11px; color:var(--faint)"></div>
+</aside>
+
+<main>
+  <div class="top">
+    <div class="search" id="searchbox"><span id="searchico"></span>
+      <input id="q" placeholder="検索 — 日本語で書いてEnter(AIが条件に翻訳)"
+        oninput="clearTimeout(window._qt); window._qt=setTimeout(onSearch, 300)"
+        onkeydown="if(event.key==='Enter'){event.preventDefault(); nlSearch();}"></div>
+    <button class="fchip" id="chipsbtn" onclick="toggleChips()" title="属性タグで絞り込む(シーン/被写体/性別/タグ…)"></button>
+    <button class="fchip" id="fc_real" onclick="fcOrigin('real')">実写</button>
+    <button class="fchip" id="fc_synth" onclick="fcOrigin('synthetic')">生成</button>
+    <button class="fchip" id="fc_q8" onclick="fc('q8')">品質8+</button>
+    <button class="fchip" id="fc_safe" onclick="fc('safe')">セーフ</button>
+    <button class="fchip" id="fc_clean" onclick="fc('clean')" title="ライセンス明示のある画像だけ(CC等)">権利クリーン</button>
+    <button class="fchip" id="fc_nowm" onclick="fc('nowm')" title="透かし/ロゴ/焼き込み文字ありを除外">透かし除外</button>
+    <button class="fchip" id="fc_seg" onclick="fc('seg')" title="マスク(セグメント)が付いている画像だけ">マスク済</button>
+    <button class="fchip" id="vpbtn" onclick="cyclePattern()" title="押すたびに表示パターンが変わる(俯瞰→標準→大きめ→どーん)"></button>
+    <button class="ghost" style="padding:4px 7px" onclick="colStep(1)" title="1列増やす(小さく・たくさん)">−</button>
+    <input type="range" id="cellsize" min="36" max="1600" step="4" style="width:86px; padding:0; accent-color:var(--acc); border:none; background:none"
+      title="サムネサイズ(俯瞰〜1画面1枚)" oninput="setCell(this.value)" onchange="setCell(this.value); commitCell()">
+    <button class="ghost" style="padding:4px 7px" onclick="colStep(-1)" title="1列減らす(大きく)">＋</button>
+    <button class="fchip" id="fitbtn" onclick="toggleFit()" title="サムネの見せ方: 切抜=正方形いっぱい / 全体=切らずに収める">切抜</button>
+    <select id="sort" onchange="reload(true)" style="display:none">
+      <option value="">新しい順</option>
+      <option value="old">古い順</option>
+      <option value="quality">品質順</option>
+      <option value="big">大きい順</option>
+      <option value="cost">コスト順</option>
+    </select>
+    <button class="ghost" id="sortbtn" onclick="cycleSort()" title="クリックで並び順を切替">新しい順</button>
+    <span class="sp"></span>
+  </div>
+  <div class="chips" id="chips_wrap"><span class="chip" id="enrich_chip" onclick="enrich()"
+      title="いま表示中の絞り込み範囲で、まだ属性の無い画像にVLMが属性を付けます(通常は開いた時に自動で付くので、まとめて付けたい時用)"></span><span id="chips" style="display:contents"></span></div>
+  <div id="crawlbar" style="align-items:center; gap:8px"><span class="pulse" style="flex:none"></span>
+    <span id="cr_prog" style="flex:none; white-space:nowrap"></span>
+    <div id="cr_strip" style="display:flex; gap:3px; overflow-x:auto; flex:1; min-width:60px"></div>
+    <button class="ghost" style="flex:none; padding:1px 8px" onclick="j('/api/crawl/stop',{method:'POST'})">停止</button></div>
+  <div id="viewhead"></div>
+  <div class="gridwrap" id="gridwrap">
+    <div id="gridspacer" style="height:0"></div>
+    <div class="grid" id="grid"></div>
+    <div id="gridspacerB" style="height:0"></div>
+    <div id="more" style="height:1px"></div>
+  </div>
+</main>
+
+<div id="ovl" onclick="if(event.target===this)closeIngest()">
+  <div id="ingestpanel">
+    <div style="display:flex; gap:8px; align-items:center; margin-bottom:10px">
+      <span id="ing_ico"></span><b style="color:var(--tx)">取り込み</b>
+      <span class="sub">サーバ上のフォルダ、または定番プリセット</span>
+      <span class="sp"></span>
+      <button class="ghost" onclick="closeIngest()">閉じる</button>
+    </div>
+    <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center">
+      <button class="pri" onclick="$('up_files').click()" id="up_btn"></button>
+      <button onclick="$('up_cam').click()" id="up_cam_btn"></button>
+      <input type="file" id="up_files" multiple accept="image/*,video/*" style="display:none" onchange="doUpload(this.files)">
+      <input type="file" id="up_cam" accept="image/*" capture="environment" style="display:none" onchange="doUpload(this.files)">
+      <span class="sub">動画は1秒1コマで取り込み(そっくりな場面は自動間引き・HDR白飛び対策済み)</span>
+    </div>
+    <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:8px">
+      <input id="ing_path" placeholder="またはサーバ上のディレクトリ" style="flex:1; min-width:240px">
+      <input id="ing_src" placeholder="ソース名 (例: camera:現場A)" style="width:180px">
+      <button onclick="ingest()">取り込む</button>
+    </div>
+    <div class="sub" id="ing_msg" style="margin-top:6px"></div>
+    <div id="presets" style="margin-top:10px; display:flex; gap:6px; flex-wrap:wrap"></div>
+  </div>
+</div>
+<div id="genpanel" onclick="event.stopPropagation()">
+  <div class="row1"><span id="gen_ico"></span>
+    <input id="gen_instruction" type="text" placeholder="どう作り変える? (例: 夜のネオン街に / 雨の日に / 別アングルで)" style="flex:1; min-width:240px">
+    <span class="sub">1枚あたり</span>
+    <input id="gen_per" type="number" value="4" min="1" max="32" style="width:60px">変種
+    <button class="pri" onclick="genRun()">量産開始</button>
+    <button class="ghost" onclick="$('genpanel').style.display='none'">閉じる</button>
+  </div>
+</div>
+
+<div id="selbar">
+  <span class="cnt"><span id="selcount">0</span>枚選択</span>
+  <button class="ghost" onclick="clearSel()">解除</button>
+  <button class="ghost" onclick="selectAllShown()">表示中を全部</button>
+  <button id="sb_keep" onclick="bulkKeep(true)" title="自動間引きから絶対保護"></button>
+  <button class="ghost" onclick="bulkKeep(false)">解除</button>
+  <button id="sb_gen" onclick="genVar()" title="選択を種に、言語指示で変種を量産"></button>
+  <button id="sb_del" onclick="delSelected()" title="DELキーでも。30日は戻せる"></button>
+  <span class="sp"></span>
+  <input id="ds_name" placeholder="データセット名 (フォルダ/名前可)" style="width:190px">
+  <button class="pri" onclick="makeDataset()" id="sb_ds"></button>
+</div>
+
+<div id="lb" onclick="if(event.target===this)closeLb()">
+  <div id="lbinfo" onclick="event.stopPropagation()"></div>
+  <div id="croprect" style="display:none; position:fixed; z-index:3; border:2px dashed var(--acc);
+    background:#4d9fff18; pointer-events:none; border-radius:4px"></div>
+  <img id="lbimg" title="クリック=戻る / ダブルクリック=拡大 / ホイール=ズーム">
+  <div id="lbbar" onclick="event.stopPropagation()"></div>
+  <div id="segfix" onclick="event.stopPropagation()" style="display:none; gap:6px; align-items:center; padding:8px 4px 0; cursor:default">
+    <input id="seg_prompt" type="text" placeholder="対象語を変える(例: face, dog)" style="width:200px">
+    <button class="ghost" onclick="segRedo()" title="この画像だけ切り直す(空=属性から自動)">切り直す</button>
+    <button class="ghost" onclick="segClear()" title="間違いマスクを消す">マスク削除</button>
+    <button class="ghost" onclick="segCutout()" title="背景を透過にした切り抜きPNGを開く(保存できます)">切り抜きPNG</button>
+    <span style="font-size:11px; color:var(--faint)">画像をクリック=そこを切って追加 · ドラッグ=範囲で切る · 右クリック=そのマスクを削除</span>
+  </div>
+  <div id="editpanel" onclick="event.stopPropagation()">
+    <div class="row"><label>露出</label><input type="range" id="ed_exposure" min="-100" max="100" value="0"
+        oninput="edLive()"><span class="val" id="edv_exposure">0</span>
+      <label>ｺﾝﾄﾗｽﾄ</label><input type="range" id="ed_contrast" min="-100" max="100" value="0"
+        oninput="edLive()"><span class="val" id="edv_contrast">0</span></div>
+    <div class="row"><label>彩度</label><input type="range" id="ed_saturation" min="-100" max="100" value="0"
+        oninput="edLive()"><span class="val" id="edv_saturation">0</span>
+      <label>色温度</label><input type="range" id="ed_temperature" min="-100" max="100" value="0"
+        oninput="edLive()"><span class="val" id="edv_temperature">0</span></div>
+    <div class="row" id="edfilters"></div>
+    <div class="row" id="edactions"></div>
+    <div class="row"><span id="edhist"></span></div>
+  </div>
+  <div id="lbmeta" onclick="event.stopPropagation()"></div>
+</div>
+<div id="toast"></div>
+<div id="hoverpv" style="display:none; position:fixed; z-index:40; pointer-events:none">
+  <img id="hoverpv_img" style="max-width:280px; max-height:280px; border-radius:10px;
+    box-shadow:0 14px 44px #000d; display:block; border:1px solid #ffffff22">
+  <div id="hoverpv_cap" style="font-size:11px; color:#dfe2e8; background:#000000cc; border-radius:6px;
+    padding:2px 8px; margin-top:4px; display:inline-block"></div>
+</div>
+
+<script>
+// ================= 基盤 =================
+async function j(u, opt) { const r = await fetch(u, opt);
+  if (!r.ok) { let m='HTTP '+r.status; try{m=(await r.json()).detail||m}catch(e){} throw new Error(m); }
+  return r.json(); }
+const $ = id => document.getElementById(id);
+function esc(s) { return String(s ?? '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;'); }
+function toast(m, actLabel, actFn) {
+  const t = $('toast');
+  t.innerHTML = m + (actLabel ? ` <b style="cursor:pointer; margin-left:10px; color:var(--acc)" onclick="toastAct()">${actLabel}</b>` : '');
+  t.style.pointerEvents = actLabel ? 'auto' : 'none';
+  window._toastFn = actFn;
+  t.classList.add('show');
+  clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), actLabel ? 6500 : 2800);
+}
+function toastAct() { const f = window._toastFn; window._toastFn = null; $('toast').classList.remove('show'); if (f) f(); }
+
+// ---- SVGアイコン(vlabor風ストローク・絵文字禁止は憲法6条) ----
+const I = {
+  img:'<rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.6" cy="10" r="1.5"/><path d="m5.5 16.5 4-4 3 3 3.5-3.5 2.5 2.5"/>',
+  star:'<path d="m12 4.2 2.3 4.7 5.2.8-3.8 3.6.9 5.2L12 16l-4.6 2.5.9-5.2-3.8-3.6 5.2-.8z"/>',
+  folder:'<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+  bot:'<rect x="5" y="9" width="14" height="9" rx="2"/><path d="M12 9V6"/><circle cx="12" cy="4.7" r="1.2"/><circle cx="9.5" cy="13" r="1"/><circle cx="14.5" cy="13" r="1"/><path d="M9.5 15.7h5"/>',
+  search:'<circle cx="11" cy="11" r="6"/><path d="m20 20-4.3-4.3"/>',
+  smart:'<circle cx="11" cy="11" r="6"/><path d="m20 20-4.3-4.3"/><path d="M11 8.5v5M8.5 11h5"/>',
+  box:'<path d="m12 3 8 4.5v9L12 21l-8-4.5v-9z"/><path d="M4 7.5 12 12l8-4.5M12 12v9"/>',
+  plus:'<path d="M12 5v14M5 12h14"/>',
+  play:'<path d="M8 5.5v13l11-6.5z"/>',
+  coin:'<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5v9M14.6 9.3c-.5-.7-1.5-1.1-2.6-1.1-1.5 0-2.7.8-2.7 1.9s1.2 1.6 2.7 1.9 2.7.8 2.7 1.9-1.2 1.9-2.7 1.9c-1.1 0-2.1-.4-2.6-1.1"/>',
+  stop:'<rect x="7" y="7" width="10" height="10" rx="1.5"/>',
+  xlogo:'<path d="M5 4.5 19 19.5M19 4.5 5 19.5"/>',
+  yt:'<rect x="3" y="6" width="18" height="12" rx="3.5"/><path d="M10.4 9.6v4.8l4.4-2.4z"/>',
+  loop:'<path d="M17 3v4h-4"/><path d="M7 21v-4h4"/><path d="M17 7a7 7 0 0 0-11.5 2.5M7 17a7 7 0 0 0 11.5-2.5"/>',
+  reset:'<path d="M3.5 12a8.5 8.5 0 1 0 2.6-6.1"/><path d="M3.5 4v4.5H8"/>',
+  x:'<path d="m6 6 12 12M18 6 6 18"/>',
+  copy:'<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/>',
+  trash:'<path d="M4 7h16M9.5 7V5.5a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1V7M6.5 7l.8 12a2 2 0 0 0 2 1.9h5.4a2 2 0 0 0 2-1.9l.8-12"/>',
+  sliders:'<path d="M4 8h8M16 8h4M4 16h4M12 16h8"/><circle cx="14" cy="8" r="2"/><circle cx="10" cy="16" r="2"/>',
+  eye:'<path d="M2.5 12S6 6.2 12 6.2 21.5 12 21.5 12 18 17.8 12 17.8 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.4"/>',
+  expand:'<path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"/>',
+  chevL:'<path d="m14 6-6 6 6 6"/>', chevR:'<path d="m10 6 6 6-6 6"/>',
+  chevD:'<path d="m6 10 6 6 6-6"/>',
+  check:'<path d="m5 12.5 4.5 4.5L19 7"/>',
+  clock:'<circle cx="12" cy="12" r="8"/><path d="M12 8v4.2l2.8 1.8"/>',
+  upload:'<path d="M12 4v11m0 0 4-4m-4 4-4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>', // 取り込み=下向き(ライブラリに入ってくる)
+  circle:'<circle cx="12" cy="12" r="8"/>',
+  spark:'<path d="M12 3v4M12 17v4M3 12h4M17 12h4M5.9 5.9l2.6 2.6M15.5 15.5l2.6 2.6M18.1 5.9l-2.6 2.6M8.5 15.5l-2.6 2.6"/>',
+  globe:'<circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.7 2.7 2.7 14.3 0 17-2.7-2.7-2.7-14.3 0-17z"/>',
+  rotate:'<path d="M20 12a8 8 0 1 1-2.3-5.6"/><path d="M20 3v4.5h-4.5"/>',
+  flip:'<path d="M12 3v18"/><path d="M8 8 4 12l4 4M16 8l4 4-4 4"/>',
+  undo:'<path d="M8 5 3 10l5 5"/><path d="M3 10h11a6 6 0 0 1 0 12h-3"/>',
+  broom:'<path d="m14 4 6 6M9 9l7 7-4 4-7-7zM5 21h6"/>',
+  seed:'<path d="M12 21v-8M12 13c0-4 3-7 8-7 0 5-3 8-8 7zM12 13c0-3-2.5-5-6-5 0 4 2.5 6 6 5z"/>',
+  cpu:'<rect x="6" y="6" width="12" height="12" rx="2"/><rect x="10" y="10" width="4" height="4"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/>',
+  grid4:'<circle cx="5" cy="5" r="1.5"/><circle cx="12" cy="5" r="1.5"/><circle cx="19" cy="5" r="1.5"/><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/><circle cx="5" cy="19" r="1.5"/><circle cx="12" cy="19" r="1.5"/><circle cx="19" cy="19" r="1.5"/>',
+  grid3:'<rect x="4" y="4" width="4.5" height="4.5" rx="1"/><rect x="10" y="4" width="4.5" height="4.5" rx="1"/><rect x="16" y="4" width="4.5" height="4.5" rx="1"/><rect x="4" y="10" width="4.5" height="4.5" rx="1"/><rect x="10" y="10" width="4.5" height="4.5" rx="1"/><rect x="16" y="10" width="4.5" height="4.5" rx="1"/><rect x="4" y="16" width="4.5" height="4.5" rx="1"/><rect x="10" y="16" width="4.5" height="4.5" rx="1"/><rect x="16" y="16" width="4.5" height="4.5" rx="1"/>',
+  grid2:'<rect x="4" y="4" width="7" height="7" rx="1.2"/><rect x="13" y="4" width="7" height="7" rx="1.2"/><rect x="4" y="13" width="7" height="7" rx="1.2"/><rect x="13" y="13" width="7" height="7" rx="1.2"/>',
+  grid1:'<rect x="4" y="4" width="16" height="16" rx="2"/>',
+  none:'',
+};
+function ic(name, size = 15) {
+  return `<svg class="ic" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${I[name] || ''}</svg>`;
+}
+
+// ================= 状態モデル(憲法): loc = 今いる場所 =================
+// {type:'lib'|'folder'|'source'|'dataset'|'search'|'new', key, criteria}
+let loc = {type: 'lib', key: 'all', criteria: {}};
+let prevLoc = null; // 検索から戻る先
+let items = [], total = 0, sel = new Set(), lastCk = -1;
+let chipFilters = {tag: '', scene: '', subject: '', style: '', gender: '', framing: '', age_group: '', people_count: '', animal: ''};
+let fchips = {origin: '', q8: false, safe: false, clean: false};
+let albumsCache = [], facetsCache = null;
+
+const LIB = [
+  {key: 'all', icon: 'img', label: 'すべて', criteria: {}},
+  {key: 'keep', icon: 'star', label: 'お気に入り', criteria: {keep: '1'}},
+  {key: 'novlm', icon: 'circle', label: '未属性', criteria: {vlm_: 'none'}},
+];
+
+function params(extra) {
+  const base = {...(loc.criteria || {})};
+  const o = {
+    q: loc.type === 'search' ? $('q').value.trim() : '',
+    sort: $('sort').value,
+    origin: fchips.origin, nsfw: fchips.safe ? '0' : '', min_quality: fchips.q8 ? 8 : 0,
+    rights: fchips.clean ? 'clean' : '',
+    seg: fchips.seg ? '1' : '',
+    tag: chipFilters.tag, scene: chipFilters.scene, subject: chipFilters.subject, style: chipFilters.style,
+    gender: chipFilters.gender, framing: chipFilters.framing, age_group: chipFilters.age_group,
+    people_count: chipFilters.people_count, animal: chipFilters.animal,
+    watermark: fchips.nowm ? '0' : '',
+  };
+  return new URLSearchParams({...base, ...Object.fromEntries(Object.entries(o).filter(([, v]) => v !== '' && v !== 0)), ...extra});
+}
+
+// URL同期(コピペで同じ画面)
+function syncHash() {
+  const o = {t: loc.type, k: loc.key || ''};
+  if (loc.type === 'search') o.q = $('q').value.trim();
+  for (const [k, v] of Object.entries(fchips)) if (v) o['f_' + k] = typeof v === 'boolean' ? '1' : v;
+  for (const [k, v] of Object.entries(chipFilters)) if (v) o['c_' + k] = v;
+  if ($('lb').classList.contains('show') && items[lbIdx]) o.img = items[lbIdx].sha1;
+  history.replaceState(null, '', '#' + new URLSearchParams(o).toString());
+}
+
+// ---- 移動(全ナビはここを通る) ----
+async function go(next, opts = {}) {
+  if (loc.type === 'search' && next.type !== 'search') $('q').value = '';
+  loc = next;
+  clearSel();
+  closeIngest(); // 場所を移動したら浮きパネルは閉じる(邪魔問題)
+  $('genpanel').style.display = 'none';
+  if (!opts.keepChips) { chipFilters = {tag: '', scene: '', subject: '', style: '', gender: '', framing: '', age_group: '', people_count: '', animal: ''}; }
+  renderNav();
+  renderViewhead();
+  if (loc.type === 'new') { // 新規フォルダは空で生まれる(憲法2条)
+    items = []; total = 0;
+    $('grid').innerHTML = `<div class="empty"><div class="big">${ic('bot', 44)}</div>
+      目標を書いて「作成」すると、空のフォルダが生まれます。<br>
+      <span class="sub">▶ を押せばAIが集め始め、ここに降ってきます</span></div>`;
+    drawSelbar();
+    return;
+  }
+  await reload();
+}
+function renderNav() {
+  document.querySelectorAll('.nav').forEach(n => n.classList.remove('on'));
+  const el = document.querySelector(`.nav[data-loc="${loc.type}:${CSS.escape(loc.key || '')}"]`);
+  if (el) el.classList.add('on');
+}
+
+// ---- 検索は別レイヤ(憲法3条)。日本語+Enter=内蔵LLMが条件に翻訳(魔法④・$0) ----
+function onSearch() {
+  const v = $('q').value.trim();
+  // いた場所の条件(フォルダのsource等)を引き継いで「その中を」検索する。全体は検索ヘッダのボタンで広げる
+  if (v && loc.type !== 'search') { prevLoc = loc;
+    go({type: 'search', key: prevLoc.key || '', criteria: {...(prevLoc.criteria || {})}}, {keepChips: true}); }
+  else if (!v && loc.type === 'search') { go(prevLoc || {type: 'lib', key: 'all', criteria: {}}); }
+  else if (loc.type === 'search') reload();
+}
+// フォルダ内検索→「全体に広げる」(取り込み元も含めた全ライブラリ横断)
+function searchWiden() { loc.criteria = {}; loc.key = ''; renderViewhead(); reload(true); }
+// 並び順はボタン循環(2026-09-03指示: プルダウンよりワンタップ)
+function cycleSort() {
+  const s = $('sort');
+  s.selectedIndex = (s.selectedIndex + 1) % s.options.length;
+  $('sortbtn').textContent = s.options[s.selectedIndex].text;
+  reload(true);
+}
+async function nlSearch() {
+  const text = $('q').value.trim();
+  if (!text) return;
+  toast('AIが検索条件に翻訳中…');
+  try {
+    const r = await j('/api/nlq', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({text})});
+    if (loc.type !== 'search') { prevLoc = loc; loc = {type: 'search', key: prevLoc.key || '', criteria: {...(prevLoc.criteria || {})}}; }
+    fchips.origin = r.origin || '';
+    fchips.q8 = (r.min_quality | 0) >= 8;
+    for (const k of ['animal', 'gender', 'age_group', 'framing', 'scene', 'subject', 'style'])
+      chipFilters[k] = r[k] || '';
+    $('fc_real').classList.toggle('on', fchips.origin === 'real');
+    $('fc_synth').classList.toggle('on', fchips.origin === 'synthetic');
+    $('fc_q8').classList.toggle('on', fchips.q8);
+    $('q').value = r.q || '';
+    renderNav(); renderViewhead();
+    await reload(true);
+    const parts = [r.q, r.origin && (r.origin === 'real' ? '実写' : '生成'), r.animal, r.gender, r.age_group, r.framing, r.scene, r.style]
+      .filter(Boolean).join(' · ');
+    toast(`解釈: ${parts || text} — ${total}枚`);
+    refreshFacets();
+  } catch (e) { toast('翻訳できず素の検索: ' + e.message); onSearch(); }
+}
+
+// ================= サイドバー =================
+let folded = new Set(JSON.parse(localStorage.getItem('fg_fold') || '["/sources"]'));
+function toggleFold(k) {
+  folded.has(k) ? folded.delete(k) : folded.add(k);
+  localStorage.setItem('fg_fold', JSON.stringify([...folded]));
+  renderSide();
+}
+function buildTree(list) {
+  const root = {f: {}, items: []};
+  for (const it of list) {
+    let n = root;
+    for (const part of (it.folder || '').split('/').filter(Boolean)) n = n.f[part] ??= {f: {}, items: []};
+    n.items.push(it);
+  }
+  return root;
+}
+function treeHtml(node, item, depth = 0, key = '') {
+  let h = '';
+  for (const name of Object.keys(node.f).sort()) {
+    const k = key + '/' + name, open = !folded.has(k);
+    h += `<div class="nav" style="padding-left:${10 + depth * 13}px" onclick="toggleFold('${k.replace(/'/g, "\\'")}')">
+      ${ic(open ? 'chevD' : 'chevR', 13)}<span class="nm" style="color:var(--faint)">${esc(name)}</span>
+      <span class="del" title="この中に新規フォルダを作る" onclick="event.stopPropagation(); newInFolder('${k.slice(1).replace(/'/g, "\\'")}')">${ic('plus', 12)}</span></div>`;
+    if (open) h += treeHtml(node.f[name], item, depth + 1, k);
+  }
+  return h + node.items.map(it => item(it, depth)).join('');
+}
+function splitPath(s) {
+  const parts = s.split('/').map(x => x.trim()).filter(Boolean);
+  const name = parts.pop() || '';
+  return {folder: parts.join('/'), name};
+}
+
+function renderSide() {
+  $('nav_lib').innerHTML = LIB.map(l =>
+    `<div class="nav" data-loc="lib:${l.key}" onclick="go({type:'lib', key:'${l.key}', criteria:${esc(JSON.stringify(l.criteria))}})">
+      ${ic(l.icon)}<span class="nm">${l.label}</span><span class="n" id="n_${l.key}"></span></div>`).join('') +
+    `<div class="nav" data-loc="trash:" onclick="go({type:'trash', key:'', criteria:{}})">
+      ${ic('trash')}<span class="nm">ゴミ箱</span><span class="n" id="n_trash"></span></div>`;
+  const foldersOpen = !folded.has('/folders');
+  $('fold_folders_ic').innerHTML = ic(foldersOpen ? 'chevD' : 'chevR', 11);
+  $('nav_folders').style.display = foldersOpen ? '' : 'none';
+  $('nav_folders').innerHTML = treeHtml(buildTree(albumsCache), (a, d) =>
+    `<div class="nav" data-loc="folder:${esc(a.name)}" style="padding-left:${10 + d * 13}px" title="${esc(a.goal || 'スマートフォルダ(条件)')}"
+       data-dsrc="${esc(a.criteria?.source || (a.goal ? 'crawl:' + a.name : ''))}"
+       ondragover="if(this.dataset.dsrc){event.preventDefault(); this.classList.add('dropon')}"
+       ondragleave="this.classList.remove('dropon')" ondrop="dropShas(event, this.dataset.dsrc)"
+       onclick="openFolder('${esc(a.name)}')">
+      ${ic(a.goal ? 'bot' : 'smart')}<span class="nm">${esc(a.name)}</span>
+      ${a.running ? `<span class="st">${ic('play', 11)}</span>` : (a.agent?.auto ? `<span class="st">${ic('loop', 11)}</span>` : '')}
+      <span class="n">${(a.agent?.spent_usd || 0) > 0
+        ? `${a.count ?? 0} · <span style="color:#e5c07b; cursor:pointer" onclick="cycleCostMode(event)"
+             title="このフォルダの累計消費(クリックで トークン/$/¥ 切替)">${fmtCost(a.agent?.spent_tok, a.agent.spent_usd)}</span>`
+        : `${a.count ?? 0}${a.goal ? '<span style="opacity:.55">/' + (a.agent?.target || 200) + '</span>' : ''}`}${
+        a.last_run?.ingested > 0 && a.last_run.ts > (seenMap[seenKey(a)] || 0)
+          ? ` <b style="color:var(--ok)" title="前回見てから増えた分">+${a.last_run.ingested}</b>` : ''}</span>
+      <span class="del" title="この中に新規フォルダを作る" onclick="event.stopPropagation(); newInFolder('${esc((a.folder ? a.folder + '/' : '') + a.name)}')">${ic('plus', 12)}</span>
+      <span class="del" title="レシピごと複製(目標を書き換えて増殖)" onclick="event.stopPropagation(); copyAlbum('${esc(a.name)}')">${ic('copy', 12)}</span>
+      <span class="del" onclick="event.stopPropagation(); delAlbum('${esc(a.name)}')">${ic('x', 12)}</span></div>`)
+    || '<div class="nav" style="pointer-events:none"><span class="nm sub">＋で新規フォルダ</span></div>';
+  // 💰フォルダ合計(各フォルダの累計使用額の総和)を一覧の下に常時表示
+  const spentSum = albumsCache.reduce((t, a) => t + (a.agent?.spent_usd || 0), 0);
+  if (spentSum > 0) {
+    $('nav_folders').innerHTML += `<div class="nav" style="pointer-events:none">
+      ${ic('coin', 12)}<span class="nm sub" style="cursor:pointer" onclick="cycleCostMode(event)">使用合計</span><span class="n" style="color:#e5c07b; cursor:pointer" onclick="cycleCostMode(event)">${fmtCost(albumsCache.reduce((t, a) => t + (a.agent?.spent_tok || 0), 0), spentSum)}</span></div>`;
+  }
+  // 取り込み元(preset/gen/import等の自動グループ)。crawl:*はフォルダの持ち物なので出さない(二重表示の混乱防止)
+  const srcs = Object.entries(facetsCache?.sources || {}).filter(([s]) => !s.startsWith('crawl:'));
+  const open = !folded.has('/sources');
+  $('nav_sources_sec').innerHTML = `
+    <div class="sec" style="cursor:pointer" onclick="toggleFold('/sources')">取り込み元 ${ic(open ? 'chevD' : 'chevR', 11)}
+      <span class="add" title="ディレクトリ取り込み" onclick="event.stopPropagation(); openIngest()">${ic('upload', 13)}</span></div>` +
+    (open ? srcs.map(([s, n]) =>
+      `<div class="nav" data-loc="source:${esc(s)}" data-dsrc="${esc(s)}"
+        ondragover="event.preventDefault(); this.classList.add('dropon')" ondragleave="this.classList.remove('dropon')"
+        ondrop="dropShas(event, this.dataset.dsrc)"
+        onclick="go({type:'source', key:'${esc(s)}', criteria:{source:'${esc(s)}'}})">
+        ${ic(s.startsWith('crawl') ? 'globe' : s.includes('gen') ? 'spark' : 'upload', 13)}
+        <span class="nm" title="${esc(s)}">${esc(s)}</span><span class="n">${n}</span>
+        <span class="del" title="この取り込み元の画像を全部ゴミ箱へ(30日は戻せる)"
+          onclick="event.stopPropagation(); sourceTrash('${esc(s)}', ${n})">${ic('trash', 12)}</span></div>`).join('') : '');
+  // 再描画で枚数が消えないよう、キャッシュから即埋める(facets取得待ちにしない)
+  if (facetsCache) {
+    $('n_all').textContent = (facetsCache.total ?? 0).toLocaleString();
+    $('n_novlm').textContent = (facetsCache.total - facetsCache.enriched) || '';
+    if (facetsCache.keeps != null) $('n_keep').textContent = facetsCache.keeps || '';
+  }
+  renderNav();
+}
+document.body.classList.toggle('dense', (+localStorage.getItem('fg_cell') || 168) <= 110);
+$('addfolder').innerHTML = ic('plus', 14);
+$('addfolder').onclick = (e) => { e.stopPropagation(); openFolderNew(); };
+
+// ================= サイドバー幅リサイズ(ドラッグ・localStorage永続) =================
+{
+  const saved = +localStorage.getItem('fg_sidew');
+  if (saved >= 160 && saved <= 480) document.documentElement.style.setProperty('--sidew', saved + 'px');
+  const h = $('sideresize');
+  h.onpointerdown = (e) => {
+    e.preventDefault(); h.classList.add('on'); h.setPointerCapture(e.pointerId);
+    h.onpointermove = (ev) => {
+      const w = Math.max(160, Math.min(480, ev.clientX));
+      document.documentElement.style.setProperty('--sidew', w + 'px');
+      localStorage.setItem('fg_sidew', w);
+    };
+    h.onpointerup = () => { h.classList.remove('on'); h.onpointermove = h.onpointerup = null; };
+  };
+  h.ondblclick = () => { document.documentElement.style.removeProperty('--sidew'); localStorage.removeItem('fg_sidew'); };
+}
+
+// カーソルが乗っているセルを追跡(Xキー選択用)
+$('grid').addEventListener('mouseover', e => {
+  const c = e.target.closest?.('.cell');
+  window._hoverSha = c ? c.id.replace(/^c_/, '') : null;
+});
+$('grid').addEventListener('mouseleave', () => { window._hoverSha = null; });
+
+// ================= D&D移動(グリッド→フォルダ/取り込み元) =================
+function dragShas(ev, sha) {
+  const shas = sel.has(sha) ? [...sel] : [sha];
+  ev.dataTransfer.setData('text/shas', JSON.stringify(shas));
+  ev.dataTransfer.effectAllowed = 'move';
+}
+async function dropShas(ev, source) {
+  ev.preventDefault();
+  ev.currentTarget.classList.remove('dropon');
+  let shas = [];
+  try { shas = JSON.parse(ev.dataTransfer.getData('text/shas') || '[]'); } catch (e) {}
+  if (!shas.length || !source) return;
+  try {
+    const r = await j('/api/move', {method: 'POST', body: JSON.stringify({shas, source})});
+    toast(`${r.moved}枚を「${source.replace(/^crawl:/, '')}」へ移動しました`);
+    sel.clear(); refreshFacets(); loadAlbums(); reload();
+  } catch (e) { toast('❌ 移動失敗: ' + e.message); }
+}
+$('searchico').innerHTML = ic('search', 14);
+$('fitbtn').innerHTML = ic('img', 14);
+$('ing_ico').innerHTML = ic('upload', 15);
+$('up_btn').innerHTML = ic('upload', 13) + ' 画像/動画を選ぶ';
+$('up_cam_btn').innerHTML = ic('img', 13) + ' カメラで撮る';
+$('gen_ico').innerHTML = ic('seed', 15);
+$('sb_keep').innerHTML = ic('star', 13) + 'お気に入り';
+$('sb_gen').innerHTML = ic('seed', 13) + '指示で量産';
+$('sb_del').innerHTML = ic('trash', 13) + '消す';
+$('sb_ds').innerHTML = ic('box', 13) + 'データセット化';
+
+// ================= ビューヘッダ(今いる場所) =================
+function renderViewhead() {
+  const h = $('viewhead');
+  if (loc.type === 'folder' || loc.type === 'new') {
+    const a = loc.type === 'new'
+      ? {name: '', folder: '', goal: '', keywords: [], agent: {target: 200}}
+      : albumsCache.find(x => x.name === loc.key);
+    if (!a) { h.style.display = 'none'; return; }
+    h.style.display = 'block';
+    if (loc.type === 'new') h.classList.add('open'); // 新規は設定を書く場なので展開
+    h.innerHTML = folderHeadHtml(a, loc.type === 'new');
+    return;
+  }
+  if (loc.type === 'dataset') {
+    const name = loc.key;
+    h.style.display = 'block';
+    h.innerHTML = `<div class="row1"><span class="ttl">${ic('box', 16)} ${esc(name)}</span>
+      <span class="lbl">払い出し済みスナップショット(読み取り専用)</span><span class="sp"></span>
+      <button onclick="expandDataset('${esc(name)}')" title="このデータセットを種にAIで変種を量産">${ic('seed', 13)} AIで増やす</button>
+      <button class="ghost" onclick="delDataset('${esc(name)}')">${ic('trash', 13)} 削除</button>
+      <button class="ghost" onclick="go({type:'lib', key:'all', criteria:{}})">${ic('x', 13)}</button></div>`;
+    return;
+  }
+  if (loc.type === 'trash') {
+    h.style.display = 'block';
+    h.innerHTML = `<div class="row1"><span class="ttl">${ic('trash', 15)} ゴミ箱</span>
+      <span class="lbl">30日たつと自動で空になります。戻したい物をクリックで選択</span><span class="sp"></span>
+      <button class="pri" onclick="restoreSelected()">${ic('undo', 13)} 選択を戻す</button>
+      <button class="ghost" onclick="go({type:'lib', key:'all', criteria:{}})">${ic('x', 13)}</button></div>`;
+    return;
+  }
+  if (loc.type === 'search') {
+    const scoped = Object.keys(loc.criteria || {}).length > 0;
+    h.style.display = 'block';
+    h.innerHTML = `<div class="row1"><span class="ttl">${ic('search', 15)} 検索結果</span>
+      <span class="lbl">「${esc($('q').value.trim())}」 — ${scoped ? `「${esc(loc.key || 'この場所')}」の中だけ` : 'ライブラリ全体から'}</span><span class="sp"></span>
+      ${scoped ? `<button class="ghost" onclick="searchWiden()" title="取り込み元も含めた全部から探す">${ic('img', 13)} 全体に広げる</button>` : ''}
+      <button class="ghost" onclick="$('q').value=''; onSearch()">${ic('x', 13)} 検索をやめて戻る</button></div>`;
+    return;
+  }
+  h.style.display = 'none';
+}
+function folderHeadHtml(a, isNew) {
+  return `
+    <div class="row1">
+      ${ic(isNew || a.goal ? 'bot' : 'smart', 17)}
+      ${isNew
+        ? `${newParent ? `<span class="lbl" style="width:auto; color:var(--tx)">${esc(newParent)} /</span>` : ''}
+           <input type="text" id="ah_name" value="" placeholder="${newParent ? '名前だけ入力' : 'フォルダ名 (例: かわいい猫)'}" style="width:220px">`
+        : `<span class="ttl">${esc(a.name)}</span>${a.folder ? `<span class="lbl">${esc(a.folder)}/</span>` : ''}`}
+      <span class="sp"></span>
+      ${isNew ? `<button class="pri" onclick="createFolder()">${ic('check', 13)} 作成</button>` : `
+      ${a.running
+        ? `<button class="pri" onclick="stopCrawlHead()" title="この収集を止める(順番待ちがあれば5秒で次が始まります)">${ic('stop', 12)} 収集を止める</button>`
+        : `<button class="pri" onclick="runCrawlNow()" ${!a.goal ? 'disabled style="opacity:.5"' : ''}
+        title="その場で1回だけ収集。()内は推定コスト: 目標枚数÷採用率(実績)×目利き単価で概算">${ic('play', 12)} 今すぐ1回集める <span style="opacity:.75; font-weight:400">${crawlCostEst(a)}</span></button>`}
+      <span class="switch ${a.agent?.boost ? 'on' : ''}" onclick="toggleBoostHead()"
+        title="有料AIがクエリ生成と目利きを担当。判定も並列で速い。目利きモデルは設定欄のAI配役で選択(標準=OpenRouter Qwen72B 約0.05円/枚)。
+【使い分けの目安】
+・OFF(無料/内蔵7B): 「その種類ならなんでもいい」収集に十分 — 猫・犬・風景など。弱点=特定人物の本人同定が甘い(そっくりさんを通す)・判定が直列で遅い
+・ON: 判定精度と速度が上がる。特定の人物/グループだけ欲しい時はAI配役でClaudeを選択
+どちらも蒸留ゲート(採用実績16枚以上で自動)がゴミを無料で門前払いするので、判定コストは増えるほど下がります">
+        <span class="track"></span><span class="boost-glyph">💰💊</span>ブースト</span>
+      ${a.agent?.boost && !isNew ? `<select onchange="setJudgeModel(this.value)" title="目利きAIの切り替え(このフォルダに保存・▶にも♻自動にも効く)"
+        style="max-width:150px">
+        ${JUDGE_MODELS.map(([id, label]) => `<option value="${id}" ${(a.agent?.judge_model || '') === id ? 'selected' : ''}>${label}</option>`).join('')}
+      </select>` : ''}
+      ${a.agent?.boost ? `<span class="lbl" style="width:auto; color:#e5c07b; cursor:pointer" onclick="cycleCostMode(event)"
+        title="このフォルダの累計消費(クリックで トークン/$/¥ 切替) / 上限$${a.agent?.budget_usd ?? 3}(設定欄で変更)">
+        ${fmtCost(a.agent?.spent_tok, a.agent?.spent_usd)}<span style="color:var(--faint)"> / $${a.agent?.budget_usd ?? 3}</span></span>` : ''}
+      <span class="switch ${a.agent?.auto ? 'on' : ''}" onclick="toggleAutoHead()"
+        title="ONの間は30分ごとに見回り、目標枚数まで勝手に補充し続けます(消して減ってもまた埋める)">
+        <span class="track"></span>自動で目標まで保つ</span>
+      <span class="switch ${a.agent?.rights_clean ? 'on' : ''}" onclick="toggleCleanHead()"
+        title="ONの間はCC/公式APIの検索元(Openverse/Wikimedia/Pexels/Pixabay)だけで集めます。DDG/YouTube/Xは権利不明のため使いません(サーバー側で強制)">
+        <span class="track"></span>${a.agent?.rights_clean ? '🟢' : ''}権利クリーン</span>
+      <button class="ghost" onclick="$('viewhead').classList.toggle('open')" title="設定(目標/キーワード/検索元)を開閉">${ic('chevD', 14)}</button>`}
+      <button class="ghost" onclick="go({type:'lib', key:'all', criteria:{}})">${ic('x', 13)}</button>
+    </div>
+    <div class="details">
+    <div class="frow" style="margin-top:6px">
+      <span class="lbl"></span>
+      <span class="lbl" style="width:auto; line-height:1.5">${a.agent?.rights_clean
+        ? '🟢 権利クリーンモード: CC/公式API由来のみ収集。ライセンス情報を各画像に記録します(商用利用は各ライセンス条件に従ってください)。'
+        : '⚠️ 研究・学習用モード: 収集画像の権利は元権利者に帰属します。機械学習・情報解析目的(著作権法30条の4)での利用に限り、収集物の再配布・販売はできません。'}</span>
+    </div>
+    <div class="frow">
+      <span class="lbl">目標</span>
+      <input type="text" id="ah_goal" class="goal" value="${esc(a.goal)}" ${isNew ? '' : 'oninput="headAutoSave()"'}
+        placeholder="何を集める? (例: 可愛い犬の実写。イラスト不可) — 空ならただの条件フォルダ">
+      <span class="lbl" style="width:auto">まで</span>
+      <input type="number" id="ah_target" value="${a.agent?.target || 200}" style="width:70px" ${isNew ? '' : 'oninput="headAutoSave()"'}>
+      <span class="lbl" style="width:auto">枚</span>
+      <span class="lbl" style="width:auto; margin-left:14px" title="▶や自動補充の1回で集める枚数">1回</span>
+      <input type="number" id="ah_batch" value="${a.agent?.batch || 30}" min="1" max="500" style="width:60px" ${isNew ? '' : 'oninput="headAutoSave()"'}>
+      <span class="lbl" style="width:auto">枚</span>
+      <span class="lbl" style="width:auto; margin-left:14px" title="ブーストでこのフォルダが使ってよい累計の上限。使い切ると内蔵AIに戻ります(増額すれば再開)">${ic('coin', 11)}上限</span>
+      <input type="number" id="ah_budget" value="${a.agent?.budget_usd ?? 3}" min="0.5" max="500" step="0.5" style="width:60px" ${isNew ? '' : 'oninput="headAutoSave()"'}>
+      <span class="lbl" style="width:auto">$まで
+        ${(a.agent?.spent_usd || 0) > 0 ? `· <b title="このフォルダの累計使用額(実測)">使用 $${a.agent.spent_usd.toFixed(2)}</b>` : ''}</span>
+    </div>
+    <div class="frow">
+      <span class="lbl">AI配役</span>
+      <span class="lbl" style="width:auto; flex:1; white-space:normal">
+        ${a.agent?.boost
+          ? `クエリ生成 = <b style="color:#e5c07b">Claude(有料)</b> · 目利き =
+             <select id="ah_judge" ${isNew ? '' : 'onchange="headAutoSave()"'}
+               title="ブースト時の目利きAI。()内は1枚判定の概算">
+               ${JUDGE_MODELS.map(([id, label]) => `<option value="${id}" ${(a.agent?.judge_model || '') === id ? 'selected' : ''}>${label}</option>`).join('')}
+             </select> · 属性付け = 内蔵qwen2.5vl · マスク = GroundingDINO+SAM2 · 似た画像 = CLIP(内蔵)`
+          : `クエリ生成 = 内蔵Qwen3-4B · 目利き = 内蔵qwen2.5vl(無料/GPU) · マスク = GroundingDINO+SAM2 · 似た画像 = CLIP(内蔵)`}
+      </span>
+    </div>
+    <div class="frow">
+      <span class="lbl">お決まり</span>
+      ${COND_PRESETS.map(([label, phrase]) => `<span class="engchip ${a.goal?.includes(phrase) ? 'on' : ''}"
+        onclick="condToggle(this, '${phrase}')" title="押すと目標に条件として入ります(AIの合否判定に効く)">${label}</span>`).join('')}
+    </div>
+    <div class="frow">
+      <span class="lbl">キーワード</span>
+      <input type="text" id="ah_keywords" style="flex:1" ${isNew ? '' : 'oninput="headAutoSave()"'}
+        placeholder="自由に書いてOK — AIが検索語に翻訳します。カンマ区切りならその語をそのまま検索"
+        value="${esc((a.keywords || []).join(', '))}">
+    </div>
+    <div class="frow">
+      <span class="lbl">検索元</span>
+      ${ENGINES.map(([id, label, hint, glyph, bc]) => `<span class="engchip ${engOn(a, id) ? 'on' : ''}"
+        data-eng="${id}" title="${hint}" onclick="this.classList.toggle('on'); ${isNew ? '' : 'headAutoSave()'}"><span class="eng-glyph" style="color:${bc}">${glyph}</span>${label}</span>`).join('')}
+    </div>
+    ${!isNew && a.last_run ? `<div class="last">前回: <b>+${a.last_run.ingested}枚</b> · 検査${a.last_run.checked} · 通過率<b>${(a.last_run.pass_rate * 100 | 0)}%</b> · $${(a.last_run.spent_usd || 0).toFixed(2)} · クエリ「${esc(a.last_run.query)}」
+      <span class="sp"></span>
+      <button class="ghost" style="padding:2px 9px; font-size:11px" onclick="resetLedger()"
+        title="使ったクエリ/見たURLの記録を忘れて、もう一度最初から探させる(収集が枯れた時に)">${ic('reset', 12)} 検索履歴リセット</button>
+      <button class="ghost" style="padding:2px 9px; font-size:11px" onclick="runSeg()"
+        title="このフォルダの画像に自動マスク(目標からAIが対象語を決めて、gdino2segが輪郭を切る)">${ic('smart', 12)} マスク生成</button></div>` : ''}`;
+}
+
+// お決まり条件: 押すと目標文に入る(=VLMゲートがその条件で判定する)
+// 💰ブースト時の目利きAI候補: [モデルID, 表示ラベル, 1判定の概算USD]。''=サーバ既定(settings.json)
+const JUDGE_MODELS = [
+  ['', '標準(Qwen2.5-VL 72B・約0.05円/枚)', 0.0003],
+  ['google/gemini-2.5-flash-lite', 'Gemini Flash Lite(最安・約0.02円/枚)', 0.00013],
+  ['claude-sonnet-5', 'Claude sonnet-5(最強・約0.5円/枚)', 0.003],
+];
+function judgeRate(a) {
+  const jm = a?.agent?.judge_model || '';
+  return (JUDGE_MODELS.find(([id]) => id === jm) || JUDGE_MODELS[0])[2];
+}
+function judgeName(a) {
+  const jm = a?.agent?.judge_model || '';
+  return ((JUDGE_MODELS.find(([id]) => id === jm) || JUDGE_MODELS[0])[1]).split('(')[0];
+}
+const COND_PRESETS = [
+  ['顔のみ', '顔のアップのみ'],
+  ['全身', '全身が写っていること'],
+  ['一人だけ', '一人だけ写っていること'],
+  ['実写のみ', '実写のみ(イラスト・CG・アニメ絵は不可)'],
+  ['透かし除外', '透かし・ロゴ・文字入りは不可'],
+  ['高品質', 'ブレ・低解像度・粗い画像は不可'],
+];
+function condToggle(el, phrase) {
+  const g = $('ah_goal'); if (!g) return;
+  if (g.value.includes(phrase)) {
+    g.value = g.value.replace('。' + phrase, '').replace(phrase, '').trim();
+    el.classList.remove('on');
+  } else {
+    g.value = (g.value.trim() ? g.value.trim() + '。' : '') + phrase;
+    el.classList.add('on');
+  }
+  if (loc.type === 'folder') headAutoSave();
+}
+// [id, 表示名, 説明, 絵文字アイコン, ブランド色]
+const ENGINES = [
+  ['ddg', 'Web検索', '一般Web画像(広い・権利未確認)', '🦆', '#de5833'],
+  ['openverse', 'Openverse', 'CCライセンス素材', '🅒', '#c9c9c9'],
+  ['wikimedia', 'Wikimedia', 'Commons(CC/PD・出典メタ付き)', 'Ⓦ', '#c9c9c9'],
+  ['pexels', 'Pexels', 'ストックフォト(商用可)', '📷', '#05a081'],
+  ['pixabay', 'Pixabay', 'ストックフォト(商用可)', '🖼️', '#00ab6b'],
+  ['x', 'X (Grok)', 'Xの画像付きポストをGrokに探させる(従量・オプトイン)', '𝕏', '#e7e9ea'],
+  ['youtube', 'YouTube', '動画を検索→冒頭60秒をフレーム抽出(そっくりフレームが増えやすいのでオプトイン)', '▶', '#ff0000'],
+];
+// YouTubeは似たフレームが増えやすいので既定OFFに変更(2026-09-03指示)。X(Grok従量)もオプトイン
+const DEFAULT_ENG = ['ddg', 'openverse', 'wikimedia', 'pexels', 'pixabay']
+function engOn(a, id) {
+  return a.engines?.length ? a.engines.includes(id) : DEFAULT_ENG.includes(id);
+}
+function engPick() {
+  // data-eng持ちだけ拾う(お決まり条件チップが同じclassでnullが混入→422の実害 2026-09-03)
+  const on = [...document.querySelectorAll('.engchip.on')].map(el => el.dataset.eng).filter(Boolean);
+  return on.length === DEFAULT_ENG.length && DEFAULT_ENG.every(e => on.includes(e)) ? [] : on;
+}
+function openFolder(name) {
+  const a = albumsCache.find(x => x.name === name); if (!a) return;
+  go({type: 'folder', key: name, criteria: {...a.criteria}});
+}
+// 親フォルダは＋を押した場所で決まる(名前欄にパスを書かせない 2026-09-03指示)
+let newParent = '';
+function openFolderNew(parent = '') {
+  newParent = parent;
+  go({type: 'new', key: '', criteria: {}});
+  setTimeout(() => $('ah_name')?.focus(), 50);
+}
+
+async function createFolder() {
+  let {folder, name} = splitPath($('ah_name').value.trim());
+  if (newParent) folder = newParent + (folder ? '/' + folder : '');
+  if (!name) return toast('名前をください');
+  const goal = $('ah_goal').value.trim();
+  const target = parseInt($('ah_target').value) || 200;
+  const keywords = $('ah_keywords').value.split(/[,、]/).map(s => s.trim()).filter(Boolean);
+  // 新規は必ず「自分のバケツ」で空に生まれる(憲法2条)。目標なしでもライブラリ全体は見せない
+  // (criteria空だと全部が映って「他のデータが入ってる」ように見える 2026-09-03報告の修正)
+  const criteria = {source: 'crawl:' + name};
+  try {
+    const r = await j('/api/albums', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({name, folder, goal, agent: {auto: false, target}, keywords, engines: engPick(), criteria})});
+    toast(goal ? `AIフォルダ「${r.name}」誕生 — ▶で集め始めます` : `フォルダ「${r.name}」作成`);
+    await loadAlbums();
+    openFolder(r.name);
+  } catch (e) { toast('❌ ' + e.message); }
+}
+// 自動保存(既存のみ・800msデバウンス・パネル再描画なし=フォーカス維持)
+function headAutoSave() {
+  clearTimeout(window._ahT);
+  window._ahT = setTimeout(async () => {
+    if (loc.type !== 'folder') return;
+    const src = albumsCache.find(x => x.name === loc.key); if (!src) return;
+    const goal = $('ah_goal')?.value.trim() ?? '';
+    const target = parseInt($('ah_target')?.value) || 200;
+    const batch = Math.max(1, parseInt($('ah_batch')?.value) || 30);
+    const budget_usd = Math.max(0.5, parseFloat($('ah_budget')?.value) || 3);
+    const keywords = ($('ah_keywords')?.value ?? '').split(/[,、]/).map(s => s.trim()).filter(Boolean);
+    const criteria = {...src.criteria};
+    if (goal && (!criteria.source || criteria.source.startsWith('crawl:'))) criteria.source = 'crawl:' + loc.key;
+    try {
+      const engines = engPick();
+      await j('/api/albums', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({name: loc.key, folder: src.folder || '', goal,
+          agent: {...(src.agent || {}), auto: src.agent?.auto || false, boost: src.agent?.boost || false, target, batch, budget_usd,
+                  judge_model: $('ah_judge')?.value ?? (src.agent?.judge_model || '')},
+          keywords, engines, criteria})});
+      src.goal = goal; src.keywords = keywords;
+      src.agent = {...(src.agent || {}), target, batch, budget_usd,
+                   judge_model: $('ah_judge')?.value ?? (src.agent?.judge_model || '')}; src.engines = engines;
+      toast('保存しました');
+    } catch (e) { toast('❌ ' + e.message); }
+  }, 800);
+}
+// 「この中に作る」: 親を覚えて新規パネルを開く。名前欄には名前だけ書けばいい
+function newInFolder(prefix) {
+  openFolderNew(prefix);
+  toast(`「${prefix}」の中に作ります — 名前だけ入力してください`);
+}
+function copyAlbum(name) {
+  const src = albumsCache.find(x => x.name === name); if (!src) return;
+  go({type: 'new', key: '', criteria: {}});
+  setTimeout(() => {
+    $('ah_name').value = (src.folder ? src.folder + '/' : '') + name + '_2';
+    $('ah_goal').value = src.goal || '';
+    $('ah_keywords').value = (src.keywords || []).join(', ');
+    $('ah_target').value = src.agent?.target || 200;
+    toast('レシピを複製 — 目標を書き換えて「作成」(犬→猫)');
+  }, 50);
+}
+function fmtTok(n) { n = +n || 0; return n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'k' : '' + n; }
+// コスト表示モード: トークン/ドル/日本円をクリックで切替(2026-09-03指示)。レートは表示用の概算
+const JPY_RATE = 150;
+function fmtCost(tok, usd) {
+  const m = localStorage.getItem('fg_costmode') || 'usd';
+  if (m === 'jpy') return '¥' + Math.round((+usd || 0) * JPY_RATE).toLocaleString();
+  if (m === 'usd') return '$' + (+usd || 0).toFixed(2);
+  const t = +tok || Math.round((+usd || 0) / 3.6e-6); // 旧データ(＄記録のみ)は概算逆算。≈付きで正直に
+  return (+tok ? '' : '≈') + fmtTok(t) + 'tok';
+}
+function cycleCostMode(ev) {
+  ev?.stopPropagation();
+  const order = ['tok', 'usd', 'jpy'];
+  const next = order[(order.indexOf(localStorage.getItem('fg_costmode') || 'usd') + 1) % 3];
+  localStorage.setItem('fg_costmode', next);
+  toast('コスト表示: ' + ({tok: 'トークン', usd: 'ドル', jpy: '日本円(概算¥' + JPY_RATE + '/$)'})[next]);
+  renderSide(); try { renderViewhead(); } catch (e) {}
+}
+// 1回の収集の推定コスト(トークン表示 2026-09-03指示)。💰=Claude目利き実測~1.1k tok/検査。
+// 採用率は前回実績(無ければ15%)で割り戻す
+function crawlCostEst(a) {
+  if (!a?.agent?.boost) return '(無料)';
+  const batch = a.agent?.batch || 30;
+  const n = Math.max(1, Math.min(batch, Math.max(batch, (a.agent?.target || 200) - (a.count || 0))));
+  const pass = Math.min(0.5, Math.max(0.05, a.last_run?.pass_rate || 0.15));
+  const tok = (n / pass) * 1100 + 7000;
+  const usd = (n / pass) * judgeRate(a) + 0.02; // 目利き単価はモデル連動+クエリ生成Claude約2¢
+  return `(推定${fmtCost(tok, usd)})`;
+}
+async function runCrawlNow() {
+  const a = albumsCache.find(x => x.name === loc.key); if (!a) return;
+  const batch = a.agent?.batch || 30;
+  const n = Math.max(1, Math.min(batch, Math.max(batch, (a.agent?.target || 200) - (a.count || 0))));
+  try {
+    const r = await j('/api/crawl', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({album: loc.key, n})});
+    toast(r.queued ? `順番待ちに入れました(${r.position}番目) — 前の収集が終わり次第自動で始まります`
+                   : `収集開始(+${n}枚目標) — ゲート通過だけ収蔵されます`);
+    await loadAlbums(); renderViewhead();
+  } catch (e) { toast('❌ ' + e.message); }
+}
+async function stopCrawlHead() {
+  try {
+    await j('/api/crawl/stop', {method: 'POST'});
+    toast('止めます — 順番待ちがあれば5秒ほどで次が始まります');
+    setTimeout(() => { loadAlbums(); renderViewhead(); }, 1500);
+  } catch (e) { toast('❌ ' + e.message); }
+}
+async function toggleAutoHead() {
+  const a = albumsCache.find(x => x.name === loc.key); if (!a) return;
+  const agent = {...(a.agent || {}), auto: !a.agent?.auto, target: a.agent?.target || 200};
+  try {
+    await j('/api/albums', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({name: a.name, folder: a.folder || '', goal: a.goal || '',
+                            agent, keywords: a.keywords || [], engines: a.engines || [], criteria: a.criteria})});
+    toast(agent.auto ? `放置で自動収集ON — 目標${agent.target}枚まで勝手に増えます` : '自動収集OFF');
+    await loadAlbums(); renderViewhead();
+  } catch (e) { toast('❌ ' + e.message); }
+}
+async function toggleCleanHead() {
+  const a = albumsCache.find(x => x.name === loc.key); if (!a) return;
+  const agent = {...(a.agent || {}), rights_clean: !a.agent?.rights_clean, target: a.agent?.target || 200};
+  try {
+    await j('/api/albums', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({name: a.name, folder: a.folder || '', goal: a.goal || '',
+                            agent, keywords: a.keywords || [], engines: a.engines || [], criteria: a.criteria})});
+    toast(agent.rights_clean
+      ? '🟢 権利クリーンON — 次の収集からCC/公式APIソースのみ(サーバー側で強制)'
+      : '権利クリーンOFF — 全ソースで集めます(研究・学習用途限定)');
+    await loadAlbums(); renderViewhead();
+  } catch (e) { toast('❌ ' + e.message); }
+}
+async function toggleBoostHead() {
+  const a = albumsCache.find(x => x.name === loc.key); if (!a) return;
+  const agent = {...(a.agent || {}), boost: !a.agent?.boost, target: a.agent?.target || 200};
+  try {
+    await j('/api/albums', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({name: a.name, folder: a.folder || '', goal: a.goal || '',
+                            agent, keywords: a.keywords || [], engines: a.engines || [], criteria: a.criteria})});
+    toast(agent.boost ? `💰ブーストON — 次の収集から${judgeName(a)}が目利き(フォルダ上限$${agent.budget_usd ?? 3}まで)` : '💰ブーストOFF — 内蔵AIに戻します');
+    await loadAlbums(); renderViewhead();
+  } catch (e) { toast('❌ ' + e.message); }
+}
+async function setJudgeModel(v) {
+  const a = albumsCache.find(x => x.name === loc.key); if (!a) return;
+  const agent = {...(a.agent || {}), judge_model: v};
+  try {
+    await j('/api/albums', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({name: loc.key, folder: a.folder || '', goal: a.goal || '',
+                            agent, keywords: a.keywords || [], engines: a.engines || [], criteria: a.criteria})});
+    a.agent = agent;
+    toast('目利き = ' + judgeName(a));
+    renderViewhead();
+  } catch (e) { toast('❌ ' + e.message); }
+}
+async function runSeg() {
+  try {
+    const r = await j('/api/seg', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({album: loc.key})});
+    toast(`マスク生成開始 — 対象「${r.prompt}」(進捗はAI稼働状況)`);
+  } catch (e) { toast('❌ ' + e.message); }
+}
+async function resetLedger() {
+  try {
+    await j('/api/crawl/ledger/clear', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({album: loc.key})});
+    toast('検索履歴を忘れました — 次回はまっさらに探し直します');
+  } catch (e) { toast('❌ ' + e.message); }
+}
+async function delAlbum(n) {
+  await j('/api/albums/' + n, {method: 'DELETE'});
+  toast(`フォルダ「${n}」を削除(条件の保存を消しただけ。画像は残っています)`);
+  if (loc.type === 'folder' && loc.key === n) go({type: 'lib', key: 'all', criteria: {}});
+  loadAlbums();
+}
+async function loadAlbums() {
+  try { albumsCache = await j('/api/albums'); renderSide(); } catch (e) {}
+}
+
+// ================= データ読み込み+グリッド =================
+// 「見てない間に来た分」= 前回このフォルダを開いた時刻より新しい収蔵にNEW
+let seenMap = JSON.parse(localStorage.getItem('fg_seen') || '{}');
+let prevSeen = 0;
+function seenKey(a) { return a ? 'src:' + (a.criteria?.source || a.name) : 'src:' + (loc.criteria?.source || loc.key || ''); }
+let rgen = 0; // reload世代: ナビ連打時に遅い古の応答が新しい場所を上書きする追い越し事故の防止
+async function reload(flip) {
+  const g = ++rgen;
+  if (loc.type === 'trash') { // ゴミ箱は別世界(索引でなく退避層を直接見る)
+    const list = await j('/api/trash');
+    if (g !== rgen) return; // 追い越された(すでに別の場所へ移動済み)
+    items = list.map(e => ({...e, _trash: true}));
+    total = items.length;
+    render(true);
+    $('n_trash').textContent = total || '';
+    syncHash();
+    return;
+  }
+  if (loc.type === 'folder' || loc.type === 'source') {
+    const k = seenKey();
+    prevSeen = seenMap[k] || 0;
+    seenMap[k] = Date.now() / 1000;
+    localStorage.setItem('fg_seen', JSON.stringify(seenMap));
+    renderSide(); // +Nバッジを既読化
+  } else prevSeen = 0;
+  const r = await j('/api/images?' + params({limit: 200, offset: 0}));
+  if (g !== rgen) return; // 追い越された(すでに別の場所へ移動済み)
+  items = r.items; total = r.total;
+  flip ? flipRender() : render(true);
+  syncHash();
+}
+async function loadMore() {
+  if (loadMore._busy || !items.length || items.length >= total || loc.type === 'new') return;
+  loadMore._busy = true;
+  const g = rgen;
+  try {
+    const r = await j('/api/images?' + params({limit: 200, offset: items.length}));
+    if (g !== rgen) return; // 場所が変わった後に届いた追加分は捨てる
+    items = items.concat(r.items);
+    updateWindow(true);
+    drawSelbar();
+  } finally { loadMore._busy = false; }
+}
+// (旧DOM_WIN/trimTop/restoreTop方式は真のrow virtualizationへ置換済み 2026-09-03)
+function gridCols() {
+  return setCell._n || Math.max(1, Math.round(($('gridwrap').clientWidth - 32) / (+localStorage.getItem('fg_cell') || 168)));
+}
+function flipRender() {
+  if (document.body.classList.contains('dense')) { render(true, 0, true); return; } // 高密度は即時切替
+  const old = {};
+  document.querySelectorAll('.cell').forEach(el => { old[el.id] = el.getBoundingClientRect(); });
+  render(true, 0, true);
+  requestAnimationFrame(() => {
+    document.querySelectorAll('.cell').forEach(el => {
+      const o = old[el.id];
+      if (!o) { el.animate([{opacity: 0, transform: 'scale(.85)'}, {opacity: 1, transform: 'none'}], {duration: 350, easing: 'ease-out'}); return; }
+      const n = el.getBoundingClientRect();
+      const dx = o.left - n.left, dy = o.top - n.top;
+      if (dx || dy) el.animate([{transform: `translate(${dx}px,${dy}px)`}, {transform: 'none'}],
+        {duration: 480, easing: 'cubic-bezier(.2,.9,.3,1)'});
+    });
+  });
+}
+function cellHtml(it) {
+  if (it._trash) { // ゴミ箱: クリック=選択(戻す対象を選ぶ)。残り日数を出す
+    return `<div class="cell ${sel.has(it.sha1) ? 'sel in' : ''}" id="c_${it.sha1}"
+        onclick="ckSelSha('${it.sha1}', event)" style="cursor:pointer">
+      <img loading="lazy" src="/trash/img/${it.sha1}" style="background:${it.tint || 'var(--panel)'}; filter:saturate(.5) brightness(.8)">
+      <span class="ck">${ic('check', 12)}</span>
+      <span class="newb" style="background:#3a3d4a">あと${it.days_left}日</span>
+      <div class="cap">${esc(it.source || '')}</div>
+    </div>`;
+  }
+  const cellPx = +localStorage.getItem('fg_cell') || 168;
+  const big = cellPx > 300; // 大表示はpreview段(1080)でボケさせない
+  const ver = it.erev ? '?v=' + it.erev : ''; // 編集済みはサムネも焼き直されている(キャッシュバスタ)
+  // 段の選択: 俯瞰(≤110px)=micro120(デコード費1/10) / 標準=thumb360 / 大=preview1080
+  const tier = cellPx <= 110 ? '/micro/' : big ? '/preview/' : '/thumb/';
+  // マスク済みチップON中はサムネもライトボックスと同じ「背景を沈めた」描画で
+  const src = fchips.seg
+    ? `/render/${it.sha1}?w=${big ? 1080 : 360}&seg=1&v=${it.erev || 0}`
+    : `${tier}${it.sha1}${ver}`;
+  return `<div class="cell ${sel.has(it.sha1) ? 'sel in' : ''}" id="c_${it.sha1}" onclick="openLbSha('${it.sha1}')"
+      draggable="true" ondragstart="dragShas(event, '${it.sha1}')">
+    <img loading="lazy" decoding="async" src="${src}" style="background:${it.tint || 'var(--panel)'}">
+    <span class="ck" onclick="event.stopPropagation(); ckSelSha('${it.sha1}', event)">${ic('check', 12)}</span>
+    ${it.keep ? `<span class="badge">${ic('star', 13)}</span>` : ''}
+    ${it.cost > 0 ? `<span class="costb" title="この1枚の取得費(実測)">$${it.cost < 0.01 ? it.cost.toFixed(3) : it.cost.toFixed(2)}</span>` : ''}
+    ${it.rights === 'clean' ? `<span class="rclean" title="権利クリーン — CC/公式API由来で商用利用しやすい">${ic('check', 10)}</span>` : ''}
+    ${prevSeen && it.ingested > prevSeen ? '<span class="newb">NEW</span>' : ''}
+    <div class="cap">${esc(it.caption || it.source || '')}</div>
+  </div>`;
+}
+// ==== 真のrow virtualization(作業単位2 2026-09-03) ====
+// DOMには「可視範囲+上下1画面」だけを置き、外側は高さだけのスペーサーで支える。
+// 旧方式(全件innerHTML+履歴2400枚のtrimTop/restoreTop)は撤去。
+let vStart = 0, vEnd = 0;
+function cellPitch() { // 1行の高さ(セルは正方形: 幅=カラム幅、gap6)
+  const c = $('grid').children[0];
+  if (c && c.classList.contains('cell')) return c.getBoundingClientRect().height + 6;
+  return ($('gridwrap').clientWidth - 32) / gridCols() + 6;
+}
+function contentTop() { // スクロール座標系でのスペーサー上端位置
+  const gw = $('gridwrap');
+  return $('gridspacer').getBoundingClientRect().top - gw.getBoundingClientRect().top + gw.scrollTop;
+}
+function updateWindow(force) {
+  const gw = $('gridwrap'), g = $('grid');
+  if (!items.length) return;
+  const n = gridCols(), ch = cellPitch(), H = gw.clientHeight;
+  const rel = Math.max(0, gw.scrollTop - contentTop());
+  const visRows = Math.max(1, Math.ceil(H / ch));
+  const buf = visRows; // 上下1画面分のバッファ
+  const ns = Math.min(items.length, Math.max(0, Math.floor(rel / ch) - buf) * n);
+  const ne = Math.min(items.length, (Math.floor(rel / ch) + visRows + buf) * n);
+  // ヒステリシス: 半バッファ動くまで再構築しない(スクロール毎のinnerHTML再生成防止)
+  if (!force && Math.abs(ns - vStart) < (buf * n) / 2 && Math.abs(ne - vEnd) < (buf * n) / 2) return;
+  // 差分更新: 窓が重なっていれば増減した分だけ足し引き(denseで窓全体を作り直すと固まる 2026-09-03)
+  const overlap = !force && vEnd > vStart && ns < vEnd && ne > vStart;
+  if (overlap) {
+    if (ns > vStart) { for (let k = vStart; k < ns; k++) g.firstElementChild?.remove(); }
+    else if (ns < vStart) { g.insertAdjacentHTML('afterbegin', items.slice(ns, vStart).map(cellHtml).join('')); }
+    if (ne < vEnd) { for (let k = ne; k < vEnd; k++) g.lastElementChild?.remove(); }
+    else if (ne > vEnd) { g.insertAdjacentHTML('beforeend', items.slice(vEnd, ne).map(cellHtml).join('')); }
+    for (const el of g.children) if (!el.classList.contains('in')) el.classList.add('in');
+  } else {
+    // 全再構築は分割で: 可視分を即描画し、残りは1フレーム400セルずつ追記
+    // (dense突入時に千数百セルを一気に作ると3秒級のLong Taskになる 2026-09-03)
+    const gen = (updateWindow._gen = (updateWindow._gen || 0) + 1);
+    const CHUNK = 400;
+    const first = Math.min(ne, ns + Math.max(visRows * n, CHUNK));
+    g.innerHTML = items.slice(ns, first).map(cellHtml).join('');
+    for (const el of g.children) el.classList.add('in');
+    let done = first;
+    (function more() {
+      if (gen !== updateWindow._gen || done >= ne) return;
+      const nx = Math.min(ne, done + CHUNK);
+      const before = g.children.length;
+      g.insertAdjacentHTML('beforeend', items.slice(done, nx).map(cellHtml).join(''));
+      for (let i = before; i < g.children.length; i++) g.children[i].classList.add('in');
+      done = nx;
+      requestAnimationFrame(more);
+    })();
+  }
+  vStart = ns; vEnd = ne;
+  $('gridspacer').style.height = Math.ceil(vStart / n) * ch + 'px';
+  $('gridspacerB').style.height = Math.ceil((items.length - vEnd) / n) * ch + 'px';
+}
+{ // スクロールでrAF更新(1フレーム1回)
+  let raf = 0;
+  $('gridwrap').addEventListener('scroll', () => {
+    if (!raf) raf = requestAnimationFrame(() => { raf = 0; updateWindow(false); });
+  }, {passive: true});
+}
+function render(fresh, from = 0, instant = false) {
+  if (fresh) {
+    vStart = vEnd = 0;
+    $('gridspacer').style.height = '0';
+    $('gridspacerB').style.height = '0';
+    if (!items.length) {
+      $('grid').innerHTML = `<div class="empty"><div class="big">${ic('img', 44)}</div>ここにはまだ画像がありません</div>`;
+      drawSelbar();
+      return;
+    }
+    updateWindow(true);
+    // 初回だけ軽い出現演出(窓内の先頭60枚・denseでは無し)
+    if (!instant && !document.body.classList.contains('dense')) {
+      [...$('grid').children].slice(0, 60).forEach((el, i) => {
+        el.animate([{opacity: 0, transform: 'translateY(6px)'}, {opacity: 1, transform: 'none'}],
+                   {duration: 260, delay: (i % 24) * 12, easing: 'ease-out', fill: 'backwards'});
+      });
+    }
+    fillViewport(); // 初期fillをobserver任せにしない(P0-4)
+  } else {
+    updateWindow(true); // 追加分は窓計算に任せる
+  }
+  drawSelbar();
+}
+// 画面+先読み分が埋まるまで明示的に読み足す(sentinelが発火しないケースの保険)
+async function fillViewport() {
+  const gw = $('gridwrap');
+  for (let i = 0; i < 6 && items.length < total; i++) {
+    if (gw.scrollHeight > gw.clientHeight + 1400) break;
+    await loadMore();
+  }
+}
+function openLbSha(sha) { const i = items.findIndex(x => x.sha1 === sha); if (i >= 0) openLb(i); }
+function ckSelSha(sha, e) { const i = items.findIndex(x => x.sha1 === sha); if (i >= 0) ckSel(i, e); }
+function ckSel(i, e) {
+  if (e.shiftKey && lastCk >= 0) {
+    const [a, b] = [Math.min(lastCk, i), Math.max(lastCk, i)];
+    for (let k = a; k <= b; k++) setSel(items[k].sha1, true);
+  } else setSel(items[i].sha1, !sel.has(items[i].sha1));
+  lastCk = i; drawSelbar();
+}
+function setSel(sha, on) {
+  on ? sel.add(sha) : sel.delete(sha);
+  const c = $('c_' + sha); if (c) c.classList.toggle('sel', on);
+}
+function drawSelbar() {
+  $('selbar').classList.toggle('show', sel.size > 0);
+  document.body.classList.toggle('selmode', sel.size > 0);
+  $('selcount').textContent = sel.size;
+}
+function selectAllShown() { items.forEach(it => setSel(it.sha1, true)); drawSelbar(); }
+function clearSel() { [...sel].forEach(s => setSel(s, false)); sel.clear(); drawSelbar(); }
+
+// ---- 絞り込みチップ(今の場所を絞る虫眼鏡) ----
+function fcOrigin(o) {
+  fchips.origin = fchips.origin === o ? '' : o;
+  $('fc_real').classList.toggle('on', fchips.origin === 'real');
+  $('fc_synth').classList.toggle('on', fchips.origin === 'synthetic');
+  reload(true);
+}
+function fc(k) {
+  fchips[k] = !fchips[k];
+  $('fc_' + k).classList.toggle('on', fchips[k]);
+  // 背景もモード連動(クリーン=緑・セーフ=青のアンビエント)
+  document.body.classList.toggle('f-clean', !!fchips.clean);
+  document.body.classList.toggle('f-safe', !!fchips.safe);
+  reload(true);
+}
+// 属性チップは既定で隠す(常時全部出すのはうるさい)。適用中は件数バッジ
+function toggleChips() {
+  const open = $('chips_wrap').classList.toggle('open');
+  localStorage.setItem('fg_chips', open ? '1' : '');
+  chipsBtn();
+}
+function chipsBtn() {
+  const n = Object.values(chipFilters).filter(Boolean).length;
+  $('chipsbtn').innerHTML = ic('smart', 13) + ' タグ' + (n ? `<span class="badge">${n}</span>` : '');
+  $('chipsbtn').classList.toggle('on', n > 0);
+}
+if (localStorage.getItem('fg_chips')) $('chips_wrap').classList.add('open');
+$('enrich_chip').innerHTML = ic('eye', 11) + ' 未属性にまとめて属性付け';
+// サムネサイズ: 列数が変わる瞬間だけFLIPで繋ぐ(ガクッと飛ばずリニアな体感に)
+// ==== サイズ変更(作業単位1 2026-09-03) ====
+// 旧実装は入力のたび全セルの矩形を読んでFLIPしていた(1402セルで1入力2804回の矩形読取り
+// +最大1402本のアニメ→ドラッグ1.2秒の処理に実測95秒)。新実装:
+//  - ドラッグ中: rAFで1フレーム1回だけCSS列数を書く。矩形読取り/FLIP/保存は一切しない
+//  - 確定時(350ms静止 or changeイベント): 保存 + 可視セルの画像tier切替(micro/thumb/preview)
+function setCell(v) {
+  setCell._t = +v;
+  if (!setCell._raf) {
+    setCell._raf = requestAnimationFrame(() => {
+      setCell._raf = 0;
+      // 窓が大きい(dense)時、列変更=数千セルの再レイアウトなのでドラッグ中は120ms毎に間引く
+      const heavy = $('grid').children.length > 800;
+      const now = performance.now();
+      if (heavy && now - (setCell._lastApply || 0) < 120) {
+        clearTimeout(setCell._defer);
+        setCell._defer = setTimeout(() => setCell(setCell._t), 60); // 最後の値は必ず反映
+        return;
+      }
+      setCell._lastApply = now;
+      const val = setCell._t;
+      document.documentElement.style.setProperty('--cell', val + 'px');
+      const w = $('gridwrap').clientWidth - 32;
+      const n = Math.max(1, Math.round(w / val));
+      if (setCell._n !== n) {
+        setCell._n = n;
+        $('grid').style.gridTemplateColumns = `repeat(${n}, 1fr)`;
+      }
+      document.body.classList.toggle('dense', val <= 110); // 高密度モード: 重い演出を止める
+    });
+  }
+  clearTimeout(setCell._commit);
+  setCell._commit = setTimeout(commitCell, 350); // ドラッグが止まったら確定
+}
+function commitCell() {
+  clearTimeout(setCell._commit);
+  const v = setCell._t || +localStorage.getItem('fg_cell') || 168;
+  localStorage.setItem('fg_cell', v);
+  updateWindow(true); // 列数/行高が変わったので窓を組み直す
+  retierVisible(v);
+  fillViewport();
+}
+// 可視+前後1画面のセルだけ、サイズに合った画像tierへ差し替える(デコード完了後にswap=ちらつき無し)。
+// 縮小後も360px surfaceを掴み続けるRGBA浪費(P0-2)と、拡大後のボケの両方を解消
+function retierVisible(v) {
+  const tier = v <= 110 ? 'micro' : v > 300 ? 'preview' : 'thumb';
+  const vh = innerHeight;
+  const imgs = [...document.querySelectorAll('.cell img')].filter(im => {
+    const r = im.getBoundingClientRect();
+    return r.bottom > -vh && r.top < vh * 2;
+  });
+  let i = 0;
+  (function step() {
+    for (const im of imgs.slice(i, i + 24)) {
+      const m = im.src.match(/\/(micro|thumb|preview)\//);
+      if (!m || m[1] === tier) continue;
+      const url = im.src.replace(`/${m[1]}/`, `/${tier}/`);
+      const pre = new Image();
+      pre.onload = () => { if (document.contains(im)) im.src = url; };
+      pre.src = url;
+    }
+    i += 24;
+    if (i < imgs.length) requestAnimationFrame(step);
+  })();
+}
+addEventListener('resize', () => setCell(localStorage.getItem('fg_cell') || 168));
+// Ctrl/⌘+ホイールでサムネサイズ(2026-09-03指示)。ブラウザのページズームは抑止
+$('gridwrap').addEventListener('wheel', e => {
+  if (!(e.ctrlKey || e.metaKey)) return;
+  e.preventDefault();
+  const cur = +localStorage.getItem('fg_cell') || 168;
+  const v = Math.min(1600, Math.max(36, Math.round(cur * (e.deltaY < 0 ? 1.12 : 0.89))));
+  $('cellsize').value = v;
+  setCell(v);
+}, {passive: false});
+// 押すたびに良いパターンが切り替わる(俯瞰/標準/大きめ/どーん) — 微調整はスライダーと±
+const VIEW_PATTERNS = [
+  {key: 'grid4', label: '俯瞰', cell: 92},
+  {key: 'grid3', label: '標準', cell: 172},
+  {key: 'grid2', label: '大きめ', cell: 340},
+];
+function applyPattern(i) {
+  const p = VIEW_PATTERNS[i % VIEW_PATTERNS.length];
+  localStorage.setItem('fg_vp', i % VIEW_PATTERNS.length);
+  $('vpbtn').innerHTML = ic(p.key, 14) + ' ' + p.label;
+  $('cellsize').value = p.cell;
+  setCell(p.cell);
+}
+function cyclePattern() { applyPattern((+localStorage.getItem('fg_vp') || 0) + 1); }
+function setFit(on) {
+  const cur = $('grid').classList.contains('fit');
+  if (cur !== on) toggleFit(); else { $('fitbtn').textContent = on ? '全体' : '切抜'; $('fitbtn').classList.toggle('on', on); }
+}
+// ±で1列ずつ(スライダーは大雑把・こっちは丁寧)
+function colStep(d) {
+  const w = $('gridwrap').clientWidth - 32;
+  const cur = setCell._n || Math.max(1, Math.round(w / (+localStorage.getItem('fg_cell') || 168)));
+  const n = Math.max(1, cur + d);
+  const v = Math.max(36, Math.min(1600, Math.floor(w / n)));
+  $('cellsize').value = v;
+  setCell(v);
+}
+function toggleFit() {
+  const on = $('grid').classList.toggle('fit');
+  $('fitbtn').classList.toggle('on', on);
+  localStorage.setItem('fg_fit', on ? '1' : '');
+  document.querySelectorAll('.cell img').forEach((im, i) => {
+    im.animate([{transform: 'scale(.9)', opacity: .5}, {transform: 'none', opacity: 1}],
+               {duration: 280, delay: (i % 30) * 6, easing: 'cubic-bezier(.2,.9,.3,1)'});
+  });
+}
+{ const c = localStorage.getItem('fg_cell') || 168; $('cellsize').value = c; setCell(c);
+  if (localStorage.getItem('fg_fit')) toggleFit();
+  const p = VIEW_PATTERNS[+localStorage.getItem('fg_vp') || 0];
+  $('vpbtn').innerHTML = ic(p.key, 14) + ' ' + p.label; }
+
+async function refreshFacets() {
+  try {
+    const f = facetsCache = await j('/api/facets');
+    $('n_all').textContent = f.total.toLocaleString();
+    $('n_novlm').textContent = (f.total - f.enriched) || '';
+    try { const k = await j('/api/images?keep=1&limit=1'); f.keeps = k.total; $('n_keep').textContent = k.total || ''; } catch (e) {}
+    const chip = (kind, name, n) => `<span class="chip ${chipFilters[kind] === name ? 'on' : ''}"
+      onclick="chipFilters['${kind}'] = chipFilters['${kind}']==='${name}' ? '' : '${name}'; refreshFacets(); reload(true)">
+      ${esc(name)}<small>${n}</small></span>`;
+    const JLBL = {male: '男性', female: '女性', mixed: '男女',
+      closeup: '顔アップ', upper_body: '上半身', full_body: '全身', wide: '引き',
+      child: '子供', teen: '若者', adult: '大人', senior: '年配',
+      dog: '犬', cat: '猫', bird: '鳥', fish: '魚', horse: '馬', rabbit: 'うさぎ',
+      reptile: '爬虫類', insect: '虫', farm: '家畜', wild: '野生'};
+    const jchip = (kind, s, n) => `<span class="chip ${chipFilters[kind] === s ? 'on' : ''}"
+      onclick="chipFilters['${kind}'] = chipFilters['${kind}']==='${s}' ? '' : '${s}'; refreshFacets(); reload(true)">
+      ${JLBL[s] || s}<small>${n}</small></span>`;
+    $('chips').innerHTML =
+      Object.entries(f.animals || {}).map(([s, n]) => jchip('animal', s, n)).join('') +
+      Object.entries(f.genders || {}).map(([s, n]) => jchip('gender', s, n)).join('') +
+      Object.entries(f.framings || {}).map(([s, n]) => jchip('framing', s, n)).join('') +
+      Object.entries(f.ages || {}).map(([s, n]) => jchip('age_group', s, n)).join('') +
+      Object.entries(f.scenes || {}).map(([s, n]) => chip('scene', s, n)).join('') +
+      Object.entries(f.subjects || {}).map(([s, n]) => chip('subject', s, n)).join('') +
+      Object.entries(f.styles || {}).map(([s, n]) => chip('style', s, n)).join('') +
+      Object.entries(f.tags || {}).slice(0, 12).map(([s, n]) => chip('tag', s, n)).join('');
+    chipsBtn();
+    renderSide();
+  } catch (e) {}
+}
+
+// ================= ライトボックス(v2実証済み部品) =================
+let lbIdx = -1, lbMeta = null;
+$('lbbar').innerHTML = `
+  <button class="ghost" onclick="lbGo(-1)" title="←キー / Dキー">${ic('chevL', 14)} 前 <span style="opacity:.5">(D)</span></button>
+  <button class="ghost" onclick="lbGo(1)" title="→キー / Fキー">次 <span style="opacity:.5">(F)</span> ${ic('chevR', 14)}</button>
+  <button class="ghost" onclick="simFolder()" title="この画像に似たものが集まるフォルダを作る(似ている順・新しく入る画像も自動で加わる)">${ic('search', 13)} 似た画像</button>
+  <button class="ghost" id="lbkeep" onclick="lbKeep()" title="自動間引きから絶対保護 (S)">${ic('star', 13)} お気に入り</button>
+  <button class="ghost" id="edbtn" onclick="edToggle()" title="非破壊調整のOn/Off (E)">${ic('sliders', 13)} 編集</button>
+  <button class="ghost" id="lbsel" onclick="lbSel()" title="選択に加える (X)">${ic('circle', 13)} 選択</button>
+  <button class="ghost" id="edcompare" style="display:none"
+    onpointerdown="edCompare(true)" onpointerup="edCompare(false)" onpointerleave="edCompare(false)"
+    title="押している間だけ原本">${ic('eye', 13)} 原本</button>
+  <button class="ghost" id="lbsegbtn" style="display:none" onclick="lbSegToggle()"
+    title="自動マスク(輪郭)の表示On/Off">${ic('smart', 13)} マスク</button>
+  <button class="ghost" id="lbsrcbtn" style="display:none" onclick="lbOpenSource()"
+    title="この画像の取得元ページをブラウザで開く (O)">${ic('globe', 13)} 元ページ ↗</button>
+  <button class="ghost" onclick="lbDel()" title="DELキーでも。30日は戻せる">${ic('trash', 13)}</button>`;
+
+// 出典ページへ飛ぶ(2026-09-03指示)。metaのcrawl.landing/urlがある画像だけボタンが出る
+function lbOpenSource() {
+  const u = lbMeta?.crawl?.landing || lbMeta?.crawl?.url;
+  if (u) window.open(u, '_blank', 'noopener');
+}
+$('edactions').innerHTML = `
+  <button onclick="edPush({op:'auto', params:{}})" title="WB+レベル+彩度の自動補正(非破壊)">${ic('spark', 13)} 自動</button>
+  <button onclick="edPush({op:'rotate', params:{deg:270}})" title="左に90°(自然な方)">${ic('rotate', 13)} 回転</button>
+  <button onclick="edPush({op:'flip', params:{dir:'h'}})">${ic('flip', 13)} 反転</button>
+  <button id="cropbtn" onclick="cropToggle()" title="画像の上をドラッグで範囲指定→確定">✂ クロップ</button>
+  <span class="sp"></span>
+  <button class="ghost" onclick="edClear()">${ic('broom', 13)} 原本に戻す</button>
+  <button onclick="edUndo()" title="履歴を1手戻す (⌘Z)">${ic('undo', 13)} 一手戻す</button>
+  <button class="pri" onclick="edApplyAdjust()" title="スライダの調整を確定">${ic('check', 13)} 適用</button>`;
+
+let lbSegOn = false;
+function lbUrl(sha, w) {
+  const edited = lbMeta && lbMeta.sha1 === sha && (lbMeta.edits || []).length;
+  const seg = lbSegOn && lbMeta?.sha1 === sha && lbMeta.seg?.shapes?.length;
+  if (edited || seg) {
+    return '/render/' + sha + '?v=' + (lbMeta.edits_rev || '0') + (w ? '&w=' + w : '') + (seg ? '&seg=1' : '');
+  }
+  return w ? '/preview/' + sha : '/img/' + sha;
+}
+function lbSegToggle() {
+  lbSegOn = !lbSegOn;
+  localStorage.setItem('fg_lbseg', lbSegOn ? '1' : '0'); // 次の画像・次回起動でも維持
+  $('lbsegbtn').classList.toggle('on', lbSegOn);
+  $('segfix').style.display = lbSegOn ? 'flex' : 'none';
+  zReset(); // マスクを見る時は全体表示に戻る
+  const sha = items[lbIdx]?.sha1;
+  if (sha) lbCrossfade(lbUrl(sha, 1600));
+}
+// ふわっと切替: 新画像を先読み→旧画像を上に重ねてフェードアウト(ガクッと差し替えない)
+function lbCrossfade(src) {
+  const img = $('lbimg');
+  const pv = new Image();
+  pv.src = src;
+  const apply = () => {
+    if (!$('lb').classList.contains('show')) { img.src = src; return; }
+    const r = img.getBoundingClientRect();
+    if (!r.width) { img.src = src; return; }
+    const ghost = img.cloneNode();
+    Object.assign(ghost.style, {
+      position: 'fixed', left: r.left + 'px', top: r.top + 'px', width: r.width + 'px', height: r.height + 'px',
+      margin: 0, zIndex: 39, pointerEvents: 'none', maxWidth: 'none', maxHeight: 'none',
+      transition: 'opacity .38s ease',
+    });
+    document.body.appendChild(ghost);
+    img.src = src;
+    requestAnimationFrame(() => ghost.style.opacity = '0');
+    setTimeout(() => ghost.remove(), 420);
+  };
+  if (pv.complete) apply(); else { pv.onload = apply; pv.onerror = () => { img.src = src; }; }
+}
+async function segRedo() {
+  const sha = items[lbIdx]?.sha1; if (!sha) return;
+  const prompt = $('seg_prompt').value.trim();
+  toast('マスクを切り直し中…');
+  try {
+    const m2 = await j('/api/seg/one', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({sha1: sha, prompt})});
+    if (m2.skipped) return toast('❌ ' + (m2.reason || '対象語をください'));
+    lbMeta = {...lbMeta, seg: m2.seg};
+    toast(`切り直しました: 「${m2.seg?.prompt}」で${m2.seg?.shapes?.length || 0}個`);
+    if (lbSegOn) lbCrossfade(lbUrl(sha, 1600) + '&t=' + Date.now()); // サーバは焼き直し済み・ブラウザ側もバスト
+  } catch (e) { toast('❌ ' + e.message); }
+}
+async function segClear() {
+  const sha = items[lbIdx]?.sha1; if (!sha) return;
+  try {
+    await j('/api/meta/patch', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({sha1: sha, clear_seg: true})});
+    lbMeta = {...lbMeta, seg: null};
+    lbSegOn = false;
+    $('lbsegbtn').classList.remove('on');
+    $('lbsegbtn').style.display = 'none';
+    $('segfix').style.display = 'none';
+    lbCrossfade(lbUrl(sha, 1600));
+    toast('マスクを消しました(開き直せばまた自動で切ります)');
+  } catch (e) { toast('❌ ' + e.message); }
+}
+function segCutout() {
+  const sha = items[lbIdx]?.sha1;
+  if (sha) window.open('/cutout/' + sha, '_blank');
+}
+// ---- マスクのクリック/範囲修正(ml-hubアノテエディタ風、SAM2直叩き) ----
+let segDrag = null;
+function segBindPointer() {
+  const img = $('lbimg');
+  img.addEventListener('click', e => { if (lbSegOn) { e.stopImmediatePropagation(); e.preventDefault(); } }, true);
+  img.addEventListener('mousedown', e => {
+    if (!lbSegOn || e.button !== 0) return;
+    e.preventDefault(); e.stopImmediatePropagation();
+    segDrag = {x: e.clientX, y: e.clientY, moved: false};
+  }, true);
+  addEventListener('mousemove', e => {
+    if (!segDrag) return;
+    if (Math.abs(e.clientX - segDrag.x) + Math.abs(e.clientY - segDrag.y) > 8) segDrag.moved = true;
+    if (segDrag.moved) drawSegRect(e);
+  });
+  addEventListener('mouseup', e => {
+    if (!segDrag) return;
+    const d = segDrag; segDrag = null; $('segrect')?.remove();
+    const r = img.getBoundingClientRect();
+    if (!r.width) return;
+    const nx = v => Math.min(1, Math.max(0, v));
+    if (d.moved) {
+      segRefine({box: [nx((Math.min(d.x, e.clientX) - r.left) / r.width), nx((Math.min(d.y, e.clientY) - r.top) / r.height),
+                       nx((Math.max(d.x, e.clientX) - r.left) / r.width), nx((Math.max(d.y, e.clientY) - r.top) / r.height)]});
+    } else {
+      segRefine({points: [[nx((e.clientX - r.left) / r.width), nx((e.clientY - r.top) / r.height)]], labels: [1]});
+    }
+  });
+  img.addEventListener('contextmenu', e => {
+    if (!lbSegOn) return;
+    e.preventDefault(); e.stopImmediatePropagation();
+    const r = img.getBoundingClientRect();
+    segDelAt((e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height);
+  }, true);
+}
+function drawSegRect(e) {
+  let el = $('segrect');
+  if (!el) {
+    el = document.createElement('div'); el.id = 'segrect';
+    el.style.cssText = 'position:fixed; border:1.5px dashed var(--acc); background:#4d9fff22; z-index:41; pointer-events:none; border-radius:4px';
+    document.body.appendChild(el);
+  }
+  el.style.left = Math.min(segDrag.x, e.clientX) + 'px';
+  el.style.top = Math.min(segDrag.y, e.clientY) + 'px';
+  el.style.width = Math.abs(e.clientX - segDrag.x) + 'px';
+  el.style.height = Math.abs(e.clientY - segDrag.y) + 'px';
+}
+async function segRefine(p) {
+  const sha = items[lbIdx]?.sha1; if (!sha) return;
+  toast('SAMで切り出し中…');
+  try {
+    const m = await j('/api/seg/refine', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({sha1: sha, cls: $('seg_prompt').value.trim(), ...p})});
+    if (items[lbIdx]?.sha1 !== sha) return;
+    lbMeta = m;
+    $('lbsegbtn').style.display = '';
+    lbCrossfade(lbUrl(sha, 1600) + '&t=' + Date.now());
+    toast('切りました(間違いは右クリックで削除)');
+  } catch (e) { toast('❌ ' + e.message); }
+}
+async function segDelAt(x, y) {
+  const sha = items[lbIdx]?.sha1; if (!sha) return;
+  try {
+    const m = await j('/api/meta/patch', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({sha1: sha, del_seg_at: [x, y]})});
+    if (items[lbIdx]?.sha1 !== sha) return;
+    lbMeta = m;
+    lbCrossfade(lbUrl(sha, 1600) + '&t=' + Date.now());
+    toast('そのマスクを消しました');
+  } catch (e) { toast('❌ ' + e.message); }
+}
+segBindPointer();
+function openLb(i) {
+  const lb = $('lb');
+  lb.classList.remove('editing', 'imm');
+  lb.classList.add('show');
+  lbShow(i, 0);
+  lbMorphOpen(items[i]?.sha1);
+}
+// macOS Quick Look風: クリックしたサムネがそのままヌルッと拡大して定位置に収まる
+function lbMorphOpen(sha) {
+  const cellDiv = sha && document.getElementById('c_' + sha);
+  const cell = cellDiv?.querySelector('img');
+  if (!cell || !cell.complete) return;
+  // 始点はセル枠(divの実測)。imgはホバー拡大(scale1.05)中で座標が膨らんでいる(着地ズレの一因)
+  const r = cellDiv.getBoundingClientRect();
+  if (!r.width) return;
+  const img = $('lbimg');
+  // 本体img自身の入場アニメ(scale .92→1)を殺す: アニメ中の縮んだ座標を着地先として
+  // 実測してしまい「アニメの先と実際の場所が違う」気持ち悪さの主因(2026-09-03)
+  img.style.animation = 'none';
+  const ghost = cell.cloneNode();
+  Object.assign(ghost.style, {
+    position: 'fixed', left: r.left + 'px', top: r.top + 'px', width: r.width + 'px', height: r.height + 'px',
+    objectFit: 'cover', borderRadius: '10px', margin: 0, zIndex: 40, pointerEvents: 'none',
+    boxShadow: '0 24px 70px #000a', transition: 'all .34s cubic-bezier(.22,.9,.24,1)',
+  });
+  document.body.appendChild(ghost);
+  img.style.opacity = '0';
+  requestAnimationFrame(() => {
+    // 第1段: サムネのアスペクト比で箱(width/height属性)を先に確保し、**実レイアウトの着地点を実測**して飛ぶ。
+    // キャッシュ済み画像はsettleが先に走る→その後に属性を置くと誰も外さず残り、
+    // 次の画像が古いアスペクトに引き伸ばされる(削除→次表示で崩れる実害 2026-09-03)。settle済なら何もしない
+    if (landed) return;
+    flown = true;
+    const ar = cell.naturalWidth && cell.naturalHeight ? cell.naturalWidth / cell.naturalHeight : r.width / r.height;
+    let w = Math.min(innerWidth * .94, innerHeight * .74 * ar), h = w / ar;
+    if (h > innerHeight * .74) { h = innerHeight * .74; w = h * ar; }
+    img.width = Math.round(w);
+    img.height = Math.round(h);
+    const t0 = img.getBoundingClientRect();
+    Object.assign(ghost.style, {left: t0.left + 'px', top: t0.top + 'px',
+                                width: t0.width + 'px', height: t0.height + 'px', borderRadius: '8px'});
+  });
+  // 第2段: 実画像のロード完了後に「実測の位置」へ滑らかに着地継続→そこで初めて本体を見せる
+  // (以前は見積もり位置で本体を出していたので最後にカクッと飛んでいた)
+  let landed = false, flown = false;
+  const settle = () => {
+    if (landed) return;
+    // サムネ即差し込み(チラつき対策)でloadが飛行開始前に発火する。飛行(第1段rAF)より先に
+    // 着地すると拡大アニメごと消える(「小さく移動→パッと拡大」退行 2026-09-03)→1フレーム譲る
+    if (!flown) { requestAnimationFrame(settle); return; }
+    landed = true;
+    // 仮の箱(width/height属性)を外して実画像の本当の寸法で測り直す(残すと実アスペクトと違う時に歪む)。
+    // ただし中身がまだ仮サムネ(360px)なら外すと箱が縮む→previewが来た時(swap)が外してくれるので残す
+    if (img.dataset.tier !== 'thumb') {
+      img.removeAttribute('width');
+      img.removeAttribute('height');
+    }
+    requestAnimationFrame(() => {
+      const t = img.getBoundingClientRect();
+      if (t.width) Object.assign(ghost.style, {
+        transition: 'all .2s cubic-bezier(.2,.8,.3,1)',
+        left: t.left + 'px', top: t.top + 'px', width: t.width + 'px', height: t.height + 'px',
+      });
+      setTimeout(() => {
+        // 本体のデコード完了を待ってから見せる+描画された次フレームまでゴーストを重ねる
+        // (どちらか欠けると受け渡しの瞬間に1フレーム抜けて「一瞬消える」)
+        const reveal = () => {
+          img.style.opacity = ''; img.style.animation = '';
+          requestAnimationFrame(() => requestAnimationFrame(() => ghost.remove()));
+        };
+        (img.decode ? img.decode().catch(() => {}) : Promise.resolve()).then(reveal);
+      }, 220);
+    });
+  };
+  // 着地は「本画像(preview以上)」のloadを待つ。仮サムネ(tier=thumb)のloadでは着地しない
+  // (仮サムネの寸法で着地すると箱が縮んで「小さく移動→パッと拡大」になる)
+  const onload = () => {
+    if (img.dataset.tier === 'thumb') return;
+    img.removeEventListener('load', onload);
+    settle();
+  };
+  if (img.complete && img.naturalWidth && img.src.includes(sha) && img.dataset.tier !== 'thumb') settle();
+  else img.addEventListener('load', onload);
+  setTimeout(settle, 700); // 保険: previewが遅くても仮サムネのまま出す(swap時に本寸法へ)
+}
+function closeLb() {
+  const lb = $('lb');
+  if (!lb.classList.contains('show')) return;
+  // 開いた時の逆再生: 元のサムネが見えていればそこへ縮んで帰る
+  const sha = items[lbIdx]?.sha1;
+  const cellDiv = sha && document.getElementById('c_' + sha);
+  const cell = cellDiv?.querySelector('img');
+  const img = $('lbimg');
+  const from = img.getBoundingClientRect();
+  const to = cellDiv?.getBoundingClientRect(); // imgはホバー拡大中の可能性(着地ズレ防止でセル枠を使う)
+  const visible = to && to.width > 0 && to.bottom > 0 && to.top < innerHeight;
+  if (visible && from.width) {
+    const ghost = img.cloneNode();
+    Object.assign(ghost.style, {
+      position: 'fixed', left: from.left + 'px', top: from.top + 'px', width: from.width + 'px',
+      height: from.height + 'px', objectFit: 'cover', borderRadius: '8px', margin: 0, zIndex: 40,
+      pointerEvents: 'none', transition: 'all .3s cubic-bezier(.3,.7,.4,1)', maxWidth: 'none', maxHeight: 'none',
+    });
+    document.body.appendChild(ghost);
+    img.style.opacity = '0';
+    requestAnimationFrame(() => Object.assign(ghost.style, {
+      left: to.left + 'px', top: to.top + 'px', width: to.width + 'px', height: to.height + 'px',
+      borderRadius: '10px', opacity: '.9',
+    }));
+    setTimeout(() => { ghost.remove(); img.style.opacity = ''; }, 320);
+  } else {
+    // 元セルが画面外でも「ひゅん」と縮んで消える(地味フェードだと"アニメ無し"に見える 2026-09-03)
+    img.animate([
+      {transform: 'none', opacity: 1},
+      {transform: 'scale(.55) translateY(26px)', opacity: 0},
+    ], {duration: 260, easing: 'cubic-bezier(.4,.0,.6,1)'});
+  }
+  lb.animate([{opacity: 1}, {opacity: 0}], {duration: 240, easing: 'ease-in'}).onfinish = () => {
+    lb.classList.remove('show'); syncHash();
+  };
+}
+async function lbShow(i, dir) {
+  if (!items.length) return;
+  lbIdx = (i + items.length) % items.length;
+  const sha = items[lbIdx].sha1;
+  const img = $('lbimg');
+  lbMeta = null; edReset(); zReset(); $('edcompare').style.display = 'none'; edHist([]); lbKeepBtn(); lbSelBtn();
+  $('lbinfo').style.display = 'none';
+  $('lbsrcbtn').style.display = 'none';
+  const pv = new Image();
+  pv.src = '/preview/' + sha;
+  // <img>には直前に見ていた画像のsrcが残っている。preview生成待ちの間それが見えると
+  // 「別フォルダの前の画像が出る」「削除したのに消えない」事故になる(2026-09-03報告×2)。
+  // 開き直しは即・矢印/削除送りは150ms猶予(先読みhitなら無傷)で、正しいサムネへ差し替える。
+  clearTimeout(lbShow._grace);
+  if (!pv.complete) {
+    const place = () => {
+      if (items[lbIdx]?.sha1 !== sha || pv.complete) return;
+      img.dataset.tier = 'thumb'; // 仮画像の印(開くアニメの着地判定はこれを待つ)
+      img.src = '/thumb/' + sha;
+    };
+    if (!dir) place(); else lbShow._grace = setTimeout(place, 150);
+  }
+  const swap = () => {
+    if (items[lbIdx]?.sha1 !== sha) return;
+    clearTimeout(lbShow._grace);
+    img.dataset.tier = 'pv';
+    img.removeAttribute('width');  // 開くアニメの仮箱が残っていたら必ず外す(アスペクト崩れ防止)
+    img.removeAttribute('height');
+    img.src = pv.src;
+    if (dir) img.animate([{transform: `translateX(${dir * 40}px)`, opacity: .3}, {transform: 'none', opacity: 1}],
+                         {duration: 220, easing: 'cubic-bezier(.2,.9,.3,1)'});
+  };
+  // decode()を待ってからsrc差し替え=表示中imgのデコード空白フレーム(チラつき)を出さない
+  const swapDecoded = () => (pv.decode ? pv.decode().catch(() => {}) : Promise.resolve()).then(swap);
+  if (pv.complete) swapDecoded(); else { pv.onload = swapDecoded; pv.onerror = swap; }
+  [1, -1].forEach(d => { const n = items[(lbIdx + d + items.length) % items.length];
+    if (n) new Image().src = '/preview/' + n.sha1; });
+  $('lbmeta').innerHTML = `${lbIdx + 1} / ${items.length}`;
+  try {
+    const m = await j('/api/meta/' + sha);
+    if (items[lbIdx]?.sha1 !== sha) return;
+    lbMeta = m;
+    const eds = m.edits || [];
+    $('edcompare').style.display = eds.length ? '' : 'none';
+    lbSegOn = localStorage.getItem('fg_lbseg') === '1'; // マスク表示は記憶して画像を跨いで維持(2026-09-03指示)
+    const hasSeg = !!m.seg?.shapes?.length;
+    $('lbsegbtn').classList.toggle('on', lbSegOn && hasSeg);
+    $('segfix').style.display = lbSegOn && hasSeg ? 'flex' : 'none';
+    $('lbsegbtn').style.display = hasSeg ? '' : 'none';
+    if (lbSegOn && hasSeg) img.src = lbUrl(sha, 1600); // 記憶ONならマスク焼きで開く
+    edHist(eds);
+    if (eds.length) img.src = lbUrl(sha, 1600);
+    else {
+      const full = new Image(); full.src = '/img/' + sha;
+      full.onload = () => (full.decode ? full.decode().catch(() => {}) : Promise.resolve())
+        .then(() => { if (items[lbIdx]?.sha1 === sha && !(lbMeta?.edits || []).length) img.src = full.src; });
+    }
+    // 情報カード: 解像度/フォーマット/ライセンス/取得元(常時表示)
+    {
+      let src = `${esc(m.source || '不明')}`;
+      if (m.crawl) {
+        let dom = ''; try { dom = new URL(m.crawl.landing || m.crawl.url).hostname.replace(/^www\./, ''); } catch (e) {}
+        src = `<a href="${esc(m.crawl.landing || m.crawl.url)}" target="_blank" rel="noopener" title="取得元ページを開く">${esc(dom)}</a>
+               <span style="color:var(--faint)">(${esc(m.crawl.engine)} ·「${esc(m.crawl.query)}」)</span>`;
+      }
+      const lic = m.rights && m.rights !== 'unknown' ? esc(m.rights)
+        : (m.origin === 'synthetic' ? '自家生成' : m.crawl ? '<span title="一般Web取得 — 学習内部利用向け">権利未確認</span>' : 'ローカル取込');
+      $('lbsrcbtn').style.display = (m.crawl?.landing || m.crawl?.url) ? '' : 'none';
+      $('lbinfo').style.display = 'block';
+      $('lbinfo').innerHTML =
+        `<b style="color:#e2e5ea">${m.w}×${m.h}</b> · ${esc((m.ext || '').toUpperCase())} · ${(m.bytes / 1024).toFixed(0)}KB<br>` +
+        `${ic('globe', 12)} ${src}<br>` +
+        `ライセンス: ${lic}` +
+        (m.cost?.usd ? ` · 取得費$${m.cost.usd.toFixed(3)}` : '');
+    }
+    const kind = (() => { // 見た目の種別はVLMのstyleが正(ソース推定は嘘をつく)
+      const st = m.vlm?.attrs?.style;
+      if (st === 'photo') return '実写';
+      if (st === 'anime') return 'アニメ絵';
+      if (st === '3dcg') return '3DCG';
+      if (['illustration', 'painting', 'sketch'].includes(st)) return 'イラスト';
+      return m.origin === 'synthetic' ? '生成' : '実写?';
+    })();
+    const line1 = `<b>${lbIdx + 1} / ${items.length}</b> · ${m.w}×${m.h} · ${(m.bytes / 1024).toFixed(0)}KB · ${esc(m.source || '')} ·
+      <span class="tag" style="cursor:pointer" title="AIの判定ミスはクリックで修正(実写→イラスト→アニメ絵→3DCGの順に切替)"
+        onclick="cycleStyle('${sha}')">${kind}</span>${eds.length ? ` · <span class="tag">調整${eds.length}手</span>` : ''}`;
+    const vlmHtml = v => (v.caption ? `<br>${esc(v.caption)}<br>` : '<br>') +
+      (v.tags || []).map(t => `<span class="tag" style="cursor:pointer" data-t="${esc(t)}"
+        title="クリックで削除" onclick="tagDel('${sha}', this.dataset.t)">${esc(t)}</span>`).join('') +
+      `<span class="tag"><input placeholder="+タグ" style="background:none; border:none; color:inherit; font:inherit; width:64px; padding:0"
+        onclick="event.stopPropagation()" onkeydown="if(event.key==='Enter'){event.preventDefault(); tagAdd('${sha}', this.value); this.value='';}"></span>`;
+    const v = m.vlm || {};
+    $('lbmeta').innerHTML = line1 + vlmHtml(v);
+    // 開いたのにマスクが無い→その場で勝手に切る(遅延マスク)。属性が要るのでエンリッチ後に発火
+    const autoSeg = async (meta) => {
+      if (meta.seg || lbShow._segging?.has(sha)) return;
+      (lbShow._segging ??= new Set()).add(sha);
+      try {
+        const m2 = await j('/api/seg/one', {method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({sha1: sha})});
+        if (m2.seg?.shapes?.length && items[lbIdx]?.sha1 === sha) {
+          lbMeta = {...lbMeta, seg: m2.seg};
+          $('lbsegbtn').style.display = '';
+        }
+      } catch (e) {} finally { lbShow._segging.delete(sha); }
+    };
+    if (v.caption) autoSeg(m);
+    if (!v.caption && !lbShow._enriching?.has(sha)) {
+      (lbShow._enriching ??= new Set()).add(sha);
+      $('lbmeta').innerHTML = line1 + '<br><span class="tag">属性を見ています…</span>';
+      j('/api/enrich/one', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({sha1: sha})})
+        .then(m2 => {
+          const it = items.find(x => x.sha1 === sha);
+          if (it) { it.caption = m2.vlm?.caption; it.vlm_model = m2.vlm?.model; }
+          if (items[lbIdx]?.sha1 === sha) $('lbmeta').innerHTML = line1 + vlmHtml(m2.vlm || {});
+          autoSeg(m2); // 属性が付いた→続けてマスクも
+        })
+        .catch(() => { if (items[lbIdx]?.sha1 === sha) $('lbmeta').innerHTML = line1; })
+        .finally(() => lbShow._enriching.delete(sha));
+    }
+  } catch (err) {}
+  syncHash();
+  if (lbIdx > items.length - 30) loadMore();
+}
+function lbGo(d) { lbShow(lbIdx + d, d); }
+// 似た画像フォルダ: criteria.similar=<sha> の動的フォルダを作る。
+// 中身は常に「その画像に似ている順」= 新しく収蔵された画像も似ていれば勝手に並ぶ
+async function simFolder() {
+  const sha = items[lbIdx]?.sha1; if (!sha) return;
+  const name = '似た' + sha.slice(0, 6);
+  try {
+    await j('/api/albums', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({name, folder: '似た画像', goal: '', agent: {},
+        keywords: [], engines: [], criteria: {similar: sha}})});
+    closeLb(); await loadAlbums();
+    go({type: 'folder', key: name, criteria: {similar: sha}});
+    toast('似た画像フォルダを作りました — 似ている順に並び、新入荷も勝手に加わります');
+  } catch (e) { toast('❌ ' + e.message); }
+}
+function lbSelBtn() {
+  const it = items[lbIdx];
+  const on = it && sel.has(it.sha1);
+  $('lbsel').innerHTML = on ? ic('check', 13) + ' 選択中' : ic('circle', 13) + ' 選択';
+  $('lbsel').style.color = on ? 'var(--acc)' : '';
+}
+function lbSel() {
+  const it = items[lbIdx]; if (!it) return;
+  setSel(it.sha1, !sel.has(it.sha1)); drawSelbar(); lbSelBtn();
+}
+
+// ---- ズーム/パン/ピンチ(transformのみ=GPU) ----
+let zm = 1, zx = 0, zy = 0;
+function zApply(anim) {
+  const el = $('lbimg');
+  el.style.transition = anim ? 'transform .22s ease, filter .18s ease' : 'filter .18s ease';
+  el.style.transform = zm > 1.01 ? `translate(${zx}px,${zy}px) scale(${zm})` : '';
+  el.style.cursor = zm > 1.01 ? 'grab' : 'zoom-out';
+}
+function zReset() { zm = 1; zx = zy = 0; zApply(false); }
+{
+  const el = $('lbimg');
+  let clickTimer = null, downAt = null, movedFar = false;
+  el.addEventListener('click', e => {
+    e.stopPropagation();
+    if (cropMode || movedFar) return;
+    clearTimeout(clickTimer);
+    clickTimer = setTimeout(() => {
+      if (zm > 1.01) { zm = 1; zx = zy = 0; zApply(true); } // 拡大中→等倍
+      else closeLb();                                        // 等倍→閉じる
+    }, 230);
+  });
+  el.addEventListener('dblclick', e => {
+    e.preventDefault(); clearTimeout(clickTimer);
+    zm = zm > 1.01 ? 1 : 2.5; zx = zy = 0; zApply(true);
+  });
+  el.addEventListener('wheel', e => {
+    e.preventDefault();
+    zm = Math.min(8, Math.max(1, zm * (e.deltaY < 0 ? 1.25 : 0.8)));
+    if (zm <= 1.01) { zx = zy = 0; }
+    zApply(true);
+  }, {passive: false});
+  const pts = new Map();
+  let panFrom = null, pinchFrom = null;
+  el.addEventListener('pointerdown', e => {
+    if (cropMode) { e.preventDefault(); el.setPointerCapture(e.pointerId); cropDown(e); return; }
+    pts.set(e.pointerId, e); el.setPointerCapture(e.pointerId);
+    downAt = {x: e.clientX, y: e.clientY}; movedFar = false;
+    if (pts.size === 1 && zm > 1.01) panFrom = {x: e.clientX - zx, y: e.clientY - zy};
+    if (pts.size === 2) {
+      const [a, b] = [...pts.values()];
+      pinchFrom = {d: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY), zm};
+      panFrom = null;
+    }
+  });
+  el.addEventListener('pointermove', e => {
+    if (cropMode) { cropMove(e); return; }
+    if (!pts.has(e.pointerId)) return;
+    pts.set(e.pointerId, e);
+    if (downAt && Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y) > 6) movedFar = true;
+    if (pts.size === 2 && pinchFrom) {
+      const [a, b] = [...pts.values()];
+      zm = Math.min(8, Math.max(1, pinchFrom.zm * Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY) / pinchFrom.d));
+      zApply(false);
+    } else if (panFrom && zm > 1.01) {
+      zx = e.clientX - panFrom.x; zy = e.clientY - panFrom.y;
+      zApply(false);
+    }
+  });
+  ['pointerup', 'pointercancel'].forEach(ev => el.addEventListener(ev, e => {
+    if (cropMode) { cropUp(e); return; }
+    pts.delete(e.pointerId);
+    if (pts.size < 2) pinchFrom = null;
+    if (!pts.size) panFrom = null;
+    if (zm <= 1.01) { zx = zy = 0; zApply(true); }
+  }));
+}
+
+// ---- 非破壊調整 ----
+const ED_SLIDERS = ['exposure', 'contrast', 'saturation', 'temperature'];
+const ED_FILTERS = [
+  {name: 'grayscale', label: 'モノクロ', css: 'grayscale(1)'},
+  {name: 'sepia', label: 'セピア', css: 'sepia(1)'},
+  {name: 'invert', label: '反転', css: 'invert(1)'},
+  {name: 'posterize', label: 'ポスタライズ', css: 'contrast(1.4) saturate(1.6)', params: {levels: 5}},
+  {name: 'vignette', label: 'ビネット', css: 'brightness(.88)'},
+  {name: 'sharpen', label: 'シャープ', css: 'contrast(1.12)'},
+  {name: 'blur', label: 'ぼかし', css: 'blur(2px)'},
+];
+$('edfilters').innerHTML = ED_FILTERS.map(f => `<span class="fxchip"
+  onmouseenter="$('lbimg').style.filter='${f.css}'" onmouseleave="edLive()"
+  onclick="edPush({op:'filter', params:${JSON.stringify({name: f.name, ...(f.params || {})}).replace(/"/g, '&quot;')}})">${f.label}</span>`).join('');
+function edToggle() { $('lb').classList.toggle('editing'); }
+function edVals() {
+  const o = {};
+  ED_SLIDERS.forEach(k => { const v = parseInt($('ed_' + k).value) / 100; if (Math.abs(v) > 0.004) o[k] = v; });
+  return o;
+}
+function edLive() {
+  ED_SLIDERS.forEach(k => $('edv_' + k).textContent = $('ed_' + k).value);
+  const v = edVals();
+  let f = '';
+  if (v.exposure) f += `brightness(${Math.pow(2, v.exposure * 2).toFixed(3)}) `;
+  if (v.contrast) f += `contrast(${(1 + v.contrast).toFixed(3)}) `;
+  if (v.saturation) f += `saturate(${(1 + v.saturation).toFixed(3)}) `;
+  if (v.temperature) f += v.temperature > 0 ? `sepia(${(v.temperature * 0.3).toFixed(3)})`
+                                            : `hue-rotate(${(v.temperature * 16).toFixed(1)}deg)`;
+  $('lbimg').style.filter = f.trim();
+}
+function edReset() {
+  ED_SLIDERS.forEach(k => { $('ed_' + k).value = 0; $('edv_' + k).textContent = '0'; });
+  $('lbimg').style.filter = '';
+}
+const ED_LABEL = {adjust: '調整', auto: '自動', filter: 'フィルタ', rotate: '回転', flip: '反転', crop: 'クロップ'};
+function edHist(list) {
+  $('edhist').innerHTML = list.length
+    ? '履歴: ' + list.map(e => `<span class="tag">${ED_LABEL[e.op] || e.op}${e.op === 'filter' ? ' ' + (e.params?.name || '') : ''}</span>`).join('') + ' <span style="opacity:.6">(原本は不変・1手ずつ戻せます)</span>'
+    : '<span style="opacity:.6">履歴なし = 原本そのまま</span>';
+}
+async function edMutate(body) {
+  const sha = items[lbIdx]?.sha1; if (!sha) return;
+  try {
+    const r = await j('/api/edits/' + sha, {method: 'PUT', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body)});
+    if (items[lbIdx]?.sha1 !== sha) return;
+    lbMeta = {...(lbMeta || {}), sha1: sha, edits: r.edits, edits_rev: r.rev};
+    edReset(); edHist(r.edits);
+    $('edcompare').style.display = r.edits.length ? '' : 'none';
+    $('lbimg').src = r.edits.length ? lbUrl(sha, 1600) : '/preview/' + sha + '?t=' + Date.now();
+    // グリッドのサムネも編集後の見た目に差し替え(サーバの焼き直しを少し待つ)
+    const it = items.find(x => x.sha1 === sha);
+    if (it) {
+      it.erev = r.edits.length ? r.rev : null;
+      const im = document.querySelector('#c_' + sha + ' img');
+      if (im) setTimeout(() => {
+        const big = (+localStorage.getItem('fg_cell') || 168) > 300;
+        im.src = (big ? '/preview/' : '/thumb/') + sha + (it.erev ? '?v=' + it.erev : '?t=' + Date.now());
+      }, 800);
+    }
+  } catch (e) { toast('❌ ' + e.message); }
+}
+function edPush(edit) { edMutate({action: 'push', edit}); }
+function edUndo() { edMutate({action: 'pop'}); }
+function edClear() { edMutate({action: 'clear'}); }
+async function edApplyAdjust() {
+  const v = edVals();
+  if (!Object.keys(v).length) return toast('スライダを動かしてから適用');
+  edPush({op: 'adjust', params: v});
+}
+// ✂ クロップ: ドラッグで範囲→離した瞬間に確定(比率で送るので回転後でも正しい)
+let cropMode = false, cropStart = null;
+function cropToggle() {
+  cropMode = !cropMode;
+  $('cropbtn').classList.toggle('on', cropMode);
+  $('lbimg').style.cursor = cropMode ? 'crosshair' : '';
+  if (!cropMode) $('croprect').style.display = 'none';
+  toast(cropMode ? '画像の上をドラッグして範囲指定 → 離すと確定' : 'クロップをやめました');
+}
+function cropDown(e) {
+  cropStart = {x: e.clientX, y: e.clientY};
+  const r = $('croprect');
+  r.style.display = 'block';
+  Object.assign(r.style, {left: e.clientX + 'px', top: e.clientY + 'px', width: '0px', height: '0px'});
+}
+function cropMove(e) {
+  if (!cropStart) return;
+  const r = $('croprect');
+  Object.assign(r.style, {
+    left: Math.min(cropStart.x, e.clientX) + 'px', top: Math.min(cropStart.y, e.clientY) + 'px',
+    width: Math.abs(e.clientX - cropStart.x) + 'px', height: Math.abs(e.clientY - cropStart.y) + 'px'});
+}
+function cropUp(e) {
+  if (!cropStart) return;
+  const img = $('lbimg').getBoundingClientRect();
+  const x0 = Math.max(img.left, Math.min(cropStart.x, e.clientX));
+  const y0 = Math.max(img.top, Math.min(cropStart.y, e.clientY));
+  const x1 = Math.min(img.right, Math.max(cropStart.x, e.clientX));
+  const y1 = Math.min(img.bottom, Math.max(cropStart.y, e.clientY));
+  cropStart = null;
+  $('croprect').style.display = 'none';
+  const fw = (x1 - x0) / img.width, fh = (y1 - y0) / img.height;
+  if (fw < 0.05 || fh < 0.05) return toast('範囲が小さすぎます');
+  cropToggle();
+  edPush({op: 'crop', params: {
+    fx: +((x0 - img.left) / img.width).toFixed(4), fy: +((y0 - img.top) / img.height).toFixed(4),
+    fw: +fw.toFixed(4), fh: +fh.toFixed(4)}});
+}
+function edCompare(on) {
+  const sha = items[lbIdx]?.sha1; if (!sha) return;
+  $('lbimg').src = on ? '/preview/' + sha : lbUrl(sha, 1600);
+}
+
+// 種別の手動修正: クリックで 実写→イラスト→アニメ絵→3DCG を循環(人の判定が常に勝つ)
+const STYLE_CYCLE = ['photo', 'illustration', 'anime', '3dcg'];
+const STYLE_JA = {photo: '実写', illustration: 'イラスト', anime: 'アニメ絵', '3dcg': '3DCG'};
+// 手動タグ(人の付けたタグは再エンリッチでも尊重される)
+async function tagAdd(sha, v) {
+  v = (v || '').trim(); if (!v) return;
+  try {
+    await j('/api/meta/patch', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({sha1: sha, add_tags: [v]})});
+    toast(`タグ「${v}」を追加`);
+    if (items[lbIdx]?.sha1 === sha) lbShow(lbIdx, 0);
+  } catch (e) { toast('❌ ' + e.message); }
+}
+async function tagDel(sha, t) {
+  try {
+    await j('/api/meta/patch', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({sha1: sha, del_tags: [t]})});
+    toast(`タグ「${t}」を削除`);
+    if (items[lbIdx]?.sha1 === sha) lbShow(lbIdx, 0);
+  } catch (e) { toast('❌ ' + e.message); }
+}
+async function cycleStyle(sha) {
+  if (lbMeta?.sha1 !== sha) return;
+  const cur = lbMeta.vlm?.attrs?.style || 'photo';
+  const next = STYLE_CYCLE[(STYLE_CYCLE.indexOf(cur) + 1) % STYLE_CYCLE.length];
+  try {
+    const m = await j('/api/meta/patch', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({sha1: sha, style: next})});
+    lbMeta = {...lbMeta, vlm: m.vlm};
+    if (items[lbIdx]?.sha1 === sha) lbShow(lbIdx, 0); // メタ表示を更新(previewはキャッシュ済でチラつかない)
+    toast('種別を修正: ' + STYLE_JA[next]);
+    refreshFacets();
+  } catch (e) { toast('❌ ' + e.message); }
+}
+
+// ================= お気に入り / 削除 =================
+async function setKeep(shas, keep) {
+  await j('/api/keep', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({shas, keep})});
+  items.forEach(it => { if (shas.includes(it.sha1)) it.keep = keep ? 1 : 0; });
+}
+function lbKeepBtn() {
+  const it = items[lbIdx];
+  $('lbkeep').innerHTML = ic('star', 13) + ' お気に入り';
+  $('lbkeep').style.color = it?.keep ? '#f2c14e' : '';
+}
+async function lbKeep() {
+  const it = items[lbIdx]; if (!it) return;
+  try {
+    await setKeep([it.sha1], !it.keep);
+    lbKeepBtn();
+    toast(it.keep ? 'お気に入り — 自動間引きから保護されます' : 'お気に入りを外しました');
+  } catch (e) { toast('❌ ' + e.message); }
+}
+async function bulkKeep(keep) {
+  if (!sel.size) return;
+  try {
+    await setKeep([...sel], keep);
+    toast(`${sel.size}枚を${keep ? 'お気に入りに' : 'お気に入り解除'}`);
+    render(true); refreshFacets();
+  } catch (e) { toast('❌ ' + e.message); }
+}
+let lastTrashed = [];
+async function trashShas(shas) {
+  try {
+    const r = await j('/api/trash', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({shas})});
+    lastTrashed = shas;
+    items = items.filter(it => !shas.includes(it.sha1));
+    total = Math.max(0, total - r.trashed);
+    shas.forEach(s => sel.delete(s));
+    removeCellsAnimated(shas); // 黒画面の全再描画でなく、消える子は縮んで・残りは詰める
+    refreshFacets();
+    toast(`${r.trashed}枚をゴミ箱へ(30日は戻せます)`, '元に戻す', undoTrash);
+    return r.trashed;
+  } catch (e) { toast('❌ ' + e.message); return 0; }
+}
+async function undoTrash() {
+  if (!lastTrashed.length) return;
+  try {
+    const r = await j('/api/trash/restore', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({shas: lastTrashed})});
+    lastTrashed = [];
+    toast(`${r.restored}枚戻しました`);
+    reload(); refreshFacets();
+  } catch (e) { toast('❌ ' + e.message); }
+}
+// 削除アニメ: 対象はしゅっと縮み、残った子はFLIPで隙間に流れ込む(全再描画=黒画面をやめる)
+function removeCellsAnimated(shas) {
+  const old = {};
+  document.querySelectorAll('.cell').forEach(el => { old[el.id] = el.getBoundingClientRect(); });
+  let n = 0;
+  shas.forEach(s => {
+    const el = $('c_' + s);
+    if (!el) return;
+    n++;
+    el.style.pointerEvents = 'none';
+    el.animate([{opacity: 1, transform: 'scale(1)'}, {opacity: 0, transform: 'scale(.55)'}],
+               {duration: 180, easing: 'ease-in'}).onfinish = () => {
+      el.remove();
+      if (--n === 0) requestAnimationFrame(() => {
+        document.querySelectorAll('.cell').forEach(e2 => {
+          const o = old[e2.id]; if (!o) return;
+          const r2 = e2.getBoundingClientRect();
+          const dx = o.left - r2.left, dy = o.top - r2.top;
+          if (dx || dy) e2.animate([{transform: `translate(${dx}px,${dy}px)`}, {transform: 'none'}],
+            {duration: 420, easing: 'cubic-bezier(.2,.9,.3,1)'});
+        });
+      });
+    };
+  });
+  if (n === 0) render(true);
+  drawSelbar();
+}
+function delSelected() {
+  if (loc.type === 'trash') return toast('ここはゴミ箱です(30日で自動で消えます)');
+  if (sel.size) trashShas([...sel]);
+}
+async function sourceTrash(source, n) {
+  toast(`「${source}」${n}枚をゴミ箱へ移動中…`);
+  try {
+    const r = await j('/api/source/trash', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({source})});
+    if (r.shas) lastTrashed = r.shas;
+    toast(`${r.trashed}枚をゴミ箱へ(30日は戻せます)`, r.shas ? '元に戻す' : '', r.shas ? undoTrash : null);
+    refreshFacets(); reload();
+  } catch (e) { toast('❌ ' + e.message); }
+}
+async function restoreSelected() {
+  if (!sel.size) return toast('戻したい画像をクリックで選んでください');
+  try {
+    const r = await j('/api/trash/restore', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({shas: [...sel]})});
+    toast(`${r.restored}枚を棚に戻しました(拒否リストからも解除)`);
+    clearSel(); reload(); refreshFacets();
+  } catch (e) { toast('❌ ' + e.message); }
+}
+// ライトボックス削除は楽観方式: 押した瞬間にUIから消して次を表示し、サーバへは裏で直列バッチ送信。
+// 旧方式(サーバ応答待ち→次表示)は、応答が詰まると連打が同一画像への空撃ちになり
+// 「そのうち消せなくなる」実害(2026-09-03 連打再現テストで確認: 25連打中8枚のみ削除+完全スタック)
+const delQueue = [];
+let delPumping = false;
+async function pumpDel() {
+  if (delPumping) return; delPumping = true;
+  try {
+    while (delQueue.length) {
+      const batch = delQueue.splice(0); // 溜まった分をまとめて1リクエスト
+      try {
+        const r = await j('/api/trash', {method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({shas: batch})});
+        lastTrashed = lastTrashed.concat(batch);
+        toast(`${lastTrashed.length}枚をゴミ箱へ(30日は戻せます)`, '元に戻す', undoTrash);
+      } catch (e) { toast('❌ 削除失敗(' + batch.length + '枚): ' + e.message); }
+    }
+    refreshFacets();
+  } finally { delPumping = false; }
+}
+function lbDel() {
+  const it = items[lbIdx]; if (!it) return;
+  const i = lbIdx;
+  $('lbimg').animate([{transform: 'none', opacity: 1}, {transform: 'scale(.85)', opacity: 0}],
+                     {duration: 160, easing: 'ease-in'}); // 消える手応え
+  if (!delQueue.length && !delPumping) lastTrashed = []; // 新しい削除セッションの開始
+  items = items.filter(x => x.sha1 !== it.sha1);
+  total = Math.max(0, total - 1);
+  sel.delete(it.sha1);
+  removeCellsAnimated([it.sha1]);
+  delQueue.push(it.sha1);
+  pumpDel();
+  if (!items.length) closeLb();
+  else lbShow(Math.min(i, items.length - 1), 1);
+}
+
+// ================= データセット / 量産 =================
+async function makeDataset() {
+  const input = $('ds_name').value.trim();
+  if (!input) return toast('データセット名をください');
+  if (!sel.size) return toast('画像を選んでください');
+  const {folder, name} = splitPath(input);
+  // 権利不明の画像が混ざる出荷は明示確認(研究・学習用途限定の注意 2026-09-03)
+  const dirty = items.filter(it => sel.has(it.sha1) && (!it.rights || it.rights === 'unknown')).length;
+  if (dirty > 0 && !confirm(`選択${sel.size}枚のうち ${dirty}枚は権利未確認です。\nこのデータセットは機械学習・情報解析目的(著作権法30条の4)での利用に限られ、再配布・販売はできません。\n続けますか？`)) return;
+  try {
+    const r = await j('/api/datasets', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name, folder, shas: [...sel]})});
+    toast(`${r.name} (${r.count}枚) 払い出しました`);
+    clearSel(); loadDatasets();
+  } catch (e) { toast('❌ ' + e.message); }
+}
+async function loadDatasets() {
+  try {
+    const ds = await j('/api/datasets');
+    $('nav_datasets').innerHTML = treeHtml(buildTree(ds.filter(d => !d.name.startsWith('_refs_'))), (d, dep) =>
+      `<div class="nav" data-loc="dataset:${esc(d.name)}" style="padding-left:${10 + dep * 13}px" onclick="openDataset('${esc(d.name)}')">
+        ${ic('box', 13)}<span class="nm">${esc(d.name)}</span><span class="n">${d.count}</span></div>`)
+      || '<div class="nav" style="pointer-events:none"><span class="nm sub">選択→データセット化</span></div>';
+  } catch (e) {}
+}
+async function openDataset(name) {
+  try {
+    const s = await j('/api/datasets/' + name + '/shas');
+    loc = {type: 'dataset', key: name, criteria: {}};
+    items = s.shas.map(sha => ({sha1: sha})); total = items.length;
+    clearSel(); renderNav(); renderViewhead(); render(true); syncHash();
+  } catch (e) { toast('❌ ' + e.message); }
+}
+async function delDataset(n) {
+  await j('/api/datasets/' + n, {method: 'DELETE'});
+  toast(`データセット「${n}」削除(symlinkなので本体は残っています)`);
+  if (loc.type === 'dataset' && loc.key === n) go({type: 'lib', key: 'all', criteria: {}});
+  loadDatasets();
+}
+let genShas = null;
+function genVar() {
+  if (!sel.size) return toast('参考にする画像を選んでください');
+  genShas = [...sel];
+  $('genpanel').style.display = 'block';
+  $('gen_instruction').focus();
+}
+async function expandDataset(name) {
+  try {
+    const s = await j('/api/datasets/' + name + '/shas');
+    genShas = s.shas;
+    $('genpanel').style.display = 'block';
+    $('gen_instruction').focus();
+    toast(`「${name}」の${s.shas.length}枚を種に量産します — 指示をどうぞ`);
+  } catch (e) { toast('❌ ' + e.message); }
+}
+async function genRun() {
+  const instruction = $('gen_instruction').value.trim();
+  if (!instruction) return toast('どう作り変えるか書いてください');
+  if (!genShas?.length) return toast('種の画像がありません');
+  const per = parseInt($('gen_per').value) || 4;
+  try {
+    const r = await j('/api/genvar', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({shas: genShas, instruction, per_ref: per})});
+    toast(`「${r.name}」${r.n}枚を工房に依頼 (~${r.est_minutes}分)。完成後ここに自動収蔵`);
+    $('genpanel').style.display = 'none';
+    $('gen_instruction').value = '';
+    clearSel();
+  } catch (e) { toast('❌ ' + e.message); }
+}
+
+// ================= 属性付け / 取り込み =================
+async function enrich() {
+  const backend = 'builtin'; // 内蔵既定・不可ならサーバ側でGPTへ最低保証フォールバック
+  try {
+    const base = Object.fromEntries(params({}));
+    delete base.sort;
+    if (base.min_quality) base.min_quality = +base.min_quality; // 数値は数値で(文字列だと422)
+    await j('/api/enrich', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({backend, ...base, only_missing: true})});
+    toast('属性付けを始めました' + (backend === 'builtin' ? '(内蔵VLM)' : ''));
+  } catch (e) { toast('❌ ' + e.message); }
+}
+function openIngest() { $('ovl').classList.add('show'); }
+// スマホ/ブラウザから直接アップロード(画像・動画・カメラ直撮り)
+async function doUpload(files) {
+  if (!files?.length) return;
+  const fd = new FormData();
+  fd.append('source', $('ing_src').value.trim() || 'upload');
+  let hasVideo = false;
+  for (const f of files) { fd.append('file', f, f.name); if (f.type.startsWith('video')) hasVideo = true; }
+  toast(`${files.length}件アップロード中…` + (hasVideo ? '(動画はフレーム抽出するので少し待つ)' : ''));
+  try {
+    const res = await fetch('/api/upload', {method: 'POST', body: fd});
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const r = await res.json();
+    toast(`取り込み完了: +${r.added}枚` +
+      (r.video_frames ? `(動画${r.video_frames}コマ中、そっくり${r.frames_skipped}コマ間引き)` : '') +
+      (r.dup ? ` · 既所持${r.dup}` : ''));
+    closeIngest(); refreshFacets(); reload();
+  } catch (e) { toast('❌ アップロード失敗: ' + e.message); }
+  $('up_files').value = ''; $('up_cam').value = '';
+}
+function closeIngest() { $('ovl').classList.remove('show'); }
+async function ingest() {
+  const path = $('ing_path').value.trim(), source = $('ing_src').value.trim() || 'import';
+  if (!path) return;
+  try {
+    await j('/api/ingest', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({path, source})});
+    toast('収蔵を始めました(裏で走ります — 進捗はAI稼働状況に出ます)');
+    closeIngest();
+  } catch (e) { $('ing_msg').textContent = '❌ ' + e.message; }
+}
+async function loadPresets() {
+  try {
+    const ps = await j('/api/presets');
+    $('presets').innerHTML = ps.map(p => `<button ${p.available ? '' : 'disabled style="opacity:.35"'}
+      onclick="ingestPreset('${p.id}', this)">${esc(p.label.replace(/^[^ ]+ /, ''))}</button>`).join('');
+  } catch (e) {}
+}
+async function ingestPreset(id, btn) {
+  btn.disabled = true; btn.textContent = '収蔵開始…';
+  try {
+    await j('/api/presets/' + id, {method: 'POST'});
+    toast('収蔵を始めました — 触りながら待てます');
+  } catch (e) { toast('❌ ' + e.message); btn.disabled = false; }
+}
+
+// ================= AI実況(ポーラーは2秒×1本に集約 — 稼働状況/収集バー/取込/完了リフレッシュ全部) =================
+// ホバーで大きく見る(実況ストリップの26pxじゃ分からん問題)
+function hoverPv(el, why) {
+  const r = el.getBoundingClientRect();
+  const pv = $('hoverpv');
+  $('hoverpv_img').src = el.src;
+  $('hoverpv_cap').textContent = why || '';
+  pv.style.display = 'block';
+  pv.style.left = Math.min(r.left, innerWidth - 300) + 'px';
+  pv.style.top = (r.bottom + 8) + 'px';
+  // ふわっと出る(サムネの位置から、しゅっと)
+  pv.animate([
+    {opacity: 0, transform: 'scale(.6) translateY(-8px)', transformOrigin: 'top left'},
+    {opacity: 1, transform: 'none', transformOrigin: 'top left'},
+  ], {duration: 180, easing: 'cubic-bezier(.2,1.2,.3,1)'});
+}
+function hoverPvHide() {
+  const pv = $('hoverpv');
+  pv.animate([{opacity: 1}, {opacity: 0, transform: 'scale(.9)'}], {duration: 110, easing: 'ease-in'})
+    .onfinish = () => pv.style.display = 'none';
+}
+
+function crawlRelevant(album) {
+  return (loc.type === 'lib' && loc.key === 'all') ||
+    (loc.type === 'folder' && loc.criteria.source === 'crawl:' + album) ||
+    (loc.type === 'source' && loc.key === 'crawl:' + album);
+}
+function watchCrawlPart(s) {
+  try {
+    $('crawlbar').classList.toggle('show', !!s.alive);
+    if (s.alive) {
+      const crA = albumsCache.find(x => x.name === s.album);
+      $('cr_prog').innerHTML = `<b style="color:var(--tx)">${esc(s.album)}</b> +${s.ingested} (${(s.pass_rate * 100).toFixed(0)}%)` +
+        ` <span style="color:var(--faint)" title="いま目利きをしているAI">${crA?.agent?.boost ? judgeName(crA) + '目利き' : '内蔵AI目利き'}</span>` +
+        (s.next_query ? ` <span style="color:var(--faint)" title="クエリパイプライン: 判定と同時に次のクエリ「${esc(s.next_query)}」を検索中">⏩先読み</span>` : '') +
+        (s.spent_tokens > 0 || s.spent_usd > 0
+          ? ` <span style="color:#e5c07b; cursor:pointer" onclick="cycleCostMode(event)"
+               title="この収集の実測コスト(クリックで トークン/$/¥ 切替。全フォルダ累計$${(s.total_usd || 0).toFixed(2)})">${fmtCost(s.spent_tokens, s.spent_usd)}</span>` : '');
+      $('crawlbar').title = `候補${s.found} → 検査${s.checked} → 収蔵${s.ingested}\n「${s.query}」\n${s.last || ''}` +
+        (s.queue?.length ? `\n順番待ち: ${s.queue.join(', ')}` : '');
+      // 途中経過ストリップ: 採用=カラー / 捨てられた子=モノクロ+理由(ホバーで見える)
+      $('cr_strip').innerHTML = (s.recent || []).map(e =>
+        `<img src="${e.ok ? '/thumb/' + e.r : '/crawl/reject/' + e.r}"
+           onmouseenter="hoverPv(this, '${esc(e.why)}')" onmouseleave="hoverPvHide()"
+           style="width:26px; height:26px; object-fit:cover; border-radius:4px; flex:none; cursor:zoom-in;
+                  ${e.ok ? 'outline:1px solid #6ee7a055' : 'filter:brightness(.6); outline:1px solid #a33333aa'}"
+           onerror="this.remove()">`).join('');
+      if (s.ingested !== watchCrawlPart._n) {
+        const add = s.ingested - (watchCrawlPart._n || 0);
+        watchCrawlPart._n = s.ingested;
+        if (add > 0) liveDrop(s.album, add + 2);
+        refreshFacets();
+      }
+    } else if (watchCrawlPart._was) {
+      refreshFacets(); loadAlbums();
+      if (crawlRelevant(s.album)) reload(); // 関係ない画面を勝手に描き替えない
+      if (loc.type === 'folder') renderViewhead();
+      toast('収集おわり: ' + (s.last || ''));
+    }
+    watchCrawlPart._was = s.alive;
+  } catch (e) {}
+}
+async function liveDrop(album, n) {
+  const okHere = (loc.type === 'lib' && loc.key === 'all') ||
+    (loc.type === 'folder' && loc.criteria.source === 'crawl:' + album) ||
+    (loc.type === 'source' && loc.key === 'crawl:' + album);
+  if (!okHere) return;
+  try {
+    const r = await j('/api/images?' + new URLSearchParams({source: 'crawl:' + album, limit: n, offset: 0}));
+    const fresh = r.items.filter(it => !items.some(x => x.sha1 === it.sha1));
+    if (!fresh.length) return;
+    items = fresh.concat(items); total += fresh.length;
+    if ($('lb').classList.contains('show')) lbIdx += fresh.length; // 開いてる画像の位置がズレないように
+    updateWindow(true);
+    if (vStart === 0) { // 先頭が見えている時だけ「ぽとっ」と落ちる演出
+      [...$('grid').children].slice(0, fresh.length).forEach((el, k) => {
+        el.classList.add('drop');
+        el.style.animationDelay = (k * 120) + 'ms';
+      });
+    }
+  } catch (e) {}
+}
+async function watchActivity() {
+  try {
+    const a = await j('/api/activity');
+    watchCrawlPart(a.crawl || {});
+    { // 属性付け完了→表示を最新化
+      const e = a.enrich || {};
+      if (!e.alive && watchActivity._enrichWas) { refreshFacets(); reload(); }
+      watchActivity._enrichWas = e.alive;
+    }
+    { // 取り込みの進捗/完了
+      const g = a.ingest || {};
+      if (g.alive) {
+        $('ing_msg').textContent = `${g.label}: ${g.done.toLocaleString()}/${g.total.toLocaleString()}`;
+      } else if (watchActivity._ingWas) {
+        $('ing_msg').textContent = '完了';
+        refreshFacets(); reload(); loadPresets();
+      }
+      watchActivity._ingWas = g.alive;
+    }
+    const row = (icon, name, on, detail) => `<div style="display:flex; gap:6px; align-items:center; padding:2px 0">
+      <span style="flex:none; width:7px; height:7px; border-radius:99px; background:${on ? 'var(--ok)' : '#2a2d38'};${on ? 'box-shadow:0 0 8px #6ee7a077' : ''}"></span>
+      <span style="flex:none; display:flex; gap:5px; align-items:center">${ic(icon, 12)} ${name}</span>
+      <span style="margin-left:auto; opacity:.85; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:96px" title="${esc(detail)}">${esc(detail)}</span></div>`;
+    const c = a.crawl, e = a.enrich, l = a.llm, g = a.ingest, s = a.system || {};
+    const bar = (pct, hot) => `<span style="flex:1; height:4px; min-width:34px; border-radius:99px; background:#1c1e26; overflow:hidden">
+      <span style="display:block; width:${Math.min(100, pct).toFixed(0)}%; height:100%; border-radius:99px;
+        background:${hot ? '#e0a83c' : 'var(--acc)'}; transition:width .6s ease"></span></span>`;
+    const gpu = s.gpu ? `<div style="display:flex; gap:6px; align-items:center; padding:2px 0" title="GPU ${s.gpu.util}% · VRAM ${(s.gpu.vram_used_mb / 1024).toFixed(1)}/${(s.gpu.vram_total_mb / 1024).toFixed(0)}GB">
+      <span style="flex:none">GPU</span>${bar(s.gpu.util, s.gpu.util > 85)}
+      <span style="flex:none; font-variant-numeric:tabular-nums">${s.gpu.util}% ${(s.gpu.vram_used_mb / 1024).toFixed(1)}/${(s.gpu.vram_total_mb / 1024).toFixed(0)}G</span></div>` : '';
+    const ram = s.ram ? `<div style="display:flex; gap:6px; align-items:center; padding:2px 0" title="RAM ${s.ram.used_gb.toFixed(0)}/${s.ram.total_gb.toFixed(0)}GB">
+      <span style="flex:none">RAM</span>${bar(100 * s.ram.used_gb / s.ram.total_gb, s.ram.used_gb / s.ram.total_gb > .85)}
+      <span style="flex:none; font-variant-numeric:tabular-nums">${s.ram.used_gb.toFixed(0)}G</span></div>` : '';
+    const qn = c.queue?.length || 0;
+    const w = a.workers || {};
+    const wrow = (icon, name, key) => {
+      const x = w[key];
+      return x ? row(icon, name, !!x.on, x.detail || '') : '';
+    };
+    $('ai_activity').innerHTML =
+      row('globe', '収集', c.alive, (c.alive ? `${c.album} +${c.ingested}枚` : '待機') + (qn ? ` | 待ち${qn}` : '')) +
+      (c.alive && c.next_query ? row('search', '先読み', true, `次「${c.next_query}」検索中`) : '') +
+      row('eye', 'VLM', e.alive, e.alive ? `属性付け ${e.done}/${e.total}` : '待機') +
+      row('cpu', 'LLM', l.busy || l.downloading, l.downloading ? `DL ${l.got_mb}/${l.total_mb}MB` : l.busy ? '生成中' : l.ready ? '常駐中' : '未ロード') +
+      row('upload', '取込', g.alive, g.alive ? `${g.done}/${g.total}` : '待機') +
+      (a.seg?.alive ? row('smart', 'マスク', true, `${a.seg.done}/${a.seg.total} 「${a.seg.prompt}」`) : '') +
+      wrow('img', 'サムネ', 'micro') +      // micro120px焼き(裏方)
+      wrow('spark', 'CLIP', 'clip') +       // 似た画像の索引(裏方)
+      wrow('loop', '見回り', 'autopilot') + // ♻自動補充の巡回
+      wrow('bot', 'お手入れ', 'groom') +    // 属性/マスクの穴埋め巡回
+      gpu + ram;
+    // ストレージ(ml-hub風メーター): ライブラリの量と、ディスクの余白
+    if (s.disk && facetsCache) {
+      const usedPct = 100 * s.disk.used_gb / (s.disk.total_gb || 1);
+      $('storagebox').innerHTML = `
+        <div style="display:flex; gap:6px; align-items:baseline">
+          <b style="color:var(--tx); font-size:13px">${facetsCache.total.toLocaleString()}</b>枚
+          <span>· ${(facetsCache.bytes / 1073741824).toFixed(1)}GB</span>
+          ${facetsCache.cost_usd > 0 ? `<span style="margin-left:auto">$${facetsCache.cost_usd.toFixed(2)}</span>` : ''}
+        </div>
+        <div style="display:flex; gap:6px; align-items:center; margin-top:4px" title="ディスク ${s.disk.used_gb.toFixed(0)}/${s.disk.total_gb.toFixed(0)}GB使用">
+          ${bar(usedPct, usedPct > 85)}
+          <span style="flex:none; font-variant-numeric:tabular-nums">空き${s.disk.free_gb.toFixed(0)}GB</span>
+        </div>`;
+    }
+  } catch (err) {}
+}
+
+// ================= キーボード / 無限スクロール / 起動 =================
+new IntersectionObserver(es => { if (es[0].isIntersecting) loadMore(); },
+  {root: $('gridwrap'), rootMargin: '700px'}).observe($('more'));
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && $('ovl').classList.contains('show')) { closeIngest(); return; }
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+  if (e.key === '/') { e.preventDefault(); $('q').focus(); return; }
+  if (!$('lb').classList.contains('show')) {
+    if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); delSelected(); }
+    else if (e.key === 'z' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); undoTrash(); }
+    // X=カーソルが乗っているサムネの選択トグル(ホバー拡大でチェックが押しにくい問題の回避 2026-09-03)
+    else if ((e.key === 'x' || e.key === 'X') && window._hoverSha) {
+      e.preventDefault();
+      ckSelSha(window._hoverSha, e); // Shift+Xで範囲選択も効く
+    }
+    return;
+  }
+  if (e.key === 'Escape') closeLb();
+  if ((e.key === 'o' || e.key === 'O') && $('lb').classList.contains('show')) lbOpenSource();
+  else if (e.key === 'ArrowRight' || e.key === 'f') lbGo(1);
+  else if (e.key === 'ArrowLeft' || e.key === 'd') lbGo(-1);
+  else if (e.key === 'e') edToggle();
+  else if (e.key === 's') lbKeep();
+  else if (e.key === 'x' || e.key === ' ') { e.preventDefault(); lbSel(); }
+  else if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); lbDel(); }
+  else if (e.key === 'z' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); edUndo(); }
+});
+setInterval(watchActivity, 2000); // AI実況はこれ1本(稼働状況/収集/取込/完了リフレッシュ)
+setInterval(refreshFacets, 30000);
+
+(async function boot() {
+  await Promise.all([refreshFacets(), loadAlbums()]);
+  loadDatasets(); loadPresets(); watchActivity();
+  const h = new URLSearchParams(location.hash.slice(1));
+  for (const k of ['origin']) if (h.get('f_' + k)) fchips[k] = h.get('f_' + k);
+  for (const k of ['q8', 'safe', 'clean', 'nowm']) if (h.get('f_' + k)) fchips[k] = true;
+  for (const k of Object.keys(chipFilters)) if (h.get('c_' + k)) chipFilters[k] = h.get('c_' + k);
+  $('fc_real').classList.toggle('on', fchips.origin === 'real');
+  $('fc_synth').classList.toggle('on', fchips.origin === 'synthetic');
+  ['q8', 'safe', 'clean', 'nowm'].forEach(k => $('fc_' + k).classList.toggle('on', !!fchips[k]));
+  const t = h.get('t'), k = h.get('k');
+  if (t === 'folder' && albumsCache.find(x => x.name === k)) openFolder(k);
+  else if (t === 'dataset' && k) openDataset(k);
+  else if (t === 'source' && k) go({type: 'source', key: k, criteria: {source: k}}, {keepChips: true});
+  else if (t === 'search' && h.get('q')) { $('q').value = h.get('q'); prevLoc = {type: 'lib', key: 'all', criteria: {}}; go({type: 'search', key: '', criteria: {}}, {keepChips: true}); }
+  else if (t === 'lib' && k && LIB.find(x => x.key === k)) go({type: 'lib', key: k, criteria: LIB.find(x => x.key === k).criteria}, {keepChips: true});
+  else go({type: 'lib', key: 'all', criteria: {}}, {keepChips: true});
+  const img = h.get('img');
+  if (img) setTimeout(() => {
+    const i = items.findIndex(x => x.sha1 === img);
+    if (i >= 0) openLb(i);
+    else { items.unshift({sha1: img}); total++; render(true); openLb(0); }
+  }, 700);
+})();
+</script>
