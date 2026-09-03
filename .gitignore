@@ -4,6 +4,8 @@
 /target/
 # 大きいモデルファイル(自動DLされる)
 /engine/models/
+# サンプル源の注釈ファイル(COCO 253MB / Open Images CSV など。初回に自動DL)
+/engine/data/
 # 実行ログ/キャッシュ
 *.log
 __pycache__/

@@ -58,6 +58,9 @@ fluent_gallery (Rust, axum, 単一バイナリ, :8790)
 
 ## API契約(Python版で実証済み、Rustが同一契約で置換)
 収蔵: `POST /api/ingest {path,source,origin?,move?}` / サンプル取得(権利クリアな公開コレクション): `GET /api/samples`, `POST /api/samples/{id}?n=`(旧 presets は廃止 2026-09-04)
+**まとめ取り(2026-09-04)**: n は最大20,000。源ごとの既読台帳 `store/samples/<id>.seen.json` にURLを残し、
+次回はその続きから取る(同じ先頭を取り直さない)。API源はページを送りながら未取得がn件たまるまで掘る。
+COCO は val2017 で足りなければ train2017 も開く(CC BY系のみ=全体の約1/4)。`POST /api/ingest/stop` で中断可。
 検索: `GET /api/images?q&tag&source&origin&vlm_&scene&subject&style&nsfw&min_quality&limit&offset`
 　　  `GET /api/facets` `GET /api/meta/{sha1}` `GET /img/{sha1}` `GET /thumb/{sha1}`
 属性: `POST /api/enrich {backend,filter…}` `GET /api/enrich/status` `POST /api/enrich/stop`

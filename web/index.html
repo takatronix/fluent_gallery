@@ -319,6 +319,9 @@
   #ctxm .it:hover { background:#ffffff10; }
   #ctxm .it.danger { color:#ff9b9b; }
   #ctxm .it.danger:hover { background:#a3333340; }
+  .stopbtn { flex:none; margin-left:6px; padding:0 6px; border-radius:5px; cursor:pointer;
+             border:1px solid #3a3d4a; color:var(--faint); font-size:10px; line-height:15px; }
+  .stopbtn:hover { color:#ff9b9b; border-color:#a33333; background:#a3333322; }
   #ctxm .hint { padding:7px 9px 3px; margin-top:4px; color:var(--faint); font-size:10.5px;
                 border-top:1px solid #ffffff10; white-space:nowrap; }
 </style>
@@ -3103,21 +3106,27 @@ async function loadPresets() {
   try {
     const ps = await j('/api/samples');
     $('presets').innerHTML = `<div style="display:flex; align-items:center; gap:6px; width:100%; font-size:11px; color:var(--faint)">
-        1回に <select id="sample_n" style="font-size:11px"><option>30</option><option selected>100</option><option>300</option></select> 枚
-        · 出典とライセンスは各画像のサイドカーに記録されます</div>` +
+        1回に <select id="sample_n" style="font-size:11px"><option>100</option><option selected>1000</option><option>3000</option><option>10000</option><option value="20000">まとめて(上限2万)</option></select> 枚
+        · 同じ物は取り直しません(押すたび続きから) · 出典とライセンスは各画像のサイドカーに記録されます</div>` +
       ps.map(p => `<button onclick="fetchSample('${p.id}', this)" title="${esc(p.note)}" style="display:flex; gap:6px; align-items:center">
         ${esc(p.label)} <span style="font-size:10px; padding:1px 5px; border-radius:99px; border:1px solid #3a7d5a; color:#6ee7a0">${esc(p.license_label)}</span>
-        ${p.have ? `<span style="font-size:10px; color:var(--faint)">${p.have}枚</span>` : ''}</button>`).join('');
+        ${p.have ? `<span style="font-size:10px; color:var(--faint)" title="収蔵済み${p.have}枚 / 取りに行った累計${p.seen || 0}件(次はこの続きから)">${p.have}枚${p.seen > p.have ? `<span style="opacity:.6">/${p.seen}</span>` : ''}</span>` : ''}</button>`).join('');
   } catch (e) {}
 }
 async function fetchSample(id, btn) {
-  const n = $('sample_n')?.value || 100;
+  const n = $('sample_n')?.value || 1000;
   btn.disabled = true;
   try {
     await j(`/api/samples/${id}?n=${n}`, {method: 'POST'});
-    toast(`${n}枚の取得を始めました — 進捗はサイドバーの「取込」に出ます`);
+    toast(`最大${(+n).toLocaleString()}枚の取得を始めました — 進捗はサイドバーの「取込」(止めるボタンあり)`);
     closeIngest();
   } catch (e) { toast('❌ ' + e.message); btn.disabled = false; }
+}
+// 長い取り込みを人が止められるように(まとめ取りは数十分かかることがある)
+async function stopIngest(ev) {
+  ev?.stopPropagation();
+  try { await j('/api/ingest/stop', {method: 'POST'}); toast('止めます — 走っている分だけ収蔵して終わります(取った分は覚えているので続きから再開できます)'); }
+  catch (e) { toast('❌ ' + e.message); }
 }
 
 // ================= AI実況(ポーラーは2秒×1本に集約 — 稼働状況/収集バー/取込/完了リフレッシュ全部) =================
@@ -3260,10 +3269,10 @@ async function watchActivity() {
       }
       watchActivity._ingWas = g.alive;
     }
-    const row = (icon, name, on, detail) => `<div style="display:flex; gap:6px; align-items:center; padding:2px 0">
+    const row = (icon, name, on, detail, extra = '') => `<div style="display:flex; gap:6px; align-items:center; padding:2px 0">
       <span style="flex:none; width:7px; height:7px; border-radius:99px; background:${on ? 'var(--ok)' : '#2a2d38'};${on ? 'box-shadow:0 0 8px #6ee7a077' : ''}"></span>
       <span style="flex:none; display:flex; gap:5px; align-items:center">${ic(icon, 12)} ${name}</span>
-      <span style="margin-left:auto; opacity:.85; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:150px" title="${esc(detail)}">${esc(detail)}</span></div>`;
+      <span style="margin-left:auto; opacity:.85; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:150px" title="${esc(detail)}">${esc(detail)}</span>${extra}</div>`;
     const c = a.crawl, e = a.enrich, l = a.llm, g = a.ingest, s = a.system || {};
     const bar = (pct, hot) => `<span style="flex:1; height:4px; min-width:34px; border-radius:99px; background:#1c1e26; overflow:hidden">
       <span style="display:block; width:${Math.min(100, pct).toFixed(0)}%; height:100%; border-radius:99px;
@@ -3293,7 +3302,8 @@ async function watchActivity() {
       row('cpu', 'LLM', l.busy || l.downloading,
           l.downloading ? `DL ${Math.round(100 * l.got_mb / (l.total_mb || 1))}%${eta('llm', l.got_mb, l.total_mb)}`
           : l.busy ? '生成中' : l.ready ? '常駐中' : l.present ? '待機' : '未取得') +
-      row('upload', '取込', g.alive, g.alive ? `${g.done}/${g.total}${eta('ingest', g.done, g.total)}` : '待機') +
+      row('upload', '取込', g.alive, g.alive ? `${g.done}/${g.total}${eta('ingest', g.done, g.total)}` : '待機',
+          g.alive ? '<span class="stopbtn" onclick="stopIngest(event)" title="この取り込みを止める(取った分は残ります)">止める</span>' : '') +
       (a.seg?.alive ? row('smart', 'マスク', true, `${a.seg.done}/${a.seg.total} 「${a.seg.prompt}」`) : '') +
       wrow('img', 'サムネ', 'micro') +      // micro120px焼き(裏方)
       (a.ai?.clip && !a.ai.clip.present

@@ -321,6 +321,8 @@ pub struct Progress {
     pub dup: std::sync::atomic::AtomicUsize,
     pub bad: std::sync::atomic::AtomicUsize,
     pub alive: std::sync::atomic::AtomicBool,
+    /// 中断要求(長い取り込みを人が止められるように。ジョブ側が1件ごとに見る)
+    pub stop: std::sync::atomic::AtomicBool,
 }
 
 #[allow(dead_code)] // 呼び手はProgress経由で読む。戻り値はテスト/将来のログ用

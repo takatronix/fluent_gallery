@@ -134,7 +134,9 @@ node tests/ui_regression.js   # 単体実行(サーバ稼働中に)
 GET  /api/images?limit&offset&source&q&tag&origin&...   一覧/検索(qはキャプションFTS+タグ)
 GET  /api/facets                                        絞り込み候補と件数
 POST /api/ingest {path,source,move}                     収蔵(ジョブ)
-GET  /api/samples / POST /api/samples/{id}?n=100          権利クリアなサンプル取得(CC0/PD/CC BY: Commons, Met, CMA, ARTIC, NASA, Wellcome, SMK, COCO(CC BY系のみ), Open Images 顔/実写)
+GET  /api/samples / POST /api/samples/{id}?n=1000        権利クリアなサンプル取得(CC0/PD/CC BY: Commons, Met, CMA, ARTIC, NASA, Wellcome, SMK, COCO(CC BY系のみ), Open Images 顔/実写)
+                                                          n は最大2万。取った物は源ごとの台帳に残り、次回は続きから(押すほど溜まる)
+POST /api/ingest/stop                                     取り込み/まとめ取りを途中で止める(取った分は残る)
 POST /api/ingest/url {url,source?,max?}                  指定ページ(または画像URL)の画像を取り込む。YouTube/X/Instagram等は拒否、内部ネットワーク拒否
 POST /api/crawl  {album,n,minutes}                      AIフォルダの収集を開始
 POST /api/enrich {backend,n}                            VLM属性付け

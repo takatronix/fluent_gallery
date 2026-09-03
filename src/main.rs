@@ -2152,6 +2152,12 @@ async fn api_ingest_status(State(app): S) -> Json<Value> {
     }))
 }
 
+/// 取り込み(サンプルのまとめ取り含む)を途中で止める。走っている分だけ収蔵して終わる
+async fn api_ingest_stop(State(app): S) -> impl IntoResponse {
+    app.ingest.stop.store(true, Relaxed);
+    Json(json!({"ok": true}))
+}
+
 // URL取り込み: 利用者が指定した1ページ(または画像URL)に載っている画像を取り込む(検索クローラとは別物)
 #[derive(Deserialize)]
 struct IngestUrlIn {
@@ -2249,6 +2255,7 @@ async fn api_samples(State(app): S) -> Json<Value> {
     let out: Vec<Value> = samples::sets().iter().map(|x| json!({
         "id": x.id, "label": x.label, "license": x.license, "license_label": x.license_label, "note": x.note,
         "have": have.get(&format!("sample:{}", x.id)).copied().unwrap_or(0),
+        "seen": samples::load_seen(&app.root, x.id).len(), // 取りに行った累計(次はこの続きから)
     })).collect();
     Json(json!(out))
 }
@@ -2265,9 +2272,10 @@ async fn api_sample_fetch(State(app): S, AxPath(id): AxPath<String>, axum::extra
     if app.ingest.alive.load(Relaxed) {
         return (StatusCode::CONFLICT, Json(json!({"detail": "収蔵ジョブが実行中です"}))).into_response();
     }
-    let n = q.n.clamp(1, 1000);
+    let n = q.n.clamp(1, 20000); // まとめ取り(数千枚)前提。続きは既読台帳が面倒を見る
     let p = app.ingest.clone();
     p.alive.store(true, Relaxed);
+    p.stop.store(false, Relaxed);
     for a in [&p.total, &p.done, &p.added, &p.dup, &p.bad] {
         a.store(0, Relaxed);
     }
@@ -2275,19 +2283,23 @@ async fn api_sample_fetch(State(app): S, AxPath(id): AxPath<String>, axum::extra
     *app.ingest_label.lock().unwrap() = format!("サンプル: {label_short}(一覧を取得中)");
     let (sid, license, origin) = (set.id.to_string(), set.license.to_string(), set.origin.to_string());
     tokio::spawn(async move {
-        let list = match samples::fetch_list(&app.http, &app.root, &p, &app.ingest_label, &sid, n).await {
+        let seen0 = samples::load_seen(&app.root, &sid);
+        let list = match samples::fetch_list(&app.http, &app.root, &p, &app.ingest_label, &sid, n, &seen0).await {
             Ok(l) => l,
             Err(e) => { println!("📥 サンプル一覧取得失敗({sid}): {e}"); p.alive.store(false, Relaxed); return; }
         };
         p.total.store(list.len(), Relaxed);
         p.done.store(0, Relaxed);
         *app.ingest_label.lock().unwrap() = format!("サンプル: {}", label_short);
+        let got: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![])); // 取れた物のURL(既読台帳に足す)
         let sem = Arc::new(tokio::sync::Semaphore::new(6));
         let mut js = tokio::task::JoinSet::new();
         for it in list {
+            let got = got.clone();
             let (sem, client, root, sid, license, origin, p) = (sem.clone(), app.http.clone(), app.root.clone(), sid.clone(), license.clone(), origin.clone(), p.clone());
             js.spawn(async move {
                 let _g = sem.acquire().await;
+                if p.stop.load(Relaxed) { return; } // 「止める」を押されたら残りは取りに行かない
                 // 画像配信CDNはボット扱いで403にすることがある(シカゴ美術館のIIIFが実例)→ブラウザ相当のヘッダで取る
                 let r = client.get(&it.url)
                     .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15 fluent_gallery/0.2")
@@ -2307,12 +2319,21 @@ async fn api_sample_fetch(State(app): S, AxPath(id): AxPath<String>, axum::extra
                     let db = app.db.lock().unwrap();
                     store::ingest_bytes(&root, &db, &data, ext, &format!("sample:{sid}"), &extra).map(|_| ())
                 }).await.unwrap_or(Err("bad"));
-                match res { Ok(()) => p.added.fetch_add(1, Relaxed), Err("dup") => p.dup.fetch_add(1, Relaxed), Err(_) => p.bad.fetch_add(1, Relaxed) };
+                match res {
+                    Ok(()) => { got.lock().unwrap().push(it.url.clone()); p.added.fetch_add(1, Relaxed) }
+                    Err("dup") => { got.lock().unwrap().push(it.url.clone()); p.dup.fetch_add(1, Relaxed) }
+                    Err(_) => p.bad.fetch_add(1, Relaxed), // 取れなかった物は覚えない(次回また試す)
+                };
                 p.done.fetch_add(1, Relaxed);
             });
         }
         while js.join_next().await.is_some() {}
-        println!("📥 サンプル {sid}: +{} (重複{} 失敗{})", p.added.load(Relaxed), p.dup.load(Relaxed), p.bad.load(Relaxed));
+        let mut seen = seen0;
+        seen.extend(got.lock().unwrap().drain(..));
+        samples::save_seen(&app.root, &sid, &seen);
+        println!("📥 サンプル {sid}: +{} (重複{} 失敗{}) 既読累計{}", p.added.load(Relaxed), p.dup.load(Relaxed),
+                 p.bad.load(Relaxed), seen.len());
+        p.stop.store(false, Relaxed);
         p.alive.store(false, Relaxed);
     });
     Json(json!({"ok": true, "job": "ingest", "n": n})).into_response()
@@ -2839,6 +2860,7 @@ async fn main() {
         .route("/api/upload", post(api_upload).layer(axum::extract::DefaultBodyLimit::max(2 << 30)))
         .route("/api/ingest", post(api_ingest))
         .route("/api/ingest/status", get(api_ingest_status))
+        .route("/api/ingest/stop", post(api_ingest_stop))
         .route("/api/ingest/url", post(api_ingest_url))
         .route("/api/samples", get(api_samples))
         .route("/api/samples/{id}", post(api_sample_fetch))
