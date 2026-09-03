@@ -2428,11 +2428,14 @@ async function lbFaceEnroll() {
     const r = await j('/api/faces/enroll', {method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({album, person, shas: [it.sha1], ...(lbFaceSel ? {point: lbFaceSel} : {})})});
     if (r.enrolled) {
-      toast(`顔ID登録: ${person} @ ${album} — 次の収集から別人を自動排除`);
+      toast(`✅ 顔ID登録: ${person} @ ${album} — 次の収集から別人を自動排除`);
       personSet.add(person);
       faceIdCache.clear(); // 台帳が変わったので照合結果は引き直し
       $('lbfacename').value = ''; $('lbfacebox').style.display = 'none';
       clearFaceBoxes();
+      // 登録した実感が出るように、その場で照合し直して表示を更新
+      // (ボタンが金色の本人名に変わり、メタ行にもチップが出る 2026-09-03指摘)
+      if (items[lbIdx]) lbShow(lbIdx, 0);
     } else toast('❌ 顔を検出できませんでした(顔がはっきり写った写真で)');
   } catch (e) { toast('❌ ' + e.message); }
 }
