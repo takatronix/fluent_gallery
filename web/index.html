@@ -1207,17 +1207,15 @@ const lbView = {
     this.box(it.w, it.h);
     if (this._probe) { this._probe.onload = this._probe.onerror = null; this._probe.src = ''; }
     if (this._full) { this._full.onload = null; this._full.src = ''; }
+    // サムネは常に即表示(30KB・グリッドでキャッシュ済み)=押しっぱなしでもパラパラ流れる
+    this.apply(gen, '/thumb/' + it.sha1, 'thumb', it.w, it.h);
     const start = () => {
-      if (gen !== this.gen) return; // もう次へ行った=この画像は読み込みすらしない
+      if (gen !== this.gen) return; // もう次へ行った=重い読み込みはしない
       const pvUrl = '/preview/' + it.sha1 + (bust ? '?t=' + Date.now() : '');
       const probe = this._probe = new Image();
       probe.src = pvUrl;
       if (probe.complete) this.apply(gen, pvUrl, 'pv');
-      else {
-        // preview未着の間は正しいサムネを即出す(この時点でユーザーは静止している)
-        this.apply(gen, '/thumb/' + it.sha1, 'thumb', it.w, it.h);
-        probe.onload = () => this.apply(gen, pvUrl, 'pv');
-      }
+      else probe.onload = () => this.apply(gen, pvUrl, 'pv');
     };
     if (!dir) start(); else setTimeout(start, 120);
   },
