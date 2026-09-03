@@ -927,24 +927,43 @@ struct FacesQ {
 
 async fn api_faces_list(State(app): S, axum::extract::Query(q): axum::extract::Query<FacesQ>) -> impl IntoResponse {
     let db = app.db.lock().unwrap();
-    let mut rows: Vec<(String, i64)> = vec![];
-    if let Ok(mut st) = db.prepare("SELECT person, COUNT(*) FROM faces WHERE album=?1 OR ?1='' GROUP BY person") {
-        if let Ok(rs) = st.query_map([q.album.as_str()], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))) {
+    let mut rows: Vec<(String, String, String)> = vec![];
+    if let Ok(mut st) = db.prepare(
+        "SELECT album, person, GROUP_CONCAT(sha1) FROM faces WHERE album=?1 OR ?1='' GROUP BY album, person ORDER BY album, person",
+    ) {
+        if let Ok(rs) = st.query_map([q.album.as_str()], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+        }) {
             rows = rs.filter_map(Result::ok).collect();
         }
     }
-    Json(json!(rows.iter().map(|(p, n)| json!({"person": p, "refs": n})).collect::<Vec<_>>()))
+    Json(json!(rows
+        .iter()
+        .map(|(a, p, shas)| {
+            let s: Vec<&str> = shas.split(',').collect();
+            json!({"album": a, "person": p, "refs": s.len(), "shas": s})
+        })
+        .collect::<Vec<_>>()))
 }
 
 #[derive(Deserialize)]
 struct FaceDelIn {
     album: String,
     person: String,
+    #[serde(default)] sha1: Option<String>, // 指定=その参照顔1枚だけ削除、無指定=人物ごと削除
 }
 
 async fn api_faces_delete(State(app): S, Json(p): Json<FaceDelIn>) -> impl IntoResponse {
     let db = app.db.lock().unwrap();
-    let n = db.execute("DELETE FROM faces WHERE album=?1 AND person=?2", [p.album.as_str(), p.person.as_str()]).unwrap_or(0);
+    let n = match &p.sha1 {
+        Some(s) => db
+            .execute("DELETE FROM faces WHERE album=?1 AND person=?2 AND sha1=?3",
+                     [p.album.as_str(), p.person.as_str(), s.as_str()])
+            .unwrap_or(0),
+        None => db
+            .execute("DELETE FROM faces WHERE album=?1 AND person=?2", [p.album.as_str(), p.person.as_str()])
+            .unwrap_or(0),
+    };
     Json(json!({"ok": true, "deleted": n}))
 }
 

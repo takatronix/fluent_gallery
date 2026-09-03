@@ -170,6 +170,7 @@
              transition:border-color .12s, box-shadow .12s; }
   .facebox:hover { border-color:var(--acc); }
   .facebox.on { border-color:#f2c14e; box-shadow:0 0 14px #f2c14e66; }
+  .tag.ptag { color:#f2c14e; border-color:#f2c14e55; } /* 顔ID(本人確認済み)タグは金色 */
   .cell .costb { position:absolute; top:5px; left:5px; z-index:1; font-size:8px; font-weight:600;
                  background:#1a160abb; color:#e5c07b88; border-radius:99px; padding:0 5px; }
   .cell .rclean { position:absolute; bottom:6px; right:6px; z-index:1; width:17px; height:17px;
@@ -297,7 +298,9 @@
   <div id="nav_sources_sec"></div>
   <div class="sec">出荷 — データセット</div>
   <div id="nav_datasets"></div>
-  <div class="sec">AI稼働状況</div>
+  <div class="sec" style="display:flex; align-items:center">AI稼働状況
+    <span id="facesbtn" style="margin-left:auto; cursor:pointer; opacity:.7; display:flex; align-items:center; gap:3px"
+      onclick="facesOpen()" title="顔ID台帳 — 登録済みの人物と参照顔の一覧/管理"></span></div>
   <div id="ai_activity" style="padding:0 10px 6px; font-size:11px; color:var(--faint)"></div>
   <div style="flex:1"></div>
   <div class="sec">ストレージ</div>
@@ -349,6 +352,19 @@
   </div>
 </main>
 
+<div id="facesovl" style="display:none; position:fixed; inset:0; background:#000000a6; z-index:30"
+  onclick="if(event.target===this)facesClose()">
+  <div style="max-width:760px; margin:56px auto; background:var(--bg2,#14161c); border:1px solid #2a2d38;
+              border-radius:14px; padding:16px 18px; max-height:78vh; overflow:auto">
+    <div style="display:flex; align-items:center; gap:8px">
+      <b style="font-size:14px">顔ID台帳</b>
+      <span style="font-size:11px; color:var(--faint)">登録済みの人物と参照顔。参照顔が多いほど判定が安定します(1人1〜3枚推奨)</span>
+      <span class="sp" style="flex:1"></span>
+      <button class="ghost" onclick="facesClose()">閉じる</button>
+    </div>
+    <div id="facesbody" style="margin-top:12px; font-size:12px">読み込み中…</div>
+  </div>
+</div>
 <div id="ovl" onclick="if(event.target===this)closeIngest()">
   <div id="ingestpanel">
     <div style="display:flex; gap:8px; align-items:center; margin-bottom:10px">
@@ -748,6 +764,8 @@ $('up_btn').innerHTML = ic('upload', 13) + ' 画像/動画を選ぶ';
 $('up_cam_btn').innerHTML = ic('img', 13) + ' カメラで撮る';
 $('gen_ico').innerHTML = ic('seed', 15);
 $('sb_keep').innerHTML = ic('star', 13) + 'お気に入り';
+$('facesbtn').innerHTML = ic('bot', 11) + ' 顔ID';
+loadPersonSet(); // 顔IDタグを金色表示するための人物名セット
 $('sb_gen').innerHTML = ic('seed', 13) + '指示で量産';
 $('sb_del').innerHTML = ic('trash', 13) + '消す';
 $('sb_ds').innerHTML = ic('box', 13) + 'データセット化';
@@ -1829,6 +1847,10 @@ async function lbShow(i, dir) {
   lbIdx = (i + items.length) % items.length;
   const sha = items[lbIdx].sha1;
   const img = $('lbimg');
+  // 前の画像の仮箱(width/height属性)を必ず外す — 残ると次の画像が古いアスペクトに歪む
+  // (削除→次表示で崩れる既知の罠。settleの条件スキップで再発させた反省 2026-09-03)
+  img.removeAttribute('width');
+  img.removeAttribute('height');
   lbMeta = null; edReset(); zReset(); $('edcompare').style.display = 'none'; edHist([]); lbKeepBtn(); lbSelBtn();
   $('lbinfo').style.display = 'none';
   $('lbsrcbtn').style.display = 'none';
@@ -1911,8 +1933,8 @@ async function lbShow(i, dir) {
       <span class="tag" style="cursor:pointer" title="AIの判定ミスはクリックで修正(実写→イラスト→アニメ絵→3DCGの順に切替)"
         onclick="cycleStyle('${sha}')">${kind}</span>${eds.length ? ` · <span class="tag">調整${eds.length}手</span>` : ''}`;
     const vlmHtml = v => (v.caption ? `<br>${esc(v.caption)}<br>` : '<br>') +
-      (v.tags || []).map(t => `<span class="tag" style="cursor:pointer" data-t="${esc(t)}"
-        title="クリックで削除" onclick="tagDel('${sha}', this.dataset.t)">${esc(t)}</span>`).join('') +
+      (v.tags || []).map(t => `<span class="tag ${personSet.has(t) ? 'ptag' : ''}" style="cursor:pointer" data-t="${esc(t)}"
+        title="${personSet.has(t) ? '顔IDで本人確認済み · ' : ''}クリックで削除" onclick="tagDel('${sha}', this.dataset.t)">${personSet.has(t) ? ic('bot', 10) + ' ' : ''}${esc(t)}</span>`).join('') +
       `<span class="tag"><input placeholder="+タグ" style="background:none; border:none; color:inherit; font:inherit; width:64px; padding:0"
         onclick="event.stopPropagation()" onkeydown="if(event.key==='Enter'){event.preventDefault(); tagAdd('${sha}', this.value); this.value='';}"></span>`;
     const v = m.vlm || {};
@@ -1989,6 +2011,8 @@ function zReset() { zm = 1; zx = zy = 0; zApply(false); }
   let clickTimer = null, downAt = null, movedFar = false;
   el.addEventListener('click', e => {
     e.stopPropagation();
+    // クロップ確定のpointerup直後に飛んでくるclickで閉じない(「クロップすると画面ごと消える」退行の真因 2026-09-03)
+    if (cropEnded) { cropEnded = false; return; }
     if (cropMode || movedFar) return;
     clearTimeout(clickTimer);
     clickTimer = setTimeout(() => {
@@ -2092,7 +2116,13 @@ async function edMutate(body) {
     lbMeta = {...(lbMeta || {}), sha1: sha, edits: r.edits, edits_rev: r.rev};
     edReset(); edHist(r.edits);
     $('edcompare').style.display = r.edits.length ? '' : 'none';
-    $('lbimg').src = r.edits.length ? lbUrl(sha, 1600) : '/preview/' + sha + '?t=' + Date.now();
+    { // レンダ完成+デコード後に差し替え(直接src交換だと生成待ちの間imgが幅0に潰れて「消えた」ように見える)
+      const url = r.edits.length ? lbUrl(sha, 1600) : '/preview/' + sha + '?t=' + Date.now();
+      const nw = new Image(); nw.src = url;
+      const apply = () => { if (items[lbIdx]?.sha1 === sha) $('lbimg').src = url; };
+      nw.onload = () => (nw.decode ? nw.decode().catch(() => {}) : Promise.resolve()).then(apply);
+      nw.onerror = apply;
+    }
     // グリッドのサムネも編集後の見た目に差し替え(サーバの焼き直しを少し待つ)
     const it = items.find(x => x.sha1 === sha);
     if (it) {
@@ -2114,7 +2144,7 @@ async function edApplyAdjust() {
   edPush({op: 'adjust', params: v});
 }
 // ✂ クロップ: ドラッグで範囲→離した瞬間に確定(比率で送るので回転後でも正しい)
-let cropMode = false, cropStart = null;
+let cropMode = false, cropStart = null, cropEnded = false; // cropEnded=確定直後のclickを1回飲む印
 function cropToggle() {
   cropMode = !cropMode;
   $('cropbtn').classList.toggle('on', cropMode);
@@ -2143,6 +2173,7 @@ function cropUp(e) {
   const x1 = Math.min(img.right, Math.max(cropStart.x, e.clientX));
   const y1 = Math.min(img.bottom, Math.max(cropStart.y, e.clientY));
   cropStart = null;
+  cropEnded = true; // 直後のclickは閉じ操作にしない
   $('croprect').style.display = 'none';
   const fw = (x1 - x0) / img.width, fh = (y1 - y0) / img.height;
   if (fw < 0.05 || fh < 0.05) return toast('範囲が小さすぎます');
@@ -2192,6 +2223,79 @@ async function cycleStyle(sha) {
 }
 
 // ================= お気に入り / 削除 =================
+// ---- 顔ID台帳(登録済み人物の一覧/管理 2026-09-03要望) ----
+let personSet = new Set(); // 登録済み人物名(画像側で顔IDタグを金色にする用)
+async function loadPersonSet() {
+  try { personSet = new Set((await j('/api/faces?album=')).map(x => x.person)); } catch (e) {}
+}
+function facesClose() { $('facesovl').style.display = 'none'; }
+async function facesOpen() {
+  $('facesovl').style.display = 'block';
+  const el = $('facesbody');
+  el.innerHTML = '読み込み中…';
+  try {
+    const rows = await j('/api/faces?album=');
+    personSet = new Set(rows.map(x => x.person));
+    if (!rows.length) {
+      el.innerHTML = `<div style="color:var(--faint)">まだ誰も登録されていません。<br>
+        画像を開いて「顔ID」ボタン → 顔の枠をクリック → 名前を入れると登録できます。</div>`;
+      return;
+    }
+    const byAlbum = {};
+    rows.forEach(r => (byAlbum[r.album] ??= []).push(r));
+    el.innerHTML = Object.entries(byAlbum).map(([album, ps]) => `
+      <div style="margin-bottom:14px">
+        <div style="display:flex; align-items:center; gap:8px; margin-bottom:6px">
+          <b>${esc(album || '(全フォルダ共通)')}</b>
+          <span style="color:var(--faint)">${ps.length}人</span>
+          <button class="ghost" style="margin-left:auto; font-size:11px" onclick="facesScan('${esc(album)}')"
+            title="このフォルダの既存画像を全部顔照合して、本人タグを付け直します">${ic('loop', 11)} 既存画像をスキャン</button>
+        </div>
+        ${ps.map(r => `
+          <div style="display:flex; align-items:center; gap:8px; padding:6px 0; border-top:1px solid #22242e">
+            <b style="min-width:90px; color:#f2c14e">${esc(r.person)}</b>
+            <span style="color:var(--faint)">参照${r.refs}枚</span>
+            <span style="display:flex; gap:4px; flex:1; overflow-x:auto">
+              ${r.shas.map(s => `<span style="position:relative; flex:none">
+                <img src="/thumb/${s}" style="width:44px; height:44px; object-fit:cover; border-radius:6px; cursor:zoom-in"
+                  onclick="facesClose(); openLbSha('${s}')" title="参照顔の元画像を開く">
+                <span style="position:absolute; top:-4px; right:-4px; cursor:pointer; background:#000c; border-radius:99px;
+                  width:15px; height:15px; display:flex; align-items:center; justify-content:center; font-size:9px"
+                  onclick="facesDelRef('${esc(r.album)}', '${esc(r.person)}', '${s}')" title="この参照顔だけ削除">✕</span>
+              </span>`).join('')}
+            </span>
+            <button class="ghost" style="font-size:11px" onclick="facesDelPerson('${esc(r.album)}', '${esc(r.person)}')"
+              title="この人物の参照顔を全部削除(収集ゲートから外れます)">${ic('trash', 11)}</button>
+          </div>`).join('')}
+      </div>`).join('');
+  } catch (e) { el.innerHTML = '❌ ' + esc(e.message); }
+}
+async function facesDelRef(album, person, sha1) {
+  try {
+    await j('/api/faces', {method: 'DELETE', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({album, person, sha1})});
+    toast(`${person} の参照顔を1枚削除`);
+    facesOpen();
+  } catch (e) { toast('❌ ' + e.message); }
+}
+async function facesDelPerson(album, person) {
+  try {
+    const r = await j('/api/faces', {method: 'DELETE', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({album, person})});
+    toast(`${person} を台帳から削除(参照${r.deleted}枚)`);
+    facesOpen();
+  } catch (e) { toast('❌ ' + e.message); }
+}
+async function facesScan(album) {
+  toast(`「${album}」の既存画像を顔照合中…(枚数によっては数分)`);
+  try {
+    const r = await j('/api/faces/scan', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({album})});
+    if (r.detail) return toast(r.detail);
+    const who = Object.entries(r.matched || {}).map(([k, v]) => `${k}:${v}枚`).join(' / ') || 'なし';
+    toast(`照合完了: ${r.scanned}枚中 本人=${who} · 顔なし${r.no_face} · 別人${r.mismatch}`);
+  } catch (e) { toast('❌ ' + e.message); }
+}
 // 顔ID登録(ライトボックス): 顔枠を出してクリックで選び、名前を付けて登録(2ショット対応 2026-09-03)
 let lbFaceSel = null; // 選択した顔の中心(正規化座標)。null=未選択(単独顔なら自動選択)
 function clearFaceBoxes() {
@@ -2251,6 +2355,7 @@ async function lbFaceEnroll() {
       body: JSON.stringify({album, person, shas: [it.sha1], ...(lbFaceSel ? {point: lbFaceSel} : {})})});
     if (r.enrolled) {
       toast(`顔ID登録: ${person} @ ${album} — 次の収集から別人を自動排除`);
+      personSet.add(person);
       $('lbfacename').value = ''; $('lbfacebox').style.display = 'none';
       clearFaceBoxes();
     } else toast('❌ 顔を検出できませんでした(顔がはっきり写った写真で)');
