@@ -829,6 +829,36 @@ struct FaceEnrollIn {
     album: String,
     person: String,
     shas: Vec<String>,
+    #[serde(default)] point: Option<[f32; 2]>, // 正規化座標(0-1)。指定=その点に一番近い顔を登録(2ショット対応)
+}
+
+#[derive(Deserialize)]
+struct FaceDetectIn {
+    sha1: String,
+}
+
+/// 画像内の顔位置を返す(正規化bbox)。登録UIの「クリックで顔を選ぶ」用
+async fn api_faces_detect(State(app): S, Json(p): Json<FaceDetectIn>) -> impl IntoResponse {
+    let root = app.root.clone();
+    let out = tokio::task::spawn_blocking(move || -> Option<Value> {
+        let db = Connection::open(root.join("store/index.sqlite")).ok()?;
+        let ext: String = db
+            .query_row("SELECT ext FROM images WHERE sha1=?1", [p.sha1.as_str()], |r| r.get(0))
+            .unwrap_or_else(|_| "jpg".into());
+        let img = image::open(store::image_path(&root, &p.sha1, &ext)).ok()?;
+        let (w, h) = (img.width() as f32, img.height() as f32);
+        let faces = faceid::detect_faces(&img);
+        Some(json!({"faces": faces.iter().map(|f| json!({
+            "bbox": [f.bbox[0] / w, f.bbox[1] / h, f.bbox[2] / w, f.bbox[3] / h]
+        })).collect::<Vec<_>>()}))
+    })
+    .await
+    .ok()
+    .flatten();
+    match out {
+        Some(v) => Json(v).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 async fn api_faces_enroll(State(app): S, Json(p): Json<FaceEnrollIn>) -> impl IntoResponse {
@@ -851,12 +881,24 @@ async fn api_faces_enroll(State(app): S, Json(p): Json<FaceEnrollIn>) -> impl In
                 continue;
             };
             let faces = faceid::detect_faces(&img);
-            // 最大の顔を参照として採用
-            let Some(f) = faces.iter().max_by(|a, b| {
-                let ar = (a.bbox[2] - a.bbox[0]) * (a.bbox[3] - a.bbox[1]);
-                let br = (b.bbox[2] - b.bbox[0]) * (b.bbox[3] - b.bbox[1]);
-                ar.partial_cmp(&br).unwrap_or(std::cmp::Ordering::Equal)
-            }) else {
+            // point指定=その点に中心が一番近い顔(2ショットでクリック選択)。無指定=最大の顔
+            let pick = if let Some([px, py]) = p.point {
+                let (w, h) = (img.width() as f32, img.height() as f32);
+                faces.iter().min_by(|a, b| {
+                    let d = |f: &faceid::Face| {
+                        ((f.bbox[0] + f.bbox[2]) / 2.0 / w - px).powi(2)
+                            + ((f.bbox[1] + f.bbox[3]) / 2.0 / h - py).powi(2)
+                    };
+                    d(a).partial_cmp(&d(b)).unwrap_or(std::cmp::Ordering::Equal)
+                })
+            } else {
+                faces.iter().max_by(|a, b| {
+                    let ar = (a.bbox[2] - a.bbox[0]) * (a.bbox[3] - a.bbox[1]);
+                    let br = (b.bbox[2] - b.bbox[0]) * (b.bbox[3] - b.bbox[1]);
+                    ar.partial_cmp(&br).unwrap_or(std::cmp::Ordering::Equal)
+                })
+            };
+            let Some(f) = pick else {
                 failed.push(sha.clone());
                 continue;
             };
@@ -2177,6 +2219,7 @@ async fn main() {
         .route("/api/move", post(api_move))
         .route("/api/faces", get(api_faces_list).delete(api_faces_delete))
         .route("/api/faces/enroll", post(api_faces_enroll))
+        .route("/api/faces/detect", post(api_faces_detect))
         .route("/api/faces/scan", post(api_faces_scan))
         .route("/trash/img/{sha1}", get(trash_img))
         .route("/api/albums", post(api_album_make).get(api_albums))

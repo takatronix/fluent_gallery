@@ -166,6 +166,10 @@
   @media (hover:hover) { .cell:hover .badge { opacity:.9; } }
   .cell .badge:hover { transform:scale(1.25); }
   .cell .badge.on { opacity:1; color:#f2c14e; }
+  .facebox { position:fixed; z-index:45; border:2px solid #ffffff90; border-radius:9px; cursor:pointer;
+             transition:border-color .12s, box-shadow .12s; }
+  .facebox:hover { border-color:var(--acc); }
+  .facebox.on { border-color:#f2c14e; box-shadow:0 0 14px #f2c14e66; }
   .cell .costb { position:absolute; top:5px; left:5px; z-index:1; font-size:8px; font-weight:600;
                  background:#1a160abb; color:#e5c07b88; border-radius:99px; padding:0 5px; }
   .cell .rclean { position:absolute; bottom:6px; right:6px; z-index:1; width:17px; height:17px;
@@ -1785,6 +1789,7 @@ function lbMorphOpen(sha) {
 function closeLb() {
   const lb = $('lb');
   if (!lb.classList.contains('show')) return;
+  clearFaceBoxes(); $('lbfacebox').style.display = 'none';
   // 開いた時の逆再生: 元のサムネが見えていればそこへ縮んで帰る
   const sha = items[lbIdx]?.sha1;
   const cellDiv = sha && document.getElementById('c_' + sha);
@@ -1820,6 +1825,7 @@ function closeLb() {
 }
 async function lbShow(i, dir) {
   if (!items.length) return;
+  clearFaceBoxes(); $('lbfacebox').style.display = 'none'; // 顔選択は画像単位でリセット
   lbIdx = (i + items.length) % items.length;
   const sha = items[lbIdx].sha1;
   const img = $('lbimg');
@@ -2186,27 +2192,68 @@ async function cycleStyle(sha) {
 }
 
 // ================= お気に入り / 削除 =================
-// 顔ID登録(ライトボックス): 表示中の画像の顔を人物参照としてフォルダに登録
-function lbFacePanel() {
+// 顔ID登録(ライトボックス): 顔枠を出してクリックで選び、名前を付けて登録(2ショット対応 2026-09-03)
+let lbFaceSel = null; // 選択した顔の中心(正規化座標)。null=未選択(単独顔なら自動選択)
+function clearFaceBoxes() {
+  document.querySelectorAll('.facebox').forEach(x => x.remove());
+  lbFaceSel = null;
+}
+async function lbFacePanel() {
   const b = $('lbfacebox');
   const show = b.style.display === 'none';
   b.style.display = show ? 'inline-flex' : 'none';
-  if (show) $('lbfacename').focus();
+  clearFaceBoxes();
+  if (!show) return;
+  $('lbfacename').focus();
+  const it = items[lbIdx]; if (!it) return;
+  try {
+    const r = await j('/api/faces/detect', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({sha1: it.sha1})});
+    const fs = r.faces || [];
+    if (!fs.length) return toast('顔が見つかりませんでした');
+    if (items[lbIdx]?.sha1 !== it.sha1 || $('lbfacebox').style.display === 'none') return; // 送り/閉じで無効化
+    const rect = $('lbimg').getBoundingClientRect();
+    fs.forEach(f => {
+      const [x0, y0, x1, y1] = f.bbox;
+      const d = document.createElement('div');
+      d.className = 'facebox';
+      Object.assign(d.style, {
+        left: rect.left + x0 * rect.width + 'px', top: rect.top + y0 * rect.height + 'px',
+        width: (x1 - x0) * rect.width + 'px', height: (y1 - y0) * rect.height + 'px',
+      });
+      d.onclick = e => {
+        e.stopPropagation();
+        document.querySelectorAll('.facebox').forEach(x => x.classList.remove('on'));
+        d.classList.add('on');
+        lbFaceSel = [(x0 + x1) / 2, (y0 + y1) / 2];
+        $('lbfacename').focus();
+      };
+      document.body.appendChild(d);
+    });
+    if (fs.length === 1) {
+      document.querySelector('.facebox')?.classList.add('on');
+      const [x0, y0, x1, y1] = fs[0].bbox;
+      lbFaceSel = [(x0 + x1) / 2, (y0 + y1) / 2];
+    } else toast(`顔が${fs.length}人分 — 登録する顔をクリックで選んでください`);
+  } catch (e) { toast('❌ ' + e.message); }
 }
 async function lbFaceEnroll() {
   const it = items[lbIdx]; if (!it) return;
   const person = $('lbfacename').value.trim();
   if (!person) return toast('名前を入れてください(例: wonyoung)');
+  const boxes = document.querySelectorAll('.facebox').length;
+  if (boxes > 1 && !lbFaceSel) return toast('どの顔か、枠をクリックで選んでください');
   const album = loc.type === 'folder' ? loc.key
     : (it.source || '').startsWith('crawl:') ? it.source.slice(6) : '';
   if (!album) return toast('どのフォルダの人物か判別できません — フォルダから開いてください');
   try {
     const r = await j('/api/faces/enroll', {method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({album, person, shas: [it.sha1]})});
+      body: JSON.stringify({album, person, shas: [it.sha1], ...(lbFaceSel ? {point: lbFaceSel} : {})})});
     if (r.enrolled) {
       toast(`顔ID登録: ${person} @ ${album} — 次の収集から別人を自動排除`);
       $('lbfacename').value = ''; $('lbfacebox').style.display = 'none';
-    } else toast('❌ 顔を検出できませんでした(顔がはっきり写ったソロ写真で)');
+      clearFaceBoxes();
+    } else toast('❌ 顔を検出できませんでした(顔がはっきり写った写真で)');
   } catch (e) { toast('❌ ' + e.message); }
 }
 // サムネ右上⭐の直接トグル(選択◯と同じ作法でサムネ上で完結 2026-09-03要望)
