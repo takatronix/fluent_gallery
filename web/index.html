@@ -160,8 +160,12 @@
   .cell.sel .ck { opacity:1; background:var(--acc); border-color:var(--acc); color:#fff; }
   .cell.sel { outline:2px solid var(--acc); outline-offset:-2px; }
   .cell.sel img { transform:scale(.94); border-radius:4px; transition:transform .15s ease; }
-  .cell .badge { position:absolute; top:7px; right:7px; z-index:1; color:#f2c14e;
-                 filter:drop-shadow(0 1px 3px #000c); }
+  .cell .badge { position:absolute; top:7px; right:7px; z-index:2; color:#aeb4c2; opacity:0;
+                 cursor:pointer; filter:drop-shadow(0 1px 3px #000c);
+                 transition:opacity .12s, color .12s, transform .12s; }
+  @media (hover:hover) { .cell:hover .badge { opacity:.9; } }
+  .cell .badge:hover { transform:scale(1.25); }
+  .cell .badge.on { opacity:1; color:#f2c14e; }
   .cell .costb { position:absolute; top:5px; left:5px; z-index:1; font-size:8px; font-weight:600;
                  background:#1a160abb; color:#e5c07b88; border-radius:99px; padding:0 5px; }
   .cell .rclean { position:absolute; bottom:6px; right:6px; z-index:1; width:17px; height:17px;
@@ -1213,7 +1217,8 @@ function cellHtml(it) {
       draggable="true" ondragstart="dragShas(event, '${it.sha1}')">
     <img loading="lazy" decoding="async" src="${src}" style="background:${it.tint || 'var(--panel)'}">
     <span class="ck" onclick="event.stopPropagation(); ckSelSha('${it.sha1}', event)">${ic('check', 12)}</span>
-    ${it.keep ? `<span class="badge">${ic('star', 13)}</span>` : ''}
+    <span class="badge ${it.keep ? 'on' : ''}" title="お気に入り(自動間引きから保護)"
+      onclick="event.stopPropagation(); cellKeep('${it.sha1}', this)">${ic('star', 13)}</span>
     ${it.cost > 0 ? `<span class="costb" title="この1枚の取得費(実測)">$${it.cost < 0.01 ? it.cost.toFixed(3) : it.cost.toFixed(2)}</span>` : ''}
     ${it.rights === 'clean' ? `<span class="rclean" title="権利クリーン — CC/公式API由来で商用利用しやすい">${ic('check', 10)}</span>` : ''}
     ${prevSeen && it.ingested > prevSeen ? '<span class="newb">NEW</span>' : ''}
@@ -1516,6 +1521,13 @@ $('lbbar').innerHTML = `
   <button class="ghost" onclick="lbGo(1)" title="→キー / Fキー">次 <span style="opacity:.5">(F)</span> ${ic('chevR', 14)}</button>
   <button class="ghost" onclick="simFolder()" title="この画像に似たものが集まるフォルダを作る(似ている順・新しく入る画像も自動で加わる)">${ic('search', 13)} 似た画像</button>
   <button class="ghost" id="lbkeep" onclick="lbKeep()" title="自動間引きから絶対保護 (S)">${ic('star', 13)} お気に入り</button>
+  <button class="ghost" id="lbfacebtn" onclick="lbFacePanel()"
+    title="この画像の顔を人物として登録。同じフォルダの収集で別人が自動排除されるようになります(無料・確定的)">${ic('bot', 13)} 顔ID</button>
+  <span id="lbfacebox" style="display:none; align-items:center; gap:4px">
+    <input id="lbfacename" placeholder="名前(例: wonyoung)" style="width:130px"
+      onclick="event.stopPropagation()" onkeydown="if(event.key==='Enter'){event.preventDefault(); lbFaceEnroll();}">
+    <button class="ghost" onclick="event.stopPropagation(); lbFaceEnroll()">${ic('check', 12)} 登録</button>
+  </span>
   <button class="ghost" id="edbtn" onclick="edToggle()" title="非破壊調整のOn/Off (E)">${ic('sliders', 13)} 編集</button>
   <button class="ghost" id="lbsel" onclick="lbSel()" title="選択に加える (X)">${ic('circle', 13)} 選択</button>
   <button class="ghost" id="edcompare" style="display:none"
@@ -2174,6 +2186,37 @@ async function cycleStyle(sha) {
 }
 
 // ================= お気に入り / 削除 =================
+// 顔ID登録(ライトボックス): 表示中の画像の顔を人物参照としてフォルダに登録
+function lbFacePanel() {
+  const b = $('lbfacebox');
+  const show = b.style.display === 'none';
+  b.style.display = show ? 'inline-flex' : 'none';
+  if (show) $('lbfacename').focus();
+}
+async function lbFaceEnroll() {
+  const it = items[lbIdx]; if (!it) return;
+  const person = $('lbfacename').value.trim();
+  if (!person) return toast('名前を入れてください(例: wonyoung)');
+  const album = loc.type === 'folder' ? loc.key
+    : (it.source || '').startsWith('crawl:') ? it.source.slice(6) : '';
+  if (!album) return toast('どのフォルダの人物か判別できません — フォルダから開いてください');
+  try {
+    const r = await j('/api/faces/enroll', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({album, person, shas: [it.sha1]})});
+    if (r.enrolled) {
+      toast(`顔ID登録: ${person} @ ${album} — 次の収集から別人を自動排除`);
+      $('lbfacename').value = ''; $('lbfacebox').style.display = 'none';
+    } else toast('❌ 顔を検出できませんでした(顔がはっきり写ったソロ写真で)');
+  } catch (e) { toast('❌ ' + e.message); }
+}
+// サムネ右上⭐の直接トグル(選択◯と同じ作法でサムネ上で完結 2026-09-03要望)
+async function cellKeep(sha, el) {
+  const it = items.find(x => x.sha1 === sha);
+  const to = !(it?.keep);
+  el.classList.toggle('on', to); // 楽観更新
+  try { await setKeep([sha], to); }
+  catch (e) { el.classList.toggle('on', !to); toast('❌ ' + e.message); }
+}
 async function setKeep(shas, keep) {
   await j('/api/keep', {method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({shas, keep})});
