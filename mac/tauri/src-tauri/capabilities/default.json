@@ -1,0 +1,19 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "identifier": "default",
+  "description": "既定の窓。UI(同梱サーバのHTTP配信)から窓の全画面切替だけ許可",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "core:window:allow-is-fullscreen",
+    "core:window:allow-set-fullscreen"
+  ],
+  "remote": {
+    "urls": [
+      "http://127.0.0.1:8790/*",
+      "http://localhost:8790/*"
+    ]
+  }
+}

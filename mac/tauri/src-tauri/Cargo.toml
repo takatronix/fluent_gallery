@@ -1,0 +1,15 @@
+[package]
+name = "fluent_gallery_app"
+version = "0.2.0"
+edition = "2021"
+description = "Fluent Gallery — 完全ローカルAIの画像ライブラリ(Mac アプリ殻)"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+
+[profile.release]
+lto = true
+codegen-units = 1
