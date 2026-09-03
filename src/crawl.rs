@@ -1145,7 +1145,7 @@ pub async fn run(
     let distill_on = folder_embs.len() >= DISTILL_MIN_SAMPLES;
     // 顔ID(docs/face-id-design.md): 登録メンバーがいるフォルダは顔照合ゲートが有効になる
     let face_refs = store::face_refs(&db, &album);
-    let face_on = !face_refs.is_empty();
+    let face_on = cfg!(feature = "faceid") && !face_refs.is_empty();
     if face_on {
         set_last(format!("顔ID有効: {}人の参照で本人照合します", face_refs.len()));
     }
@@ -1348,34 +1348,16 @@ pub async fn run(
                                 }
                             }
                             // 顔ゲート: 登録メンバーと照合(無料・決定的)。不一致=門前払い、一致=本人タグ、
-                            // 顔なし/中間帯=従来どおりLLMへ
-                            let mut face_who: Option<String> = None;
-                            if face_on {
-                                let ffs = crate::faceid::detect_faces(&img);
-                                if !ffs.is_empty() {
-                                    let mut best = -1.0f32;
-                                    for f in ffs.iter().take(4) {
-                                        if let Some(e) = crate::faceid::embed_face(&img, &f.kps) {
-                                            for (nm, rs) in &face_refs {
-                                                let sim = crate::faceid::best_sim(&e, rs);
-                                                if sim > best {
-                                                    best = sim;
-                                                    face_who = Some(nm.clone());
-                                                }
-                                            }
-                                        }
-                                    }
-                                    if best < crate::faceid::FACE_DIFF {
-                                        st.rejected.fetch_add(1, Relaxed);
-                                        save_reject_thumb(&root, &fk, &img);
-                                        push_recent(&st, false, &fk, "登録メンバー不一致(顔ID・無料)");
-                                        continue;
-                                    }
-                                    if best < crate::faceid::FACE_SAME {
-                                        face_who = None; // 中間帯: 本人タグは付けずLLMに任せる
-                                    }
+                            // 顔なし/中間帯=従来どおりLLMへ。feature "faceid" 無効ビルドでは常に素通し
+                            let face_who: Option<String> = match face_gate(face_on, &face_refs, &img) {
+                                Ok(w) => w,
+                                Err(()) => {
+                                    st.rejected.fetch_add(1, Relaxed);
+                                    save_reject_thumb(&root, &fk, &img);
+                                    push_recent(&st, false, &fk, "登録メンバー不一致(顔ID・無料)");
+                                    continue;
                                 }
-                            }
+                            };
                             let verdict = match boost_key.as_ref().filter(|_| boost_live(&st)) {
                                 Some(bk) => {
                                     let mut r = judge_claude(&client, bk, &img, &goal, &keywords, &limits.judge_model).await;
@@ -1567,34 +1549,17 @@ pub async fn run(
                         }
                     }
                 }
-                // 顔ゲート(画像検索側): 不一致=門前払い、一致=本人タグをタプルで運ぶ
-                let mut face_who: Option<String> = None;
-                if face_on {
-                    let ffs = crate::faceid::detect_faces(&img);
-                    if !ffs.is_empty() {
-                        let mut best = -1.0f32;
-                        for f in ffs.iter().take(4) {
-                            if let Some(e) = crate::faceid::embed_face(&img, &f.kps) {
-                                for (nm, rs) in &face_refs {
-                                    let sim = crate::faceid::best_sim(&e, rs);
-                                    if sim > best {
-                                        best = sim;
-                                        face_who = Some(nm.clone());
-                                    }
-                                }
-                            }
-                        }
-                        if best < crate::faceid::FACE_DIFF {
-                            st.rejected.fetch_add(1, Relaxed);
-                            save_reject_thumb(&root, &uk, &img);
-                            push_recent(&st, false, &uk, "登録メンバー不一致(顔ID・無料)");
-                            continue;
-                        }
-                        if best < crate::faceid::FACE_SAME {
-                            face_who = None;
-                        }
+                // 顔ゲート: 登録メンバーと照合(無料・決定的)。不一致=門前払い、一致=本人タグ、
+                // 顔なし/中間帯=従来どおりLLMへ。feature "faceid" 無効ビルドでは常に素通し
+                let face_who: Option<String> = match face_gate(face_on, &face_refs, &img) {
+                    Ok(w) => w,
+                    Err(()) => {
+                        st.rejected.fetch_add(1, Relaxed);
+                        save_reject_thumb(&root, &uk, &img);
+                        push_recent(&st, false, &uk, "登録メンバー不一致(顔ID・無料)");
+                        continue;
                     }
-                }
+                };
                 passed.push((c, data.to_vec(), img, uk, ph, face_who));
                 }
                 // 第2段: 意味ゲート(目標の意味で判定 — キーワード一致で全ゴミだった教訓)。
@@ -1803,4 +1768,41 @@ mod tests {
         }));
         assert_eq!(frame_looks_ok(&noisy), Ok(()));
     }
+}
+
+/// 顔ゲート(収集時)。Ok(Some)=本人確定タグ / Ok(None)=素通し(顔なし・中間帯・無効) / Err=別人で門前払い
+#[cfg(feature = "faceid")]
+fn face_gate(face_on: bool, face_refs: &[(String, Vec<Vec<f32>>)], img: &image::DynamicImage) -> Result<Option<String>, ()> {
+    if !face_on {
+        return Ok(None);
+    }
+    let ffs = crate::faceid::detect_faces(img);
+    if ffs.is_empty() {
+        return Ok(None);
+    }
+    let mut best = -1.0f32;
+    let mut who: Option<String> = None;
+    for f in ffs.iter().take(4) {
+        if let Some(e) = crate::faceid::embed_face(img, &f.kps) {
+            for (nm, rs) in face_refs {
+                let sim = crate::faceid::best_sim(&e, rs);
+                if sim > best {
+                    best = sim;
+                    who = Some(nm.clone());
+                }
+            }
+        }
+    }
+    if best < crate::faceid::FACE_DIFF {
+        return Err(()); // 別人
+    }
+    if best < crate::faceid::FACE_SAME {
+        return Ok(None); // 中間帯: 本人タグは付けずLLMに任せる
+    }
+    Ok(who)
+}
+/// feature "faceid" 無効ビルド: 顔ゲートは常に素通し(販売ビルド用・insightfaceモデル非同梱)
+#[cfg(not(feature = "faceid"))]
+fn face_gate(_face_on: bool, _face_refs: &[(String, Vec<Vec<f32>>)], _img: &image::DynamicImage) -> Result<Option<String>, ()> {
+    Ok(None)
 }

@@ -21,7 +21,7 @@ const check = (name, ok, detail = '') => {
   const total = (await (await fetch(BASE + '/api/images?limit=1&source=crawl%3A_uitest')).json()).total;
   check('テストデータ収蔵', total >= 6, `${total}枚`);
 
-  const b = await puppeteer.launch({executablePath: '/usr/bin/google-chrome', headless: 'new',
+  const b = await puppeteer.launch({executablePath: process.env.CHROME || '/usr/bin/google-chrome', headless: 'new',
     args: ['--no-sandbox'], defaultViewport: {width: 1600, height: 900}});
   const p = await b.newPage();
   const jsErrors = [];
@@ -108,15 +108,17 @@ const check = (name, ok, detail = '') => {
   });
   check('⭐トグル往復', star.ok);
 
-  // 6) 顔IDパネル: 開閉と枠掃除
-  const face = await p.evaluate(async () => {
+  // 6) 顔IDパネル: 開閉と枠掃除(feature "faceid" 無効ビルドではUIが無いのでskip)
+  const caps = await (await fetch(BASE + '/api/caps')).json().catch(() => ({faceid: true}));
+  const face = !caps.faceid ? {shown: true, cleaned: true, skipped: true} : await p.evaluate(async () => {
     openLb(0); await new Promise(r => setTimeout(r, 800));
     await lbFacePanel(); await new Promise(r => setTimeout(r, 400));
     const shown = $('lbfacebox').style.display !== 'none';
     closeLb();
     return {shown, cleaned: document.querySelectorAll('.facebox').length === 0};
   });
-  check('顔IDパネル開閉', face.shown && face.cleaned);
+  if (face.skipped) console.log('  - 顔IDパネル開閉: このビルドは顔ID無効(skip)');
+  else check('顔IDパネル開閉', face.shown && face.cleaned);
 
   // 7) 押しっぱなし送り: 高速連打で流しても、静止したら正しい画像がすぐ出る
   //    (中間画像の原寸DLが回線を塞ぎ「最初の画像が出続ける」退行の再発検知 2026-09-03)
@@ -134,6 +136,8 @@ const check = (name, ok, detail = '') => {
 
   // 8) キーボードカーソル: 矢印移動→Spaceで開く→Spaceで閉じる→Shift+矢印で範囲選択
   const kb = await p.evaluate(() => new Promise(async done => {
+    // 前項のcloseLb()は閉じアニメ完了(240ms)後に'show'を外す。閉じ切る前にキーを打つとライトボックス側に食われる
+    for (let t = 0; t < 30 && $('lb').classList.contains('show'); t++) await new Promise(r => setTimeout(r, 100));
     const key = (k, opts) => document.dispatchEvent(new KeyboardEvent('keydown', {key: k, bubbles: true, ...opts}));
     key('ArrowRight'); key('ArrowRight');
     await new Promise(r => setTimeout(r, 200));
@@ -151,7 +155,7 @@ const check = (name, ok, detail = '') => {
     done({curOk, opened, closed, selN});
   }));
   check('キーボード(矢印/Space開閉/Shift範囲選択)', kb.curOk && kb.opened && kb.closed && kb.selN >= 2,
-    `sel=${kb.selN}`);
+    `cur=${kb.curOk} open=${kb.opened} close=${kb.closed} sel=${kb.selN}`);
 
   // 9) 連続削除: 5連打で5枚消え、詰まらない
   const del = await p.evaluate(async () => {

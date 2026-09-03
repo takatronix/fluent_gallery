@@ -35,6 +35,34 @@ bash deploy.sh
 
 サーバは `./target/release/fluent_gallery`(既定 :8790、`PORT`環境変数で変更可)。
 
+### ビルド機能(Cargo feature)
+
+| feature | 既定 | 内容 |
+|---|---|---|
+| `faceid` | ON | 顔ID(SCRFD+ArcFace)。insightface の buffalo_l モデルは**非商用限定**なので、販売ビルドでは外す |
+| `cuda` | ON | 内蔵LLM(llama.cpp)を CUDA で動かす(Linux/NVIDIA) |
+| `metal` | OFF | 同 Metal(Apple Silicon)。`cuda` とどちらか一つ |
+
+```bash
+cargo build --release                                              # Linux/CUDA・顔IDあり(=deploy.sh)
+cargo build --release --no-default-features --features metal        # Mac・顔IDなし(販売ビルド)
+cargo build --release --no-default-features --features metal,faceid # Mac・顔IDあり
+```
+
+### Mac 販売ビルド(.app / .dmg)
+
+```bash
+bash mac/build_mac.sh            # Metal・顔IDなし → 回帰テスト → dist/FluentGallery.app + .dmg
+bash mac/build_mac.sh --faceid   # 顔IDを含める(非商用限定モデルなので販売版には付けない)
+SIGN="Developer ID Application: ..." NOTARY_PROFILE=fg bash mac/build_mac.sh   # 署名+notarize
+```
+
+.app は Tauri 2 の殻(`mac/tauri/`)。同梱したサーバをサイドカーとして起動し、WKWebView の窓で `127.0.0.1:8790` を表示、⌘Q でサーバごと終了。`--plain` にすると殻なし(`mac/launcher.sh` でサーバ起動→ブラウザ)の仮 .app になる。
+
+データは `~/Library/Application Support/FluentGallery/`(`store/` 原本・サイドカー・索引、`engine/models/` 自動DLモデル、`fluent_gallery.log`)。`FG_DATA` / `FG_PORT` 環境変数で変更可。UI は バンドル内 `Resources/web/` をそこへリンクして読む。
+
+顔ID無効ビルドでは `/api/faces*` が存在せず(404)、収集の顔ゲートは素通し、UIは `/api/caps` を見て顔IDの操作を隠す。回帰テストも顔ID項目を自動でskipする。
+
 ### 依存
 
 - **必須**: Rust, Chrome(回帰テスト用), Node.js(回帰テスト用)

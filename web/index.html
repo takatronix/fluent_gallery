@@ -999,7 +999,13 @@ $('gen_ico').innerHTML = ic('seed', 15);
 $('sb_keep').innerHTML = ic('star', 13) + 'お気に入り';
 $('facesbtn').innerHTML = ic('bot', 11) + ' 顔ID';
 fsSync();
-loadPersonSet(); // 顔IDタグを金色表示するための人物名セット
+// サーバのビルド機能(/api/caps)。無効な機能(販売ビルドで外した顔ID等)のUIは隠す
+let caps = {faceid: true};
+j('/api/caps').then(c => {
+  caps = c;
+  if (caps.faceid) loadPersonSet(); // 顔IDタグを金色表示するための人物名セット
+  else ['facesbtn', 'lbfacebtn', 'lbfacebox'].forEach(id => { const e = document.getElementById(id); if (e) e.style.display = 'none'; });
+}).catch(() => loadPersonSet());
 $('sb_gen').innerHTML = ic('seed', 13) + '指示で量産';
 $('sb_del').innerHTML = ic('trash', 13) + '消す';
 $('sb_ds').innerHTML = ic('box', 13) + 'データセット化';
@@ -1109,12 +1115,13 @@ function folderHeadHtml(a, isNew) {
       <span class="lbl">AI配役</span>
       <span class="lbl" style="width:auto; flex:1; white-space:normal">
         ${a.agent?.boost
-          ? `クエリ生成 = <b style="color:#e5c07b">Claude(有料)</b> · 目利き =
+          ? `クエリ生成 = <b style="color:#e5c07b">Claude(有料)</b>${aiMark('key_anthropic')} · 目利き =
              <select id="ah_judge" ${isNew ? '' : 'onchange="headAutoSave()"'}
                title="ブースト時の目利きAI。()内は1枚判定の概算">
                ${JUDGE_MODELS.map(([id, label]) => `<option value="${id}" ${(a.agent?.judge_model || '') === id ? 'selected' : ''}>${label}</option>`).join('')}
-             </select> · 属性付け = 内蔵qwen2.5vl · マスク = GroundingDINO+SAM2 · 似た画像 = CLIP(内蔵)`
-          : `クエリ生成 = 内蔵Qwen3-4B · 目利き = 内蔵qwen2.5vl(無料/GPU) · マスク = GroundingDINO+SAM2 · 似た画像 = CLIP(内蔵)`}
+             </select>${aiMark('key_judge')}`
+          : `クエリ生成 = 内蔵Qwen3-4B${aiMark('llm')} · 目利き = 内蔵qwen2.5vl${aiMark('vlm')}`}
+        · 属性付け = 内蔵qwen2.5vl${aiMark('vlm')} · マスク = GroundingDINO+SAM2${aiMark('seg')} · 似た画像 = CLIP${aiMark('clip')}
       </span>
     </div>
     <div class="frow">
@@ -3036,9 +3043,48 @@ async function liveDrop(album, n) {
     }
   } catch (e) {}
 }
+// ---- 内蔵/外部AIの準備状況(/api/activity の ai)。「どのAIが使える状態か」をAI配役とサイドバーに出す ----
+var lastAI = null; // varとfunction: 起動時のfolderHeadHtml/fsSyncより後に定義されるので巻き上げが要る
+var _eta = {};
+// 進捗の速度から残り時間。「あとどれくらいか分からないと不安」への回答(DL/属性付け/取込に共通)
+function eta(key, done, total) {
+  const now = Date.now(), p = _eta[key];
+  const inst = p ? (done - p.v) / Math.max(0.5, (now - p.t) / 1000) : 0;
+  const rate = p && p.rate > 0 ? p.rate * 0.7 + inst * 0.3 : inst;
+  if (!p || done !== p.v) _eta[key] = {t: now, v: done, rate};
+  const r = (_eta[key] || {}).rate;
+  if (!(r > 0) || !(total > done)) return '';
+  const sec = (total - done) / r;
+  return ' · 残り' + (sec < 60 ? `${Math.ceil(sec)}秒` : sec < 3600 ? `約${Math.ceil(sec / 60)}分` : `約${(sec / 3600).toFixed(1)}時間`);
+}
+function aiMarkHtml(k) {
+  const A = lastAI; if (!A) return '';
+  const ok = t => ` <span style="color:var(--ok)" title="${esc(t)}">✓</span>`;
+  const ng = (t, act) => ` <span style="color:#e06c75" title="${esc(t)}">✗ ${esc(t)}</span>${act || ''}`;
+  const dl = (x, key) => ` <span style="color:#e0a83c">DL ${Math.round(100 * x.got_mb / (x.total_mb || 1))}%${eta(key, x.got_mb, x.total_mb)}</span>`;
+  const pull = (kind, mb) => ` <button class="ghost" style="font-size:11px; padding:1px 6px" onclick="aiPull('${kind}')" title="この場でダウンロード(初回のみ)">取得 ${mb}</button>`;
+  switch (k) {
+    case 'llm': return A.llm.present ? ok(A.llm.ready ? '常駐中' : '取得済') : A.llm.downloading ? dl(A.llm, 'llm') : ng('未取得', pull('llm', '2.4GB'));
+    case 'clip': return A.clip.present ? ok('モデルあり') : A.clip.downloading ? dl(A.clip, 'clip') : ng('未取得', pull('clip', '350MB'));
+    case 'vlm': return A.vlm.present ? ok('ollama接続OK') : A.vlm.reachable ? ng('モデル未取得(初回に自動pull)') : ng('ollama未起動');
+    case 'seg': return A.seg.reachable ? ok('ml-hub接続OK') : ng('ml-hub未接続');
+    case 'key_anthropic': return A.keys.anthropic ? ok('APIキーあり') : ng('anthropic_api_key未設定');
+    case 'key_judge': return (A.keys.openrouter || A.keys.anthropic) ? ok('APIキーあり') : ng('openrouter_api_key未設定');
+  }
+  return '';
+}
+function aiMark(k) { return `<span class="aimark" data-k="${k}">${aiMarkHtml(k)}</span>`; }
+function aiMarksRefresh() { document.querySelectorAll('.aimark').forEach(el => { el.innerHTML = aiMarkHtml(el.dataset.k); }); }
+async function aiPull(kind) {
+  try {
+    await j(kind === 'llm' ? '/api/llm/pull' : '/api/clip/pull', {method: 'POST'});
+    toast(kind === 'llm' ? '内蔵LLM(2.4GB)の取得を開始しました' : 'CLIPモデル(350MB)の取得を開始しました');
+  } catch (e) { toast('❌ ' + e.message); }
+}
 async function watchActivity() {
   try {
     const a = await j('/api/activity');
+    if (a.ai) { lastAI = a.ai; aiMarksRefresh(); }
     watchCrawlPart(a.crawl || {});
     { // 属性付け完了→表示を最新化
       const e = a.enrich || {};
@@ -3058,7 +3104,7 @@ async function watchActivity() {
     const row = (icon, name, on, detail) => `<div style="display:flex; gap:6px; align-items:center; padding:2px 0">
       <span style="flex:none; width:7px; height:7px; border-radius:99px; background:${on ? 'var(--ok)' : '#2a2d38'};${on ? 'box-shadow:0 0 8px #6ee7a077' : ''}"></span>
       <span style="flex:none; display:flex; gap:5px; align-items:center">${ic(icon, 12)} ${name}</span>
-      <span style="margin-left:auto; opacity:.85; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:96px" title="${esc(detail)}">${esc(detail)}</span></div>`;
+      <span style="margin-left:auto; opacity:.85; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:150px" title="${esc(detail)}">${esc(detail)}</span></div>`;
     const c = a.crawl, e = a.enrich, l = a.llm, g = a.ingest, s = a.system || {};
     const bar = (pct, hot) => `<span style="flex:1; height:4px; min-width:34px; border-radius:99px; background:#1c1e26; overflow:hidden">
       <span style="display:block; width:${Math.min(100, pct).toFixed(0)}%; height:100%; border-radius:99px;
@@ -3084,12 +3130,16 @@ async function watchActivity() {
     $('ai_activity').innerHTML =
       row('globe', '収集', c.alive, (c.alive ? `${c.album} +${c.ingested}枚` : '待機') + (qn ? ` | 待ち${qn}` : '')) +
       (c.alive && c.next_query ? row('search', '先読み', true, `次「${c.next_query}」検索中`) : '') +
-      row('eye', 'VLM', e.alive, e.alive ? `属性付け ${e.done}/${e.total}` : '待機') +
-      row('cpu', 'LLM', l.busy || l.downloading, l.downloading ? `DL ${l.got_mb}/${l.total_mb}MB` : l.busy ? '生成中' : l.ready ? '常駐中' : '未ロード') +
-      row('upload', '取込', g.alive, g.alive ? `${g.done}/${g.total}` : '待機') +
+      row('eye', 'VLM', e.alive, e.alive ? `属性付け ${e.done}/${e.total}${eta('enrich', e.done, e.total)}` : '待機') +
+      row('cpu', 'LLM', l.busy || l.downloading,
+          l.downloading ? `DL ${Math.round(100 * l.got_mb / (l.total_mb || 1))}%${eta('llm', l.got_mb, l.total_mb)}`
+          : l.busy ? '生成中' : l.ready ? '常駐中' : l.present ? '待機' : '未取得') +
+      row('upload', '取込', g.alive, g.alive ? `${g.done}/${g.total}${eta('ingest', g.done, g.total)}` : '待機') +
       (a.seg?.alive ? row('smart', 'マスク', true, `${a.seg.done}/${a.seg.total} 「${a.seg.prompt}」`) : '') +
       wrow('img', 'サムネ', 'micro') +      // micro120px焼き(裏方)
-      wrow('spark', 'CLIP', 'clip') +       // 似た画像の索引(裏方)
+      (a.ai?.clip && !a.ai.clip.present
+        ? row('spark', 'CLIP', a.ai.clip.downloading, a.ai.clip.downloading ? `DL ${Math.round(100 * a.ai.clip.got_mb / (a.ai.clip.total_mb || 1))}%${eta('clip', a.ai.clip.got_mb, a.ai.clip.total_mb)}` : 'モデル未取得')
+        : wrow('spark', 'CLIP', 'clip')) +       // 似た画像の索引(裏方)。モデルが無ければその旨
       wrow('loop', '見回り', 'autopilot') + // ♻自動補充の巡回
       wrow('bot', 'お手入れ', 'groom') +    // 属性/マスクの穴埋め巡回
       cpu + gpu + ram;
@@ -3136,16 +3186,23 @@ function setCur(i, opts = {}) {
   }
 }
 // ギャラリー全体の全画面(ブラウザのフルスクリーンAPI)。スマホは自前UIで足りるので出さない
+// Macアプリ(Tauri)の中ではブラウザの全画面APIは意味が無い → 窓のネイティブ全画面に連動させる
+function tauriWin() { return window.__TAURI__?.window?.getCurrentWindow?.(); }
 function fsToggle() {
+  const tw = tauriWin();
+  if (tw) { tw.isFullscreen().then(on => tw.setFullscreen(!on)).then(() => setTimeout(fsSync, 400)).catch(() => toast('全画面にできませんでした')); return; }
   if (document.fullscreenElement) document.exitFullscreen?.();
   else document.documentElement.requestFullscreen?.().catch(() => toast('全画面にできませんでした'));
 }
 function fsSync() {
+  const tw = tauriWin();
+  if (tw) { tw.isFullscreen().then(on => { $('fsbtn').innerHTML = ic('box', 13) + (on ? ' 戻す' : ' 全画面'); $('fsbtn').classList.toggle('on', on); }).catch(() => {}); return; }
   const on = !!document.fullscreenElement;
   $('fsbtn').innerHTML = ic('box', 13) + (on ? ' 戻す' : ' 全画面');
   $('fsbtn').classList.toggle('on', on);
 }
 document.addEventListener('fullscreenchange', () => { fsSync(); setTimeout(() => { commitCell(); lbView.refit(); }, 60); });
+window.addEventListener('resize', () => { if (tauriWin()) fsSync(); }); // ネイティブ全画面(緑ボタン)にもボタン表記を追従
 function immToggle() {
   $('lb').classList.toggle('imm');
   lbView.refit(); // 箱を全画面/通常サイズへ引き直す

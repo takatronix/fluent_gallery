@@ -7,6 +7,7 @@ mod edits;
 mod enrich;
 mod llm;
 mod media;
+#[cfg(feature = "faceid")]
 mod faceid;
 mod onnx;
 mod seg;
@@ -829,6 +830,7 @@ async fn api_move(State(app): S, Json(p): Json<MoveIn>) -> impl IntoResponse {
 }
 
 // ==== 顔ID(docs/face-id-design.md 2026-09-03) ====
+#[cfg(feature = "faceid")]
 #[derive(Deserialize)]
 struct FaceEnrollIn {
     album: String,
@@ -837,11 +839,13 @@ struct FaceEnrollIn {
     #[serde(default)] point: Option<[f32; 2]>, // 正規化座標(0-1)。指定=その点に一番近い顔を登録(2ショット対応)
 }
 
+#[cfg(feature = "faceid")]
 #[derive(Deserialize)]
 struct FaceDetectIn {
     sha1: String,
 }
 
+#[cfg(feature = "faceid")]
 /// 画像内の顔位置+登録台帳との照合結果を返す。
 /// person=本人確定(FACE_SAME以上) / maybe=似ている(中間帯) / どちらも無し=未登録or別人
 async fn api_faces_detect(State(app): S, Json(p): Json<FaceDetectIn>) -> impl IntoResponse {
@@ -906,6 +910,7 @@ async fn api_faces_detect(State(app): S, Json(p): Json<FaceDetectIn>) -> impl In
     }
 }
 
+#[cfg(feature = "faceid")]
 async fn api_faces_enroll(State(app): S, Json(p): Json<FaceEnrollIn>) -> impl IntoResponse {
     let person = p.person.trim().to_lowercase();
     if person.is_empty() || p.shas.is_empty() {
@@ -965,11 +970,13 @@ async fn api_faces_enroll(State(app): S, Json(p): Json<FaceEnrollIn>) -> impl In
     Json(json!({"ok": true, "enrolled": ok, "failed": failed})).into_response()
 }
 
+#[cfg(feature = "faceid")]
 #[derive(Deserialize)]
 struct FacesQ {
     #[serde(default)] album: String,
 }
 
+#[cfg(feature = "faceid")]
 async fn api_faces_list(State(app): S, axum::extract::Query(q): axum::extract::Query<FacesQ>) -> impl IntoResponse {
     let db = app.db.lock().unwrap();
     let mut rows: Vec<(String, String, String)> = vec![];
@@ -991,6 +998,7 @@ async fn api_faces_list(State(app): S, axum::extract::Query(q): axum::extract::Q
         .collect::<Vec<_>>()))
 }
 
+#[cfg(feature = "faceid")]
 #[derive(Deserialize)]
 struct FaceDelIn {
     album: String,
@@ -998,6 +1006,7 @@ struct FaceDelIn {
     #[serde(default)] sha1: Option<String>, // 指定=その参照顔1枚だけ削除、無指定=人物ごと削除
 }
 
+#[cfg(feature = "faceid")]
 async fn api_faces_delete(State(app): S, Json(p): Json<FaceDelIn>) -> impl IntoResponse {
     let db = app.db.lock().unwrap();
     let n = match &p.sha1 {
@@ -1012,11 +1021,13 @@ async fn api_faces_delete(State(app): S, Json(p): Json<FaceDelIn>) -> impl IntoR
     Json(json!({"ok": true, "deleted": n}))
 }
 
+#[cfg(feature = "faceid")]
 #[derive(Deserialize)]
 struct FaceScanIn {
     album: String,
 }
 
+#[cfg(feature = "faceid")]
 /// 遡及スキャン: フォルダ全画像を顔照合し、本人タグ付与+集計を返す(非破壊)
 async fn api_faces_scan(State(app): S, Json(p): Json<FaceScanIn>) -> impl IntoResponse {
     let root = app.root.clone();
@@ -1924,11 +1935,67 @@ fn sys_stats() -> Value {
 }
 
 /// AI稼働状況の一枚板 — どのAIが今なにをしてるかを1回で返す(UIサイドバー常設パネル用)
+/// 内蔵/外部AIの準備状況(UIの「AI配役」とサイドバー用)。ollama/ml-hub への接続確認があるので10秒キャッシュ
+async fn ai_status(app: &'static App) -> Value {
+    static CACHE: Mutex<Option<(std::time::Instant, Value)>> = Mutex::new(None);
+    if let Some((t, v)) = CACHE.lock().unwrap().as_ref() {
+        if t.elapsed() < std::time::Duration::from_secs(10) {
+            return v.clone();
+        }
+    }
+    let probe = |url: String| {
+        let c = app.http.clone();
+        async move { c.get(url).timeout(std::time::Duration::from_secs(1)).send().await.ok() }
+    };
+    // ml-hub は :7000 だが、Mac では AirPlay(ControlCenter)も :7000 を掴むので OpenAPI に annotation があるかで判定
+    let (ollama, seg) = tokio::join!(probe(format!("{}/api/tags", enrich::OLLAMA)), probe("http://127.0.0.1:7000/openapi.json".into()));
+    let seg_ok = match seg {
+        Some(r) if r.status().is_success() => r.text().await.map(|t| t.contains("annotation")).unwrap_or(false),
+        _ => false,
+    };
+    let vlm_reachable = ollama.is_some();
+    let vlm_present = match ollama {
+        Some(r) => r.json::<Value>().await.ok()
+            .and_then(|t| t["models"].as_array().map(|a| a.iter().any(|m| m["name"].as_str().unwrap_or("").starts_with("qwen2.5vl"))))
+            .unwrap_or(false),
+        None => false,
+    };
+    let key = |k: &str| enrich::mlhub_key(k).is_some();
+    let v = json!({
+        "llm": app.llm.status(&app.root),
+        "clip": onnx::status(&app.root),
+        "vlm": {"backend": "ollama", "model": enrich::BUILTIN_MODEL, "reachable": vlm_reachable, "present": vlm_present},
+        "seg": {"backend": "ml-hub", "reachable": seg_ok},
+        "faceid": cfg!(feature = "faceid"),
+        "keys": {"anthropic": key("anthropic_api_key"), "openai": key("openai_api_key"), "openrouter": key("openrouter_api_key"),
+                 "xai": key("xai_api_key"), "pexels": key("pexels_api_key"), "pixabay": key("pixabay_api_key")},
+    });
+    *CACHE.lock().unwrap() = Some((std::time::Instant::now(), v.clone()));
+    v
+}
+
+async fn api_ai_status(State(app): S) -> Json<Value> {
+    Json(ai_status(app).await)
+}
+
+/// CLIPモデル(350MB)の事前DLを裏で開始。進捗は /api/ai/status の clip
+async fn api_clip_pull(State(app): S) -> Json<Value> {
+    let root = app.root.clone();
+    let client = app.http.clone();
+    tokio::spawn(async move {
+        if let Err(e) = onnx::ensure_model(&root, &client).await {
+            println!("🧭 CLIPモデルDL失敗: {e}");
+        }
+    });
+    Json(json!({"ok": true, "note": "進捗は GET /api/ai/status"}))
+}
+
 async fn api_activity(State(app): S) -> Json<Value> {
     let p = &app.ingest;
     let mut crawl = app.crawl.status();
     crawl["queue"] = json!(app.crawl_queue.lock().unwrap().iter().map(|c| album_slug(&c.album)).collect::<Vec<_>>());
     Json(json!({
+        "ai": ai_status(app).await,
         "crawl": crawl,
         "enrich": app.enrich.status(),
         "llm": app.llm.status(&app.root),
@@ -2497,6 +2564,11 @@ async fn api_cache_clean(State(app): S) -> Json<Value> {
     Json(json!({"ok": true, "note": "サムネは表示時/次回ingest時に再生成されます"}))
 }
 
+/// ビルド時機能(Cargo feature)。UIは無効な機能の操作を隠す(販売ビルドで顔ID等を外すため)
+async fn api_caps() -> impl IntoResponse {
+    Json(json!({"faceid": cfg!(feature = "faceid"), "version": env!("CARGO_PKG_VERSION")}))
+}
+
 async fn index_page(State(app): S) -> impl IntoResponse {
     match std::fs::read_to_string(app.root.join("web/index.html")) {
         // no-store: UI更新が普通のリロードで必ず届くように(古いUIがキャッシュから出続ける事故防止)
@@ -2543,10 +2615,6 @@ async fn main() {
         .route("/api/trash/restore", post(api_trash_restore))
         .route("/api/source/trash", post(api_source_trash))
         .route("/api/move", post(api_move))
-        .route("/api/faces", get(api_faces_list).delete(api_faces_delete))
-        .route("/api/faces/enroll", post(api_faces_enroll))
-        .route("/api/faces/detect", post(api_faces_detect))
-        .route("/api/faces/scan", post(api_faces_scan))
         .route("/trash/img/{sha1}", get(trash_img))
         .route("/api/albums", post(api_album_make).get(api_albums))
         .route("/api/albums/{name}", delete(api_album_del))
@@ -2588,6 +2656,17 @@ async fn main() {
         .route("/api/rebuild", post(api_rebuild))
         .route("/api/cache/stats", get(api_cache_stats))
         .route("/api/cache/clean", post(api_cache_clean))
+        .route("/api/caps", get(api_caps))
+        .route("/api/ai/status", get(api_ai_status))
+        .route("/api/clip/pull", post(api_clip_pull));
+    // 顔ID(feature "faceid")。無効ビルドではルート自体が無い=404。UIは/api/capsを見て操作を隠す
+    #[cfg(feature = "faceid")]
+    let router = router
+        .route("/api/faces", get(api_faces_list).delete(api_faces_delete))
+        .route("/api/faces/enroll", post(api_faces_enroll))
+        .route("/api/faces/detect", post(api_faces_detect))
+        .route("/api/faces/scan", post(api_faces_scan));
+    let router = router
         .layer(axum::middleware::from_fn(log_client_errors))
         .with_state(app);
     // キャッシュジャニター常駐: preview+renders(全て再生成可能)をFG_CACHE_MB以下に保つ。

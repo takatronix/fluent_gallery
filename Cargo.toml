@@ -16,8 +16,17 @@ hex = "0.4"
 rayon = "1"
 reqwest = { version = "0.12", features = ["json"] }
 base64 = "0.22"
-llama-cpp-2 = { version = "0.1.155", features = ["cuda"] }
+llama-cpp-2 = { version = "0.1.155" }
 ort = "2.0.0-rc.13"
+
+[features]
+# 既定 = 現行の Linux/CUDA 構成と同じ。販売ビルド例: cargo build --release --no-default-features --features metal
+default = ["faceid", "cuda"]
+# 顔ID(SCRFD+ArcFace)。insightface の buffalo_l モデルは非商用限定なので、販売ビルドでは外す
+faceid = []
+# 内蔵LLM(llama.cpp)のGPUバックエンド。どちらか一つを選ぶ
+cuda = ["llama-cpp-2/cuda"]
+metal = ["llama-cpp-2/metal"]
 
 [profile.release]
 lto = true

@@ -8,3 +8,7 @@
 *.log
 __pycache__/
 node_modules/
+/dist/
+target/
+/mac/tauri/src-tauri/binaries/
+/mac/tauri/src-tauri/gen/
