@@ -1853,6 +1853,7 @@ function closeLb() {
 async function lbShow(i, dir) {
   if (!items.length) return;
   clearFaceBoxes(); $('lbfacebox').style.display = 'none'; // 顔選択は画像単位でリセット
+  { const fb = document.getElementById('lbfacebtn'); if (fb) fb.innerHTML = ic('bot', 13) + ' 顔ID'; } // ボタン表記も画像単位で戻す
   lbIdx = (i + items.length) % items.length;
   const sha = items[lbIdx].sha1;
   const img = $('lbimg');
@@ -1963,6 +1964,10 @@ async function lbShow(i, dir) {
           : `<span class="tag" style="opacity:.7" title="似ているが確定閾値未満(類似${f.sim})">${esc(f.maybe)}?</span>`).join('');
         const el = document.getElementById('lbwho');
         if (el && chips) el.innerHTML = '顔ID: ' + chips;
+        // ツールバーの顔IDボタンにも本人名を出す(押さなくても分かるように 2026-09-03要望)
+        const names = [...new Set(fs.filter(f => f.person).map(f => f.person))];
+        const fb = document.getElementById('lbfacebtn');
+        if (fb && names.length) fb.innerHTML = `${ic('bot', 13)} <b style="color:#f2c14e">${esc(names.join(' / '))}</b>`;
       } catch (e) {}
     })();
     // 開いたのにマスクが無い→その場で勝手に切る(遅延マスク)。属性が要るのでエンリッチ後に発火
