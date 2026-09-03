@@ -1231,7 +1231,7 @@ function cellHtml(it) {
   if (it._trash) { // ゴミ箱: クリック=選択(戻す対象を選ぶ)。残り日数を出す
     return `<div class="cell ${sel.has(it.sha1) ? 'sel in' : ''}" id="c_${it.sha1}"
         onclick="ckSelSha('${it.sha1}', event)" style="cursor:pointer">
-      <img loading="lazy" src="/trash/img/${it.sha1}" style="background:${it.tint || 'var(--panel)'}; filter:saturate(.5) brightness(.8)">
+      <img loading="lazy" src="/trash/img/${it.sha1}" style="background:var(--panel); filter:saturate(.5) brightness(.8)">
       <span class="ck">${ic('check', 12)}</span>
       <span class="newb" style="background:#3a3d4a">あと${it.days_left}日</span>
       <div class="cap">${esc(it.source || '')}</div>
@@ -1248,7 +1248,7 @@ function cellHtml(it) {
     : `${tier}${it.sha1}${ver}`;
   return `<div class="cell ${sel.has(it.sha1) ? 'sel in' : ''}" id="c_${it.sha1}" onclick="openLbSha('${it.sha1}')"
       draggable="true" ondragstart="dragShas(event, '${it.sha1}')">
-    <img loading="lazy" decoding="async" src="${src}" style="background:${it.tint || 'var(--panel)'}">
+    <img loading="lazy" decoding="async" src="${src}" style="background:var(--panel)">
     <span class="ck" onclick="event.stopPropagation(); ckSelSha('${it.sha1}', event)">${ic('check', 12)}</span>
     <span class="badge ${it.keep ? 'on' : ''}" title="お気に入り(自動間引きから保護)"
       onclick="event.stopPropagation(); cellKeep('${it.sha1}', this)">${ic('star', 13)}</span>
