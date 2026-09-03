@@ -86,7 +86,7 @@ pub struct Limits {
 }
 
 // ---------- SSRF対策: 内部アドレスへのDLを拒否 ----------
-async fn is_safe_url(url: &str) -> bool {
+pub(crate) async fn is_safe_url(url: &str) -> bool {
     let Some(rest) = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")) else {
         return false;
     };

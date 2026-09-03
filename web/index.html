@@ -414,6 +414,11 @@
       <input id="ing_src" placeholder="ソース名 (例: camera:現場A)" style="width:180px">
       <button onclick="ingest()">取り込む</button>
     </div>
+    <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:8px">
+      <input id="ing_url" placeholder="またはWebページのURL(そのページに載っている画像を取り込む · 画像URL直接も可)" style="flex:1; min-width:240px"
+        onkeydown="if(event.key==='Enter'){event.preventDefault(); ingestUrl();}">
+      <button onclick="ingestUrl()">URLから取り込む</button>
+    </div>
     <div class="sub" id="ing_msg" style="margin-top:6px"></div>
     <div id="presets" style="margin-top:10px; display:flex; gap:6px; flex-wrap:wrap"></div>
   </div>
@@ -2203,7 +2208,7 @@ async function lbShow(i, dir) {
       if (m.crawl) {
         let dom = ''; try { dom = new URL(m.crawl.landing || m.crawl.url).hostname.replace(/^www\./, ''); } catch (e) {}
         src = `<a href="${esc(m.crawl.landing || m.crawl.url)}" target="_blank" rel="noopener" title="取得元ページを開く">${esc(dom)}</a>
-               <span style="color:var(--faint)">(${esc(m.crawl.engine)} ·「${esc(m.crawl.query)}」)</span>`;
+               <span style="color:var(--faint)">(${esc(m.crawl.engine)}${m.crawl.query ? ' ·「' + esc(m.crawl.query) + '」' : ''})</span>`;
       }
       const lic = m.rights && m.rights !== 'unknown' ? esc(m.rights)
         : (m.origin === 'synthetic' ? '自家生成' : m.crawl ? '<span title="一般Web取得 — 学習内部利用向け">権利未確認</span>' : 'ローカル取込');
@@ -2213,6 +2218,8 @@ async function lbShow(i, dir) {
         `<b style="color:#e2e5ea">${m.w}×${m.h}</b> · ${esc((m.ext || '').toUpperCase())} · ${(m.bytes / 1024).toFixed(0)}KB<br>` +
         `${ic('globe', 12)} ${src}<br>` +
         `ライセンス: ${lic}` +
+        (m.credit ? `<br>出典: <span title="${esc(m.credit)}">${esc(m.credit.length > 70 ? m.credit.slice(0, 70) + '…' : m.credit)}</span>` : '') +
+        (m.crawl?.title ? `<br>題名: ${esc(m.crawl.title.length > 60 ? m.crawl.title.slice(0, 60) + '…' : m.crawl.title)}` : '') +
         (m.cost?.usd ? ` · 取得費$${m.cost.usd.toFixed(3)}` : '');
     }
     const kind = (() => { // 見た目の種別はVLMのstyleが正(ソース推定は嘘をつく)
@@ -2957,6 +2964,20 @@ async function enrich() {
   } catch (e) { toast('❌ ' + e.message); }
 }
 function openIngest() { $('ovl').classList.add('show'); }
+// URL取り込み: 指定した1ページに載っている画像を取り込む(利用者が場所を指定する=ブラウザで保存と同じ立場)。
+// YouTube/X/Instagram 等はサーバ側で門前払い(規約・ストア審査)
+async function ingestUrl() {
+  const url = $('ing_url').value.trim();
+  if (!url) return;
+  $('ing_msg').textContent = 'ページを読んでいます…';
+  try {
+    const r = await j('/api/ingest/url', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({url, source: $('ing_src').value.trim()})});
+    toast(`「${r.title || url}」の画像${r.candidates}枚を取り込み中 — 進捗はサイドバーの「取込」に出ます`);
+    $('ing_msg').textContent = ''; $('ing_url').value = '';
+    closeIngest();
+  } catch (e) { $('ing_msg').textContent = '❌ ' + e.message; }
+}
 // スマホ/ブラウザから直接アップロード(画像・動画・カメラ直撮り)
 async function doUpload(files) {
   if (!files?.length) return;
@@ -3251,6 +3272,20 @@ function fsSync() {
 }
 document.addEventListener('fullscreenchange', () => { fsSync(); setTimeout(() => { commitCell(); lbView.refit(); }, 60); });
 window.addEventListener('resize', () => { if (tauriWin()) fsSync(); }); // ネイティブ全画面(緑ボタン)にもボタン表記を追従
+// Macアプリ(Tauri/WKWebView)は target=_blank / window.open の新規窓を黙って捨てる → 外部URLは既定ブラウザで開く
+function openExternal(u) {
+  const op = window.__TAURI__?.opener?.openUrl;
+  if (op && /^https?:/i.test(u) && !u.startsWith(location.origin)) { op(u).catch(() => toast('ブラウザで開けませんでした')); return true; }
+  return false;
+}
+if (window.__TAURI__) {
+  const _open = window.open.bind(window);
+  window.open = (u, ...rest) => (typeof u === 'string' && openExternal(u)) ? null : _open(u, ...rest);
+  document.addEventListener('click', e => {
+    const a = e.target.closest?.('a[href]');
+    if (a && openExternal(a.href)) e.preventDefault();
+  }, true);
+}
 function immToggle() {
   $('lb').classList.toggle('imm');
   lbView.refit(); // 箱を全画面/通常サイズへ引き直す

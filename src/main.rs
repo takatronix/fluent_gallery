@@ -10,6 +10,7 @@ mod media;
 #[cfg(feature = "faceid")]
 mod faceid;
 mod samples;
+mod urlimport;
 mod onnx;
 mod seg;
 mod store;
@@ -2151,6 +2152,92 @@ async fn api_ingest_status(State(app): S) -> Json<Value> {
     }))
 }
 
+// URL取り込み: 利用者が指定した1ページ(または画像URL)に載っている画像を取り込む(検索クローラとは別物)
+#[derive(Deserialize)]
+struct IngestUrlIn {
+    url: String,
+    #[serde(default)] source: String,
+    #[serde(default = "d_url_max")] max: usize,
+}
+fn d_url_max() -> usize { 100 }
+
+async fn api_ingest_url(State(app): S, Json(i): Json<IngestUrlIn>) -> impl IntoResponse {
+    let bad = |m: String| (StatusCode::BAD_REQUEST, Json(json!({"detail": m}))).into_response();
+    let Ok(page) = reqwest::Url::parse(i.url.trim()) else { return bad("URLの形式が不正です".into()) };
+    if !matches!(page.scheme(), "http" | "https") { return bad("http/https のURLだけ取り込めます".into()); }
+    let host = page.host_str().unwrap_or("").to_string();
+    if let Some(b) = urlimport::blocked_host(&host) {
+        return bad(format!("{b} は規約でダウンロードが禁止されているため取り込めません"));
+    }
+    if !crawl::is_safe_url(page.as_str()).await { return bad("内部ネットワーク宛てのURLは取り込めません".into()); }
+    if app.ingest.alive.load(Relaxed) {
+        return (StatusCode::CONFLICT, Json(json!({"detail": "収蔵ジョブが実行中です"}))).into_response();
+    }
+    const UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15 fluent_gallery/0.2";
+    let resp = match app.http.get(page.clone()).header("User-Agent", UA).timeout(std::time::Duration::from_secs(30)).send().await {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::BAD_GATEWAY, Json(json!({"detail": format!("取得失敗: {e}")}))).into_response(),
+    };
+    let ctype = resp.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    let final_url = resp.url().clone();
+    let source = if i.source.trim().is_empty() { format!("url:{host}") } else { i.source.trim().to_string() };
+    // 画像URLそのものなら1枚だけ、HTMLならページ内の画像を候補にする
+    let (title, cands): (String, Vec<String>) = if ctype.starts_with("image/") {
+        (final_url.path().rsplit('/').next().unwrap_or("").to_string(), vec![final_url.to_string()])
+    } else {
+        let html = resp.text().await.unwrap_or_default();
+        let (t, mut u) = urlimport::extract(&final_url, &html);
+        u.truncate(i.max.clamp(1, 500));
+        (t, u)
+    };
+    if cands.is_empty() { return bad("画像が見つかりませんでした".into()); }
+    let p = app.ingest.clone();
+    p.alive.store(true, Relaxed);
+    for a in [&p.total, &p.done, &p.added, &p.dup, &p.bad] { a.store(0, Relaxed); }
+    p.total.store(cands.len(), Relaxed);
+    *app.ingest_label.lock().unwrap() = format!("URL: {}", if title.is_empty() { host.clone() } else { title.clone() });
+    let n = cands.len();
+    let landing = final_url.to_string();
+    let (resp_title, resp_source) = (title.clone(), source.clone());
+    tokio::spawn(async move {
+        let sem = Arc::new(tokio::sync::Semaphore::new(6));
+        let mut js = tokio::task::JoinSet::new();
+        for u in cands {
+            let (sem, client, root, source, title, landing, host, p) =
+                (sem.clone(), app.http.clone(), app.root.clone(), source.clone(), title.clone(), landing.clone(), host.clone(), p.clone());
+            js.spawn(async move {
+                let _g = sem.acquire().await;
+                let fail = || { p.bad.fetch_add(1, Relaxed); p.done.fetch_add(1, Relaxed); };
+                if !crawl::is_safe_url(&u).await { return fail(); }
+                let r = client.get(&u).header("User-Agent", UA).header("Referer", landing.clone())
+                    .header("Accept", "image/avif,image/webp,image/png,image/jpeg,image/*;q=0.8,*/*;q=0.5")
+                    .timeout(std::time::Duration::from_secs(60)).send().await.and_then(|r| r.error_for_status());
+                let data = match r { Ok(r) => r.bytes().await.ok(), Err(_) => None };
+                let Some(data) = data.filter(|d| d.len() > 8 * 1024) else { return fail() };
+                // 短辺200未満(アイコン/トラッカー)は捨てる。寸法だけヘッダから読む(軽い)
+                let dims = image::ImageReader::new(std::io::Cursor::new(&data[..])).with_guessed_format().ok().and_then(|r| r.into_dimensions().ok());
+                let Some((w, h)) = dims else { return fail() };
+                if w.min(h) < 200 { return fail(); }
+                let ext = if data.starts_with(b"\x89PNG") { "png" } else if data.starts_with(b"RIFF") { "webp" } else if data.starts_with(b"GIF8") { "gif" } else { "jpg" };
+                let extra = json!({
+                    "rights": "unknown", "origin": "real",
+                    "crawl": {"url": u, "landing": landing, "title": title, "engine": "url", "query": "", "album": "", "tags": [format!("url:{host}")]},
+                });
+                let res = tokio::task::spawn_blocking(move || {
+                    let db = app.db.lock().unwrap();
+                    store::ingest_bytes(&root, &db, &data, ext, &source, &extra).map(|_| ())
+                }).await.unwrap_or(Err("bad"));
+                match res { Ok(()) => p.added.fetch_add(1, Relaxed), Err("dup") => p.dup.fetch_add(1, Relaxed), Err(_) => p.bad.fetch_add(1, Relaxed) };
+                p.done.fetch_add(1, Relaxed);
+            });
+        }
+        while js.join_next().await.is_some() {}
+        println!("🔗 URL取り込み {landing}: +{} (重複{} 不採用{})", p.added.load(Relaxed), p.dup.load(Relaxed), p.bad.load(Relaxed));
+        p.alive.store(false, Relaxed);
+    });
+    Json(json!({"ok": true, "job": "ingest", "candidates": n, "title": resp_title, "source": resp_source})).into_response()
+}
+
 // サンプルデータ(権利クリアな公開コレクションからの取得。旧プリセットの置き換え)
 async fn api_samples(State(app): S) -> Json<Value> {
     let have: std::collections::HashMap<String, i64> = {
@@ -2184,14 +2271,17 @@ async fn api_sample_fetch(State(app): S, AxPath(id): AxPath<String>, axum::extra
     for a in [&p.total, &p.done, &p.added, &p.dup, &p.bad] {
         a.store(0, Relaxed);
     }
-    *app.ingest_label.lock().unwrap() = format!("サンプル: {}", set.label.split_once(' ').map(|x| x.1).unwrap_or(set.label));
+    let label_short = set.label.split_once(' ').map(|x| x.1).unwrap_or(set.label).to_string();
+    *app.ingest_label.lock().unwrap() = format!("サンプル: {label_short}(一覧を取得中)");
     let (sid, license, origin) = (set.id.to_string(), set.license.to_string(), set.origin.to_string());
     tokio::spawn(async move {
-        let list = match samples::fetch_list(&app.http, &sid, n).await {
+        let list = match samples::fetch_list(&app.http, &app.root, &p, &app.ingest_label, &sid, n).await {
             Ok(l) => l,
             Err(e) => { println!("📥 サンプル一覧取得失敗({sid}): {e}"); p.alive.store(false, Relaxed); return; }
         };
         p.total.store(list.len(), Relaxed);
+        p.done.store(0, Relaxed);
+        *app.ingest_label.lock().unwrap() = format!("サンプル: {}", label_short);
         let sem = Arc::new(tokio::sync::Semaphore::new(6));
         let mut js = tokio::task::JoinSet::new();
         for it in list {
@@ -2209,7 +2299,7 @@ async fn api_sample_fetch(State(app): S, AxPath(id): AxPath<String>, axum::extra
                 let Some(data) = data.filter(|d| d.len() > 4096) else { p.bad.fetch_add(1, Relaxed); p.done.fetch_add(1, Relaxed); return; };
                 let ext = if data.starts_with(b"\x89PNG") { "png" } else { "jpg" };
                 let extra = json!({
-                    "rights": license, "origin": origin, "credit": it.credit,
+                    "rights": it.rights.clone().unwrap_or(license), "origin": origin, "credit": it.credit,
                     "crawl": {"url": it.url, "landing": it.landing, "title": it.title, "engine": format!("sample:{sid}"),
                               "query": "", "album": "", "tags": [format!("sample:{sid}")]},
                 });
@@ -2749,6 +2839,7 @@ async fn main() {
         .route("/api/upload", post(api_upload).layer(axum::extract::DefaultBodyLimit::max(2 << 30)))
         .route("/api/ingest", post(api_ingest))
         .route("/api/ingest/status", get(api_ingest_status))
+        .route("/api/ingest/url", post(api_ingest_url))
         .route("/api/samples", get(api_samples))
         .route("/api/samples/{id}", post(api_sample_fetch))
         .route("/api/datasets", post(api_dataset_make).get(api_datasets))

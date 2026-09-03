@@ -3,6 +3,9 @@
 //! 収蔵は main.rs の spawn_samples が行う(ingest ジョブの器を共用=UIの「取込」行に進捗が出る)。
 
 use serde_json::Value;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering::Relaxed;
+use crate::store::Progress;
 
 pub struct SampleSet {
     pub id: &'static str,
@@ -29,6 +32,12 @@ pub fn sets() -> Vec<SampleSet> {
             note: "Wellcome Collection(英)。license が cc0 または pdm の画像だけ取得", origin: "real" },
         SampleSet { id: "smk", label: "🎨 デンマーク国立美術館 SMK", license: "public-domain", license_label: "パブリックドメイン",
             note: "Statens Museum for Kunst Open Data。public_domain=true の作品のみ", origin: "real" },
+        SampleSet { id: "coco", label: "📷 COCO val2017(実写・物体検出の定番)", license: "cc-by-2.0", license_label: "CC BY系のみ(帰属必要)",
+            note: "COCO 2017 val 5,000枚のうち、画像ごとの Flickr ライセンスが CC BY 2.0 / CC BY-SA 2.0 / 制限なし / 米政府作品のものだけ(非商用・改変禁止は除外)。初回に注釈zip 253MB を取得。帰属(作者URL)はサイドカーに保存", origin: "real" },
+        SampleSet { id: "oi_faces", label: "🧑 Open Images 顔写真(Human face)", license: "cc-by-2.0", license_label: "CC BY 2.0(帰属必要)",
+            note: "Open Images validation の Human face ラベル付き写真(全て Flickr CC BY 2.0)。初回に CSV 26MB を取得。実在の人物なので肖像権には別途注意", origin: "real" },
+        SampleSet { id: "oi_photos", label: "📷 Open Images 実写いろいろ", license: "cc-by-2.0", license_label: "CC BY 2.0(帰属必要)",
+            note: "Open Images validation(41,620枚・全て Flickr CC BY 2.0)からランダムに取得。初回に CSV 15MB を取得", origin: "real" },
     ]
 }
 
@@ -37,6 +46,7 @@ pub struct Item {
     pub title: String,
     pub credit: String,
     pub landing: String,
+    pub rights: Option<String>, // 画像単位でライセンスが違う源(COCO)用。None=セット既定
 }
 
 const UA: &str = "fluent_gallery/0.2 (open-access sample fetch)";
@@ -50,8 +60,14 @@ async fn get_json(client: &reqwest::Client, url: &str) -> Result<Value, String> 
 
 fn s(v: &Value) -> String { v.as_str().unwrap_or("").to_string() }
 
-/// n 枚ぶんの候補(重複除去済み・多めに返すことがある)
-pub async fn fetch_list(client: &reqwest::Client, id: &str, n: usize) -> Result<Vec<Item>, String> {
+/// n 枚ぶんの候補(重複除去済み・多めに返すことがある)。root/p/label は大きな注釈ファイルの初回取得(進捗表示)に使う
+pub async fn fetch_list(client: &reqwest::Client, root: &Path, p: &Progress, label: &std::sync::Mutex<String>, id: &str, n: usize) -> Result<Vec<Item>, String> {
+    match id {
+        "coco" => return coco(client, root, p, label, n).await,
+        "oi_faces" => return openimages(client, root, p, label, true, n).await,
+        "oi_photos" => return openimages(client, root, p, label, false, n).await,
+        _ => {}
+    }
     let mut out: Vec<Item> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     fn push(out: &mut Vec<Item>, seen: &mut std::collections::HashSet<String>, it: Item) {
@@ -74,6 +90,7 @@ pub async fn fetch_list(client: &reqwest::Client, id: &str, n: usize) -> Result<
                         title: s(&a["title"]),
                         credit: format!("{} / Art Institute of Chicago (CC0)", s(&a["artist_display"]).lines().next().unwrap_or("")),
                         landing: format!("https://www.artic.edu/artworks/{}", a["id"].as_i64().unwrap_or(0)),
+                        rights: None,
                     });
                 }
                 if out.len() >= n { break; }
@@ -94,6 +111,7 @@ pub async fn fetch_list(client: &reqwest::Client, id: &str, n: usize) -> Result<
                         title: s(&a["title"]),
                         credit: format!("{who} / Cleveland Museum of Art (CC0)"),
                         landing: s(&a["url"]),
+                        rights: None,
                     });
                 }
                 if out.len() >= n { break; }
@@ -117,6 +135,7 @@ pub async fn fetch_list(client: &reqwest::Client, id: &str, n: usize) -> Result<
                         title: s(&o["title"]),
                         credit: format!("{} / The Metropolitan Museum of Art (CC0)", s(&o["artistDisplayName"])),
                         landing: s(&o["objectURL"]),
+                        rights: None,
                     });
                     if out.len() >= n { break; }
                 }
@@ -140,6 +159,7 @@ pub async fn fetch_list(client: &reqwest::Client, id: &str, n: usize) -> Result<
                         title: s(&d["title"]),
                         credit: format!("{who} / NASA (public domain)"),
                         landing: format!("https://images.nasa.gov/details/{nid}"),
+                        rights: None,
                     });
                 }
                 if out.len() >= n { break; }
@@ -165,6 +185,7 @@ pub async fn fetch_list(client: &reqwest::Client, id: &str, n: usize) -> Result<
                         title: s(&pg["title"]).trim_start_matches("File:").to_string(),
                         credit: format!("{artist} / Wikimedia Commons ({lic})"),
                         landing: s(&ii["descriptionurl"]),
+                        rights: None,
                     });
                 }
                 if out.len() >= n { break; }
@@ -187,6 +208,7 @@ pub async fn fetch_list(client: &reqwest::Client, id: &str, n: usize) -> Result<
                         title: s(&r["source"]["title"]),
                         credit: format!("Wellcome Collection ({})", if lic == "cc0" { "CC0" } else { "Public Domain Mark" }),
                         landing: format!("https://wellcomecollection.org/works/{}/images?id={}", s(&r["source"]["id"]), s(&r["id"])),
+                        rights: None,
                     });
                 }
                 if out.len() >= n { break; }
@@ -211,6 +233,7 @@ pub async fn fetch_list(client: &reqwest::Client, id: &str, n: usize) -> Result<
                         title,
                         credit: format!("{artist} / SMK Statens Museum for Kunst (public domain)"),
                         landing: s(&r["frontend_url"]),
+                        rights: None,
                     });
                 }
                 if out.len() >= n { break; }
@@ -243,4 +266,135 @@ fn strip_tags(h: &str) -> String {
         }
     }
     out.trim().to_string()
+}
+
+// ---------- 大きな注釈ファイルつきの源(COCO / Open Images) ----------
+
+/// engine/data/ 配下に初回だけダウンロード(進捗は Progress の total/done を MB で流用)
+async fn ensure_file(client: &reqwest::Client, root: &Path, rel: &str, url: &str, p: &Progress, label: &std::sync::Mutex<String>, what: &str) -> Result<PathBuf, String> {
+    use std::io::Write;
+    let path = root.join("engine/data").join(rel);
+    if path.exists() {
+        return Ok(path);
+    }
+    std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
+    *label.lock().unwrap() = format!("{what} を初回取得中");
+    let tmp = path.with_extension("part");
+    let mut resp = client.get(url).header("User-Agent", UA).send().await.map_err(|e| format!("{what} 取得失敗: {e}"))?
+        .error_for_status().map_err(|e| format!("{what} 取得失敗: {e}"))?;
+    let total = resp.content_length().unwrap_or(0);
+    p.total.store((total >> 20) as usize, Relaxed);
+    p.done.store(0, Relaxed);
+    let mut f = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
+    let mut got: u64 = 0;
+    while let Some(chunk) = resp.chunk().await.map_err(|e| format!("DL中断: {e}"))? {
+        f.write_all(&chunk).map_err(|e| e.to_string())?;
+        got += chunk.len() as u64;
+        p.done.store((got >> 20) as usize, Relaxed);
+    }
+    drop(f);
+    if total > 0 && got != total {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("{what} DLサイズ不一致({got}/{total})"));
+    }
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+    p.total.store(0, Relaxed);
+    p.done.store(0, Relaxed);
+    Ok(path)
+}
+
+/// 依存なしの乱択(xorshift・時刻シード)。毎回違う顔ぶれになれば十分
+fn shuffle<T>(v: &mut [T]) {
+    let mut x: u64 = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0x9E3779B97F4A7C15) | 1;
+    for i in (1..v.len()).rev() {
+        x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+        v.swap(i, (x % (i as u64 + 1)) as usize);
+    }
+}
+
+/// 引用符つきCSVの1行を分解(Title に , や " が入る Open Images 用)
+fn csv_fields(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut inq = false;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' if inq && chars.peek() == Some(&'"') => { cur.push('"'); chars.next(); }
+            '"' => inq = !inq,
+            ',' if !inq => { out.push(std::mem::take(&mut cur)); }
+            _ => cur.push(c),
+        }
+    }
+    out.push(cur);
+    out
+}
+
+/// COCO 2017 val: 注釈zipの captions_val2017.json(小さい)から画像一覧とライセンスを読み、CC BY 系だけ通す
+async fn coco(client: &reqwest::Client, root: &Path, p: &Progress, label: &std::sync::Mutex<String>, n: usize) -> Result<Vec<Item>, String> {
+    let z = ensure_file(client, root, "coco/annotations_trainval2017.zip",
+                        "http://images.cocodataset.org/annotations/annotations_trainval2017.zip", p, label, "COCO 注釈(253MB)").await?;
+    let json: Value = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        use std::io::Read;
+        let f = std::fs::File::open(&z).map_err(|e| e.to_string())?;
+        let mut ar = zip::ZipArchive::new(f).map_err(|e| e.to_string())?;
+        let mut e = ar.by_name("annotations/captions_val2017.json").map_err(|e| e.to_string())?;
+        let mut txt = String::new();
+        e.read_to_string(&mut txt).map_err(|e| e.to_string())?;
+        serde_json::from_str(&txt).map_err(|e| e.to_string())
+    }).await.map_err(|e| e.to_string())??;
+    // licenses: 1-3=CC NC系(除外) 4=CC BY 2.0 5=CC BY-SA 2.0 6=CC BY-ND 2.0(改変禁止・除外) 7=No known copyright restrictions 8=US Government Work
+    let lic: std::collections::HashMap<i64, String> = json["licenses"].as_array().map(|a| a.iter()
+        .filter_map(|l| Some((l["id"].as_i64()?, s(&l["name"])))).collect()).unwrap_or_default();
+    let rights_of = |id: i64| -> Option<&'static str> {
+        match id { 4 => Some("cc-by-2.0"), 5 => Some("cc-by-sa-2.0"), 7 => Some("no-known-restrictions"), 8 => Some("us-government"), _ => None }
+    };
+    let mut rows: Vec<Item> = json["images"].as_array().cloned().unwrap_or_default().into_iter().filter_map(|im| {
+        let lid = im["license"].as_i64()?;
+        let rights = rights_of(lid)?;
+        let url = s(&im["coco_url"]);
+        if url.is_empty() { return None; }
+        let flickr = s(&im["flickr_url"]);
+        Some(Item {
+            url,
+            title: s(&im["file_name"]),
+            credit: format!("Flickr {} (COCO val2017, {})", flickr, lic.get(&lid).cloned().unwrap_or_default()),
+            landing: if flickr.is_empty() { "https://cocodataset.org/".into() } else { flickr },
+            rights: Some(rights.to_string()),
+        })
+    }).collect();
+    shuffle(&mut rows);
+    rows.truncate(n);
+    Ok(rows)
+}
+
+/// Open Images validation(全て Flickr CC BY 2.0)。faces=true なら Human face(/m/0dzct) ラベルが付いた画像だけ
+async fn openimages(client: &reqwest::Client, root: &Path, p: &Progress, label: &std::sync::Mutex<String>, faces: bool, n: usize) -> Result<Vec<Item>, String> {
+    let rot = ensure_file(client, root, "openimages/validation-images-with-rotation.csv",
+                          "https://storage.googleapis.com/openimages/2018_04/validation/validation-images-with-rotation.csv", p, label, "Open Images 画像一覧(15MB)").await?;
+    let allowed: Option<std::collections::HashSet<String>> = if faces {
+        let lab = ensure_file(client, root, "openimages/validation-annotations-human-imagelabels-boxable.csv",
+                              "https://storage.googleapis.com/openimages/v5/validation-annotations-human-imagelabels-boxable.csv", p, label, "Open Images ラベル(11MB)").await?;
+        let txt = std::fs::read_to_string(&lab).map_err(|e| e.to_string())?;
+        Some(txt.lines().filter_map(|l| {
+            let f: Vec<&str> = l.split(',').collect();
+            (f.len() >= 4 && f[2] == "/m/0dzct" && f[3] == "1").then(|| f[0].to_string())
+        }).collect())
+    } else { None };
+    let txt = std::fs::read_to_string(&rot).map_err(|e| e.to_string())?;
+    let mut rows: Vec<Item> = txt.lines().skip(1).filter_map(|line| {
+        let f = csv_fields(line);
+        if f.len() < 8 || !f[4].contains("licenses/by/2.0") { return None; }
+        if let Some(a) = &allowed { if !a.contains(&f[0]) { return None; } }
+        Some(Item {
+            url: format!("https://open-images-dataset.s3.amazonaws.com/validation/{}.jpg", f[0]),
+            title: f[7].clone(),
+            credit: format!("{} / Flickr (CC BY 2.0) via Open Images", f[6]),
+            landing: f[3].clone(),
+            rights: Some("cc-by-2.0".into()),
+        })
+    }).collect();
+    shuffle(&mut rows);
+    rows.truncate(n);
+    Ok(rows)
 }

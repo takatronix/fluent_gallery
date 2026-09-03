@@ -134,7 +134,8 @@ node tests/ui_regression.js   # 単体実行(サーバ稼働中に)
 GET  /api/images?limit&offset&source&q&tag&origin&...   一覧/検索(qはキャプションFTS+タグ)
 GET  /api/facets                                        絞り込み候補と件数
 POST /api/ingest {path,source,move}                     収蔵(ジョブ)
-GET  /api/samples / POST /api/samples/{id}?n=100          権利クリアなサンプル取得(CC0/PD: Commons, Met, CMA, ARTIC, NASA, Wellcome, SMK)
+GET  /api/samples / POST /api/samples/{id}?n=100          権利クリアなサンプル取得(CC0/PD/CC BY: Commons, Met, CMA, ARTIC, NASA, Wellcome, SMK, COCO(CC BY系のみ), Open Images 顔/実写)
+POST /api/ingest/url {url,source?,max?}                  指定ページ(または画像URL)の画像を取り込む。YouTube/X/Instagram等は拒否、内部ネットワーク拒否
 POST /api/crawl  {album,n,minutes}                      AIフォルダの収集を開始
 POST /api/enrich {backend,n}                            VLM属性付け
 POST /api/faces/enroll {album,person,shas,point}        顔IDの人物登録(pointで顔を指定)

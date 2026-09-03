@@ -24,6 +24,7 @@ fn data_dir() -> PathBuf {
 fn main() {
     let port: u16 = std::env::var("FG_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8790);
     tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init()) // 取得元ページ等の外部リンクを既定ブラウザで開く(WKWebViewは新規窓を黙って捨てる)
         .manage(Server(Mutex::new(None)))
         .setup(move |app| {
             let data = data_dir();
@@ -51,7 +52,16 @@ fn main() {
                 }
             }
             let url = format!("http://127.0.0.1:{port}/").parse().unwrap();
+            let port_s = port.to_string();
             WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
+                // 窓の中で外部サイトへ遷移しようとしたら既定ブラウザへ逃がす(UIは 127.0.0.1 だけ)
+                .on_navigation(move |u| {
+                    let local = matches!(u.host_str(), Some("127.0.0.1") | Some("localhost")) && u.port().map(|p| p.to_string()).as_deref() == Some(port_s.as_str());
+                    if !local && matches!(u.scheme(), "http" | "https") {
+                        let _ = tauri_plugin_opener::open_url(u.as_str(), None::<&str>);
+                    }
+                    local
+                })
                 .title("Fluent Gallery")
                 .inner_size(1440.0, 920.0)
                 .min_inner_size(800.0, 500.0)

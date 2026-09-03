@@ -18,6 +18,7 @@ reqwest = { version = "0.12", features = ["json"] }
 base64 = "0.22"
 llama-cpp-2 = { version = "0.1.155" }
 ort = "2.0.0-rc.13"
+zip = { version = "2", default-features = false, features = ["deflate"] } # COCO注釈zipの読み出し(サンプル取得)
 
 [features]
 # 既定 = 現行の Linux/CUDA 構成と同じ。販売ビルド例: cargo build --release --no-default-features --features metal
