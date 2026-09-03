@@ -134,6 +134,7 @@ node tests/ui_regression.js   # 単体実行(サーバ稼働中に)
 GET  /api/images?limit&offset&source&q&tag&origin&...   一覧/検索(qはキャプションFTS+タグ)
 GET  /api/facets                                        絞り込み候補と件数
 POST /api/ingest {path,source,move}                     収蔵(ジョブ)
+GET  /api/samples / POST /api/samples/{id}?n=100          権利クリアなサンプル取得(CC0/PD: Commons, Met, CMA, ARTIC, NASA, Wellcome, SMK)
 POST /api/crawl  {album,n,minutes}                      AIフォルダの収集を開始
 POST /api/enrich {backend,n}                            VLM属性付け
 POST /api/faces/enroll {album,person,shas,point}        顔IDの人物登録(pointで顔を指定)

@@ -9,6 +9,7 @@ mod llm;
 mod media;
 #[cfg(feature = "faceid")]
 mod faceid;
+mod samples;
 mod onnx;
 mod seg;
 mod store;
@@ -2150,43 +2151,81 @@ async fn api_ingest_status(State(app): S) -> Json<Value> {
     }))
 }
 
-// プリセット(定番データの一括収蔵)
-fn presets() -> Vec<(&'static str, &'static str, &'static str, &'static str)> {
-    vec![
-        ("coco_val2017", "~/qwen-anime/data/val2017", "real", "🌍 COCO val2017 (実写5,000枚)"),
-        ("coco_train2017", "~/qwen-anime/data/train2017", "real", "🌍 COCO train2017 (実写118,287枚·重い)"),
-        ("places_indoor", "~/qwen-anime/data/places_indoor", "real", "🛋️ Places365 室内 (実写8,300枚)"),
-        ("collected", "~/qwen-anime/data/collected", "real", "🌐 Web収集 (実写6,006枚)"),
-        ("faces_synth", "~/qwen-anime/data/faces_synth", "synthetic", "🧑 合成顔 (生成3,000枚)"),
-        ("scenes_synth", "~/qwen-anime/data/scenes_synth", "synthetic", "🏠 合成室内 (生成3,000枚)"),
-        ("webcam_captured", "~/qwen-anime/data/webcam_captured", "real", "📷 部屋キャプチャ (実写)"),
-    ]
-}
-
-async fn api_presets() -> Json<Value> {
-    let out: Vec<Value> = presets()
-        .iter()
-        .map(|(id, path, origin, label)| {
-            let d = PathBuf::from(shellexpand(path));
-            json!({"id": id, "label": label, "origin": origin, "available": d.exists(),
-                   "n": std::fs::read_dir(&d).map(|r| r.count()).unwrap_or(0)})
-        })
-        .collect();
+// サンプルデータ(権利クリアな公開コレクションからの取得。旧プリセットの置き換え)
+async fn api_samples(State(app): S) -> Json<Value> {
+    let have: std::collections::HashMap<String, i64> = {
+        let db = app.db.lock().unwrap();
+        db.prepare("SELECT source, COUNT(*) FROM images WHERE source LIKE 'sample:%' GROUP BY source")
+            .and_then(|mut st| st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))).map(|rs| rs.flatten().collect()))
+            .unwrap_or_default()
+    };
+    let out: Vec<Value> = samples::sets().iter().map(|x| json!({
+        "id": x.id, "label": x.label, "license": x.license, "license_label": x.license_label, "note": x.note,
+        "have": have.get(&format!("sample:{}", x.id)).copied().unwrap_or(0),
+    })).collect();
     Json(json!(out))
 }
 
-async fn api_preset_ingest(State(app): S, AxPath(pid): AxPath<String>) -> impl IntoResponse {
-    let Some((id, path, origin, _)) = presets().into_iter().find(|(id, ..)| *id == pid) else {
-        return (StatusCode::NOT_FOUND, Json(json!({"detail": pid}))).into_response();
+#[derive(Deserialize)]
+struct SamplesQ { #[serde(default = "d_sample_n")] n: usize }
+fn d_sample_n() -> usize { 100 }
+
+/// サンプル取得ジョブ: 候補一覧→6並列DL→収蔵。進捗は ingest の器(UIの「取込」行)に出す
+async fn api_sample_fetch(State(app): S, AxPath(id): AxPath<String>, axum::extract::Query(q): axum::extract::Query<SamplesQ>) -> impl IntoResponse {
+    let Some(set) = samples::sets().into_iter().find(|x| x.id == id) else {
+        return (StatusCode::NOT_FOUND, Json(json!({"detail": id}))).into_response();
     };
-    let d = PathBuf::from(shellexpand(path));
-    if !d.exists() {
-        return (StatusCode::NOT_FOUND, Json(json!({"detail": format!("{path} がまだありません")}))).into_response();
+    if app.ingest.alive.load(Relaxed) {
+        return (StatusCode::CONFLICT, Json(json!({"detail": "収蔵ジョブが実行中です"}))).into_response();
     }
-    match spawn_ingest(app, d, format!("preset:{id}"), origin.into(), false) {
-        Ok(()) => Json(json!({"ok": true, "job": "ingest"})).into_response(),
-        Err(e) => (StatusCode::CONFLICT, Json(json!({"detail": e}))).into_response(),
+    let n = q.n.clamp(1, 1000);
+    let p = app.ingest.clone();
+    p.alive.store(true, Relaxed);
+    for a in [&p.total, &p.done, &p.added, &p.dup, &p.bad] {
+        a.store(0, Relaxed);
     }
+    *app.ingest_label.lock().unwrap() = format!("サンプル: {}", set.label.split_once(' ').map(|x| x.1).unwrap_or(set.label));
+    let (sid, license, origin) = (set.id.to_string(), set.license.to_string(), set.origin.to_string());
+    tokio::spawn(async move {
+        let list = match samples::fetch_list(&app.http, &sid, n).await {
+            Ok(l) => l,
+            Err(e) => { println!("📥 サンプル一覧取得失敗({sid}): {e}"); p.alive.store(false, Relaxed); return; }
+        };
+        p.total.store(list.len(), Relaxed);
+        let sem = Arc::new(tokio::sync::Semaphore::new(6));
+        let mut js = tokio::task::JoinSet::new();
+        for it in list {
+            let (sem, client, root, sid, license, origin, p) = (sem.clone(), app.http.clone(), app.root.clone(), sid.clone(), license.clone(), origin.clone(), p.clone());
+            js.spawn(async move {
+                let _g = sem.acquire().await;
+                // 画像配信CDNはボット扱いで403にすることがある(シカゴ美術館のIIIFが実例)→ブラウザ相当のヘッダで取る
+                let r = client.get(&it.url)
+                    .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15 fluent_gallery/0.2")
+                    .header("Accept", "image/avif,image/webp,image/png,image/jpeg,image/*;q=0.8,*/*;q=0.5")
+                    .header("Referer", it.landing.clone())
+                    .timeout(std::time::Duration::from_secs(60)).send().await
+                    .and_then(|r| r.error_for_status());
+                let data = match r { Ok(r) => r.bytes().await.ok(), Err(_) => None };
+                let Some(data) = data.filter(|d| d.len() > 4096) else { p.bad.fetch_add(1, Relaxed); p.done.fetch_add(1, Relaxed); return; };
+                let ext = if data.starts_with(b"\x89PNG") { "png" } else { "jpg" };
+                let extra = json!({
+                    "rights": license, "origin": origin, "credit": it.credit,
+                    "crawl": {"url": it.url, "landing": it.landing, "title": it.title, "engine": format!("sample:{sid}"),
+                              "query": "", "album": "", "tags": [format!("sample:{sid}")]},
+                });
+                let res = tokio::task::spawn_blocking(move || {
+                    let db = app.db.lock().unwrap();
+                    store::ingest_bytes(&root, &db, &data, ext, &format!("sample:{sid}"), &extra).map(|_| ())
+                }).await.unwrap_or(Err("bad"));
+                match res { Ok(()) => p.added.fetch_add(1, Relaxed), Err("dup") => p.dup.fetch_add(1, Relaxed), Err(_) => p.bad.fetch_add(1, Relaxed) };
+                p.done.fetch_add(1, Relaxed);
+            });
+        }
+        while js.join_next().await.is_some() {}
+        println!("📥 サンプル {sid}: +{} (重複{} 失敗{})", p.added.load(Relaxed), p.dup.load(Relaxed), p.bad.load(Relaxed));
+        p.alive.store(false, Relaxed);
+    });
+    Json(json!({"ok": true, "job": "ingest", "n": n})).into_response()
 }
 
 // データセット払い出し
@@ -2710,8 +2749,8 @@ async fn main() {
         .route("/api/upload", post(api_upload).layer(axum::extract::DefaultBodyLimit::max(2 << 30)))
         .route("/api/ingest", post(api_ingest))
         .route("/api/ingest/status", get(api_ingest_status))
-        .route("/api/presets", get(api_presets))
-        .route("/api/presets/{pid}", post(api_preset_ingest))
+        .route("/api/samples", get(api_samples))
+        .route("/api/samples/{id}", post(api_sample_fetch))
         .route("/api/datasets", post(api_dataset_make).get(api_datasets))
         .route("/api/datasets/{name}", delete(api_dataset_del))
         .route("/api/datasets/{name}/shas", get(api_dataset_shas))

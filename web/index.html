@@ -398,7 +398,7 @@
   <div id="ingestpanel">
     <div style="display:flex; gap:8px; align-items:center; margin-bottom:10px">
       <span id="ing_ico"></span><b style="color:var(--tx)">取り込み</b>
-      <span class="sub">サーバ上のフォルダ、または定番プリセット</span>
+      <span class="sub">フォルダ、または権利クリアなサンプルデータ(CC0/パブリックドメインの公開コレクションから取得)</span>
       <span class="sp"></span>
       <button class="ghost" onclick="closeIngest()">閉じる</button>
     </div>
@@ -2987,18 +2987,25 @@ async function ingest() {
     closeIngest();
   } catch (e) { $('ing_msg').textContent = '❌ ' + e.message; }
 }
+// サンプルデータ: 権利クリア(CC0/パブリックドメイン)な公開コレクションのAPIから取得して収蔵(旧プリセットの置き換え)
 async function loadPresets() {
   try {
-    const ps = await j('/api/presets');
-    $('presets').innerHTML = ps.map(p => `<button ${p.available ? '' : 'disabled style="opacity:.35"'}
-      onclick="ingestPreset('${p.id}', this)">${esc(p.label.replace(/^[^ ]+ /, ''))}</button>`).join('');
+    const ps = await j('/api/samples');
+    $('presets').innerHTML = `<div style="display:flex; align-items:center; gap:6px; width:100%; font-size:11px; color:var(--faint)">
+        1回に <select id="sample_n" style="font-size:11px"><option>30</option><option selected>100</option><option>300</option></select> 枚
+        · 出典とライセンスは各画像のサイドカーに記録されます</div>` +
+      ps.map(p => `<button onclick="fetchSample('${p.id}', this)" title="${esc(p.note)}" style="display:flex; gap:6px; align-items:center">
+        ${esc(p.label)} <span style="font-size:10px; padding:1px 5px; border-radius:99px; border:1px solid #3a7d5a; color:#6ee7a0">${esc(p.license_label)}</span>
+        ${p.have ? `<span style="font-size:10px; color:var(--faint)">${p.have}枚</span>` : ''}</button>`).join('');
   } catch (e) {}
 }
-async function ingestPreset(id, btn) {
-  btn.disabled = true; btn.textContent = '収蔵開始…';
+async function fetchSample(id, btn) {
+  const n = $('sample_n')?.value || 100;
+  btn.disabled = true;
   try {
-    await j('/api/presets/' + id, {method: 'POST'});
-    toast('収蔵を始めました — 触りながら待てます');
+    await j(`/api/samples/${id}?n=${n}`, {method: 'POST'});
+    toast(`${n}枚の取得を始めました — 進捗はサイドバーの「取込」に出ます`);
+    closeIngest();
   } catch (e) { toast('❌ ' + e.message); btn.disabled = false; }
 }
 

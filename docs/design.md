@@ -57,7 +57,7 @@ fluent_gallery (Rust, axum, 単一バイナリ, :8790)
 ```
 
 ## API契約(Python版で実証済み、Rustが同一契約で置換)
-収蔵: `POST /api/ingest {path,source,origin?,move?}` / プリセット: `GET/POST /api/presets(/{id})`
+収蔵: `POST /api/ingest {path,source,origin?,move?}` / サンプル取得(権利クリアな公開コレクション): `GET /api/samples`, `POST /api/samples/{id}?n=`(旧 presets は廃止 2026-09-04)
 検索: `GET /api/images?q&tag&source&origin&vlm_&scene&subject&style&nsfw&min_quality&limit&offset`
 　　  `GET /api/facets` `GET /api/meta/{sha1}` `GET /img/{sha1}` `GET /thumb/{sha1}`
 属性: `POST /api/enrich {backend,filter…}` `GET /api/enrich/status` `POST /api/enrich/stop`
