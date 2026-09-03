@@ -48,7 +48,10 @@ fn now_secs() -> u64 {
 
 impl App {
     fn touch_ui(&self) {
-        self.ui_hot.store(now_secs(), Relaxed);
+        let t = now_secs();
+        self.ui_hot.store(t, Relaxed);
+        self.crawl.ui_hot.store(t, Relaxed); // 収集の内蔵VLM判定も閲覧中は道を譲る(CPU16コア占有でUI窒息の再発防止)
+        self.enrich.user_priority(10); // 属性付けバックフィルは1件ごとに譲る(既存機構に配線)
     }
     fn ui_recent(&self, secs: u64) -> bool {
         now_secs().saturating_sub(self.ui_hot.load(Relaxed)) < secs

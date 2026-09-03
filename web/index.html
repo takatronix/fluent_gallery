@@ -1159,17 +1159,62 @@ async function loadAlbums() {
 let seenMap = JSON.parse(localStorage.getItem('fg_seen') || '{}');
 let prevSeen = 0;
 function seenKey(a) { return a ? 'src:' + (a.criteria?.source || a.name) : 'src:' + (loc.criteria?.source || loc.key || ''); }
-// ライトボックスの表示サイズは常に「ビューポートへアスペクトフィット」1本(2026-09-03確定)。
-// 小さい原本も拡大して見せる(250px原本が小さく出て「壊れてる?」となった件)。編集レンダは自然寸法。
-function lbFit(nw, nh) {
-  const img = $('lbimg');
-  if (!nw || !nh) { img.removeAttribute('width'); img.removeAttribute('height'); return; }
-  const ar = nw / nh;
-  let bw = Math.min(innerWidth * .94, innerHeight * .74 * ar), bh = bw / ar;
-  if (bh > innerHeight * .74) { bh = innerHeight * .74; bw = bh * ar; }
-  img.width = Math.round(bw);
-  img.height = Math.round(bh);
-}
+// ================= ライトボックス表示の単一責任者(状態機械 2026-09-03全面整理) =================
+// img#lbimg の src と表示サイズを書けるのはこのモジュールだけ。他は絶対に触らない(触ると今日の退行祭りが再演される)。
+// 状態: gen(世代=画像が変わるたび++、遅延応答は世代不一致で全部捨てる) / tier(手元の最良: thumb→pv→full、render=編集焼き)
+// サイズ規則: 通常=ビューポートへアスペクトフィット(小原本も拡大)、編集レンダ=自然寸法(クロップで比率が変わるため)
+const lbView = {
+  gen: 0, sha: null, tier: null, edited: false,
+  // 表示箱。nw/nh=0で解除(自然寸法モード)
+  box(nw, nh) {
+    const img = $('lbimg');
+    if (!nw || !nh) { img.removeAttribute('width'); img.removeAttribute('height'); return; }
+    const ar = nw / nh;
+    let bw = Math.min(innerWidth * .94, innerHeight * .74 * ar), bh = bw / ar;
+    if (bh > innerHeight * .74) { bh = innerHeight * .74; bw = bh * ar; }
+    img.width = Math.round(bw);
+    img.height = Math.round(bh);
+  },
+  // 唯一のsrc書き込み口。デコード完了後に差し替える=空白フレームを出さない
+  async apply(gen, url, tier, nw, nh) {
+    if (gen !== this.gen) return;
+    const pre = new Image();
+    pre.src = url;
+    try { if (pre.decode) await pre.decode(); } catch (e) {}
+    if (gen !== this.gen) return;
+    const img = $('lbimg');
+    this.box(nw === undefined ? pre.naturalWidth : nw, nh === undefined ? pre.naturalHeight : nh);
+    img.dataset.tier = tier;
+    this.tier = tier;
+    img.src = url;
+  },
+  // 新しい画像: 箱は最初から最終サイズで確保し、サムネ→プレビュー→原寸を届いた順に同じ箱へ流し込む
+  show(it, dir, bust) {
+    const gen = ++this.gen;
+    this.sha = it.sha1; this.edited = false; this.tier = null;
+    $('lbimg').dataset.tier = '';
+    this.box(it.w, it.h);
+    const pvUrl = '/preview/' + it.sha1 + (bust ? '?t=' + Date.now() : '');
+    const probe = new Image();
+    probe.src = pvUrl;
+    if (probe.complete) this.apply(gen, pvUrl, 'pv');
+    else {
+      // preview未着の間は正しいサムネ(開き直し=即/送り=150ms猶予: 先読みhitなら無傷)
+      const t = setTimeout(() => { if (gen === this.gen && this.tier === null) this.apply(gen, '/thumb/' + it.sha1, 'thumb', it.w, it.h); },
+                           dir ? 150 : 0);
+      probe.onload = () => { clearTimeout(t); this.apply(gen, pvUrl, 'pv'); };
+      probe.onerror = () => { clearTimeout(t); this.apply(gen, '/thumb/' + it.sha1, 'thumb', it.w, it.h); };
+    }
+    const full = new Image();
+    full.src = '/img/' + it.sha1;
+    full.onload = () => { if (gen === this.gen && !this.edited) this.apply(gen, full.src, 'full'); };
+  },
+  // 編集/マスク焼きレンダ(自然寸法)
+  render(url) {
+    this.edited = true;
+    return this.apply(this.gen, url, 'render', 0, 0);
+  },
+};
 let rgen = 0; // reload世代: ナビ連打時に遅い古の応答が新しい場所を上書きする追い越し事故の防止
 async function reload(flip) {
   const g = ++rgen;
@@ -1760,59 +1805,32 @@ function lbMorphOpen(sha) {
   });
   document.body.appendChild(ghost);
   img.style.opacity = '0';
+  // このモジュールはサイズを一切書かない(箱はlbView.showが最初から確保済み)。
+  // 役割は「セル→箱の実測位置へゴーストが飛ぶ→本体が描ける状態になったら受け渡す」の演出だけ
   requestAnimationFrame(() => {
-    // 第1段: サムネのアスペクト比で箱(width/height属性)を先に確保し、**実レイアウトの着地点を実測**して飛ぶ。
-    // キャッシュ済み画像はsettleが先に走る→その後に属性を置くと誰も外さず残り、
-    // 次の画像が古いアスペクトに引き伸ばされる(削除→次表示で崩れる実害 2026-09-03)。settle済なら何もしない
-    if (landed) return;
-    flown = true;
-    const ar = cell.naturalWidth && cell.naturalHeight ? cell.naturalWidth / cell.naturalHeight : r.width / r.height;
-    let w = Math.min(innerWidth * .94, innerHeight * .74 * ar), h = w / ar;
-    if (h > innerHeight * .74) { h = innerHeight * .74; w = h * ar; }
-    img.width = Math.round(w);
-    img.height = Math.round(h);
     const t0 = img.getBoundingClientRect();
-    Object.assign(ghost.style, {left: t0.left + 'px', top: t0.top + 'px',
+    if (t0.width) Object.assign(ghost.style, {left: t0.left + 'px', top: t0.top + 'px',
                                 width: t0.width + 'px', height: t0.height + 'px', borderRadius: '8px'});
   });
-  // 第2段: 実画像のロード完了後に「実測の位置」へ滑らかに着地継続→そこで初めて本体を見せる
-  // (以前は見積もり位置で本体を出していたので最後にカクッと飛んでいた)
-  let landed = false, flown = false;
-  const settle = () => {
-    if (landed) return;
-    // サムネ即差し込み(チラつき対策)でloadが飛行開始前に発火する。飛行(第1段rAF)より先に
-    // 着地すると拡大アニメごと消える(「小さく移動→パッと拡大」退行 2026-09-03)→1フレーム譲る
-    if (!flown) { requestAnimationFrame(settle); return; }
-    landed = true;
-    // フィット箱を実画像の寸法で測り直す(常にビューポートへアスペクトフィット)
-    if (img.naturalWidth) lbFit(img.naturalWidth, img.naturalHeight);
-    requestAnimationFrame(() => {
-      const t = img.getBoundingClientRect();
-      if (t.width) Object.assign(ghost.style, {
-        transition: 'all .2s cubic-bezier(.2,.8,.3,1)',
-        left: t.left + 'px', top: t.top + 'px', width: t.width + 'px', height: t.height + 'px',
-      });
-      setTimeout(() => {
-        // 本体のデコード完了を待ってから見せる+描画された次フレームまでゴーストを重ねる
-        // (どちらか欠けると受け渡しの瞬間に1フレーム抜けて「一瞬消える」)
-        const reveal = () => {
-          img.style.opacity = ''; img.style.animation = '';
-          requestAnimationFrame(() => requestAnimationFrame(() => ghost.remove()));
-        };
-        (img.decode ? img.decode().catch(() => {}) : Promise.resolve()).then(reveal);
-      }, 220);
-    });
+  let done = false;
+  const reveal = () => {
+    if (done) return;
+    done = true;
+    // 本体のデコード完了を待ってから見せ、描画された次フレームまでゴーストを重ねる
+    // (どちらか欠けると受け渡しの瞬間に1フレーム抜けて「一瞬消える」)
+    const fin = () => {
+      img.style.opacity = ''; img.style.animation = '';
+      requestAnimationFrame(() => requestAnimationFrame(() => ghost.remove()));
+    };
+    (img.decode ? img.decode().catch(() => {}) : Promise.resolve()).then(fin);
   };
-  // 着地は「本画像(preview以上)」のloadを待つ。仮サムネ(tier=thumb)のloadでは着地しない
-  // (仮サムネの寸法で着地すると箱が縮んで「小さく移動→パッと拡大」になる)
-  const onload = () => {
-    if (img.dataset.tier === 'thumb') return;
-    img.removeEventListener('load', onload);
-    settle();
-  };
-  if (img.complete && img.naturalWidth && img.src.includes(sha) && img.dataset.tier !== 'thumb') settle();
-  else img.addEventListener('load', onload);
-  setTimeout(settle, 700); // 保険: previewが遅くても仮サムネのまま出す(swap時に本寸法へ)
+  // 中身が入った(lbViewがtierを刻んだ)のを見届けてから、飛行時間ぶん待って受け渡し
+  (function wait() {
+    if (done) return;
+    if (img.dataset.tier) setTimeout(reveal, 240);
+    else requestAnimationFrame(wait);
+  })();
+  setTimeout(reveal, 900); // 保険: 読み込みが遅くても必ず出す
 }
 function closeLb() {
   const lb = $('lb');
@@ -1858,44 +1876,10 @@ async function lbShow(i, dir) {
   { const fb = document.getElementById('lbfacebtn'); if (fb) fb.innerHTML = ic('bot', 13) + ' 顔ID'; } // ボタン表記も画像単位で戻す
   lbIdx = (i + items.length) % items.length;
   const sha = items[lbIdx].sha1;
-  const img = $('lbimg');
-  // 前の画像の仮箱(width/height属性)を必ず外す — 残ると次の画像が古いアスペクトに歪む
-  // (削除→次表示で崩れる既知の罠。settleの条件スキップで再発させた反省 2026-09-03)
-  img.removeAttribute('width');
-  img.removeAttribute('height');
   lbMeta = null; edReset(); zReset(); $('edcompare').style.display = 'none'; edHist([]); lbKeepBtn(); lbSelBtn();
   $('lbinfo').style.display = 'none';
   $('lbsrcbtn').style.display = 'none';
-  const pv = new Image();
-  pv.src = '/preview/' + sha;
-  // <img>には直前に見ていた画像のsrcが残っている。preview生成待ちの間それが見えると
-  // 「別フォルダの前の画像が出る」「削除したのに消えない」事故になる(2026-09-03報告×2)。
-  // 開き直しは即・矢印/削除送りは150ms猶予(先読みhitなら無傷)で、正しいサムネへ差し替える。
-  clearTimeout(lbShow._grace);
-  if (!pv.complete) {
-    const place = () => {
-      if (items[lbIdx]?.sha1 !== sha || pv.complete) return;
-      // 仮サムネでも「最終表示サイズの箱」を先に確保してから見せる(常に最適サイズの原則)。
-      // 箱なしだとサムネ原寸(360px)の小さい表示のまま止まって見える(送りで小画像化の退行 2026-09-03)
-      const it2 = items[lbIdx];
-      lbFit(it2.w, it2.h);
-      img.dataset.tier = 'thumb'; // 仮画像の印(開くアニメの着地判定はこれを待つ。swap時に箱は外れる)
-      img.src = '/thumb/' + sha;
-    };
-    if (!dir) place(); else lbShow._grace = setTimeout(place, 150);
-  }
-  const swap = () => {
-    if (items[lbIdx]?.sha1 !== sha) return;
-    clearTimeout(lbShow._grace);
-    img.dataset.tier = 'pv';
-    lbFit(pv.naturalWidth, pv.naturalHeight); // 常にビューポートへフィット(小原本も拡大)
-    img.src = pv.src;
-    if (dir) img.animate([{transform: `translateX(${dir * 40}px)`, opacity: .3}, {transform: 'none', opacity: 1}],
-                         {duration: 220, easing: 'cubic-bezier(.2,.9,.3,1)'});
-  };
-  // decode()を待ってからsrc差し替え=表示中imgのデコード空白フレーム(チラつき)を出さない
-  const swapDecoded = () => (pv.decode ? pv.decode().catch(() => {}) : Promise.resolve()).then(swap);
-  if (pv.complete) swapDecoded(); else { pv.onload = swapDecoded; pv.onerror = swap; }
+  lbView.show(items[lbIdx], dir); // 表示はここに全部任せる(src/サイズを他で触らない)
   [1, -1].forEach(d => { const n = items[(lbIdx + d + items.length) % items.length];
     if (n) new Image().src = '/preview/' + n.sha1; });
   $('lbmeta').innerHTML = `${lbIdx + 1} / ${items.length}`;
@@ -1910,15 +1894,10 @@ async function lbShow(i, dir) {
     $('lbsegbtn').classList.toggle('on', lbSegOn && hasSeg);
     $('segfix').style.display = lbSegOn && hasSeg ? 'flex' : 'none';
     $('lbsegbtn').style.display = hasSeg ? '' : 'none';
-    // 編集レンダ/マスク焼きはアスペクトが変わり得るのでフィット箱を外して自然寸法で
-    if (lbSegOn && hasSeg) { lbFit(0, 0); img.src = lbUrl(sha, 1600); }
+    // 編集レンダ/マスク焼きは自然寸法モードでlbViewへ(原寸昇格はlbView.showが担当済み)
+    if (lbSegOn && hasSeg) lbView.render(lbUrl(sha, 1600));
     edHist(eds);
-    if (eds.length) { lbFit(0, 0); img.src = lbUrl(sha, 1600); }
-    else {
-      const full = new Image(); full.src = '/img/' + sha;
-      full.onload = () => (full.decode ? full.decode().catch(() => {}) : Promise.resolve())
-        .then(() => { if (items[lbIdx]?.sha1 === sha && !(lbMeta?.edits || []).length) img.src = full.src; });
-    }
+    if (eds.length) lbView.render(lbUrl(sha, 1600));
     // 情報カード: 解像度/フォーマット/ライセンス/取得元(常時表示)
     {
       let src = `${esc(m.source || '不明')}`;
@@ -2163,10 +2142,10 @@ async function edMutate(body) {
     $('edcompare').style.display = r.edits.length ? '' : 'none';
     { // レンダ完成+デコード後に差し替え(直接src交換だと生成待ちの間imgが幅0に潰れて「消えた」ように見える)
       const url = r.edits.length ? lbUrl(sha, 1600) : '/preview/' + sha + '?t=' + Date.now();
-      const nw = new Image(); nw.src = url;
-      const apply = () => { if (items[lbIdx]?.sha1 === sha) { lbFit(0, 0); $('lbimg').src = url; } };
-      nw.onload = () => (nw.decode ? nw.decode().catch(() => {}) : Promise.resolve()).then(apply);
-      nw.onerror = apply;
+      if (items[lbIdx]?.sha1 === sha) {
+        if (r.edits.length) lbView.render(url);
+        else lbView.show(items[lbIdx], 0, true); // 編集全解除→通常表示へ(キャッシュバスタ付き)
+      }
     }
     // グリッドのサムネも編集後の見た目に差し替え(サーバの焼き直しを少し待つ)
     const it = items.find(x => x.sha1 === sha);

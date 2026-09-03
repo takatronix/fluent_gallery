@@ -42,6 +42,18 @@ pub struct CrawlState {
     pub utok: AtomicUsize,        // 実測トークン数(Claude usage: input+output)
     pub recent: Mutex<Vec<Value>>, // 直近の検査結果ストリップ [{ok, r(sha|uk), why}] 最大14
     pub next_query: Mutex<String>, // クエリパイプラインが先読み中の次クエリ(空=先読みなし)
+    pub ui_hot: std::sync::atomic::AtomicU64, // 最後にUIが画像/一覧を触ったunix秒(内蔵VLM判定の遠慮判断)
+}
+
+impl CrawlState {
+    /// 直近secs秒以内にユーザーがUIを触ったか(内蔵VLM判定=CPU16コア級はこの間パースする)
+    pub fn ui_recent(&self, secs: u64) -> bool {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        now.saturating_sub(self.ui_hot.load(Relaxed)) < secs
+    }
 }
 
 impl CrawlState {
@@ -1383,6 +1395,9 @@ pub async fn run(
                                 }
                                 None => {
                                     enrich_st.user_priority(10);
+                                    while st.ui_recent(8) && !st.stop.load(Relaxed) {
+                                        tokio::time::sleep(std::time::Duration::from_secs(1)).await; // 閲覧中は譲る
+                                    }
                                     judge_builtin(&client, &img, &goal, &keywords).await.map(|(m, qq)| (m, qq, 0.0, 0u64))
                                 }
                             };
@@ -1588,6 +1603,12 @@ pub async fn run(
                 let use_claude = boost_key.is_some() && boost_live(&st);
                 if !use_claude && !passed.is_empty() {
                     enrich_st.user_priority(20); // バックフィルにチャンク分まとめて道を譲らせる
+                    // 内蔵VLM判定はCPUを全部食う。閲覧中(直近8秒)はパースしてUIを窒息させない
+                    // (2026-09-03: IVE収集の内蔵フォールバックでllamaが16コア占有→グループ切替不能の実害)
+                    while st.ui_recent(8) && !st.stop.load(Relaxed) {
+                        set_last("閲覧中はAI判定を一時停止(道を譲っています)…".into());
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    }
                 }
                 let mut judge_tasks = vec![];
                 for (i, (_c, _data, img, _uk, _ph, _fw)) in passed.iter().enumerate() {
