@@ -1037,6 +1037,22 @@ function ctxItems(row, kind, key) {
     ...(kind === 'group' ? [{icon: 'plus', label: 'この中に新規フォルダ', run: () => newInFolder(key)}] : []),
     ...(inGroup ? [toTop] : []),
   ];
+  if (kind === 'image') { // サムネ/拡大画像の右クリック(ブラウザの「画像を保存」の代わり+よく使う操作)
+    const it = items.find(x => x.sha1 === key) || {sha1: key};
+    const inSel = sel.has(key);
+    const dl = () => startDownload(`/dl/${key}/${encodeURIComponent(key.slice(0, 12) + '.' + (it.ext || 'jpg'))}`);
+    return [
+      {icon: 'img', label: '開く', run: () => openLbSha(key)},
+      {icon: 'upload', label: '原本を保存', run: dl},
+      {icon: 'box', label: sel.size > 1 && inSel ? `選択${sel.size}枚をzipで保存` : 'この1枚をzipで保存(サイドカー付き)',
+       run: () => exportZip(sel.size > 1 && inSel ? [...sel] : [key], sel.size > 1 && inSel ? `選択${sel.size}枚` : key.slice(0, 12))},
+      {icon: 'star', label: it.keep ? 'お気に入りを外す' : 'お気に入り', run: () => { const b = document.querySelector(`#c_${key} .badge`); if (b) cellKeep(key, b); else setKeep([key], !it.keep).then(() => { it.keep = it.keep ? 0 : 1; }); }},
+      {icon: 'check', label: inSel ? '選択から外す' : '選択に加える', run: () => { setSel(key, !inSel); drawSelbar(); }},
+      {icon: 'search', label: '似た画像のフォルダを作る', run: () => { openLbSha(key); setTimeout(simFolder, 80); }},
+      {icon: 'globe', label: '元ページを開く', run: async () => { try { const m = await j('/api/meta/' + key); const u = m.crawl?.landing || m.crawl?.url; if (u) window.open(u, '_blank', 'noopener'); else toast('取得元の記録がありません(ローカル取込)'); } catch (e) { toast('❌ ' + e.message); } }},
+      {icon: 'trash', label: 'ゴミ箱へ(30日は戻せる)', danger: true, run: () => trashShas([key])},
+    ];
+  }
   if (kind === 'source') return [
     {icon: 'globe', label: '開く', run: () => go({type: 'source', key, criteria: {source: key}})},
     {icon: 'box', label: 'zipで書き出し', run: () => exportCriteria({source: key}, key.replace(/^[a-z]+:/, ''))},
@@ -1686,7 +1702,7 @@ function cellHtml(it) {
     ? `/render/${it.sha1}?w=${big ? 1080 : 360}&seg=1&v=${it.erev || 0}`
     : `${tier}${it.sha1}${ver}`;
   return `<div class="cell ${sel.has(it.sha1) ? 'sel in' : ''} ${it.sha1 === curSha ? 'cur' : ''}" id="c_${it.sha1}" onclick="openLbSha('${it.sha1}')"
-      draggable="true" ondragstart="dragShas(event, '${it.sha1}')">
+      draggable="true" ondragstart="dragShas(event, '${it.sha1}')" oncontextmenu="ctxMenu(event, 'image', '${it.sha1}')">
     <img loading="lazy" decoding="async" src="${src}" style="background:var(--panel)">
     <span class="ck" onclick="event.stopPropagation(); ckSelSha('${it.sha1}', event)">${ic('check', 12)}</span>
     <span class="badge ${it.keep ? 'on' : ''}" title="お気に入り(自動間引きから保護)"
@@ -2171,7 +2187,7 @@ function segBindPointer() {
     }
   });
   img.addEventListener('contextmenu', e => {
-    if (!lbSegOn) return;
+    if (!lbSegOn) { const sha = items[lbIdx]?.sha1; if (sha) ctxMenu(e, 'image', sha); return; } // 通常時=画像メニュー(保存/zip/…)
     e.preventDefault(); e.stopImmediatePropagation();
     const r = img.getBoundingClientRect();
     segDelAt((e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height);
