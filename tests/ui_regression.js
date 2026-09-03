@@ -29,11 +29,21 @@ const check = (name, ok, detail = '') => {
   await p.goto(BASE + '/', {waitUntil: 'networkidle2', timeout: 60000});
   await p.waitForSelector('.cell', {timeout: 30000});
 
+  // 条件が満たされるまで待つ(固定sleepはサーバ負荷でブレて偽の失敗を出す=門番が狼少年になる)
+  await p.evaluate(() => {
+    window.until = async (fn, ms = 6000) => {
+      const t0 = Date.now();
+      while (Date.now() - t0 < ms) { if (fn()) return true; await new Promise(r => setTimeout(r, 50)); }
+      return false;
+    };
+  });
+
   // 1) フォルダ切替の追い越し: 高速切替後、最終的に指定フォルダの内容になっている
   const sw = await p.evaluate(async () => {
     go({type: 'lib', key: 'all', criteria: {}});
     go({type: 'source', key: 'crawl:_uitest', criteria: {source: 'crawl:_uitest'}}); // 待たず連打
-    await new Promise(r => setTimeout(r, 1500));
+    await until(() => items.length >= 6 && items.every(x => x.source === 'crawl:_uitest'));
+    await new Promise(r => setTimeout(r, 300)); // 追い越し応答が後から来ないか見届ける
     return {n: items.length, allUitest: items.every(x => x.source === 'crawl:_uitest')};
   });
   check('フォルダ切替(追い越しなし)', sw.allUitest && sw.n >= 6, `items=${sw.n}`);
@@ -41,7 +51,9 @@ const check = (name, ok, detail = '') => {
   // 2) ライトボックス開く: 正しい画像が実寸で表示される
   const open = await p.evaluate(async () => {
     openLb(0);
-    await new Promise(r => setTimeout(r, 1800));
+    // 中身が入り、開くモーフの受け渡し(opacity復帰)まで完了するのを待つ
+    await until(() => { const i = $('lbimg');
+      return i.dataset.tier && i.getBoundingClientRect().width > 100 && getComputedStyle(i).opacity === '1'; });
     const i = $('lbimg'); const r = i.getBoundingClientRect();
     return {w: r.width, op: getComputedStyle(i).opacity, sha: items[lbIdx].sha1, srcOk: i.src.includes(items[lbIdx].sha1)};
   });
@@ -51,13 +63,13 @@ const check = (name, ok, detail = '') => {
   //    (小原本も拡大して見せる統一ルール 2026-09-03。途中でサイズが揺れたら退行)
   const nav = await p.evaluate(async () => {
     lbGo(1);
-    await new Promise(r => setTimeout(r, 260)); // 仮サムネ段階(grace150ms後)
+    await until(() => $('lbimg').dataset.tier); // 何かが表示された時点(サムネ即時のはず)
     const it = items[lbIdx];
     const ar = it.w / it.h;
     let bw = Math.min(innerWidth * .94, innerHeight * .74 * ar);
     if (bw / ar > innerHeight * .74) bw = innerHeight * .74 * ar;
     const early = $('lbimg').getBoundingClientRect().width;
-    await new Promise(r => setTimeout(r, 1200));
+    await until(() => $('lbimg').dataset.tier === 'pv' || $('lbimg').dataset.tier === 'full');
     return {early, expect: bw, w: $('lbimg').getBoundingClientRect().width};
   });
   const fitOk = w => Math.abs(w - nav.expect) < nav.expect * 0.1;
@@ -71,10 +83,17 @@ const check = (name, ok, detail = '') => {
   await p.mouse.down();
   await p.mouse.move(rc.l + rc.w * .75, rc.t + rc.h * .75, {steps: 5});
   await p.mouse.up();
-  await new Promise(r => setTimeout(r, 2500));
   const crop = await p.evaluate(async () => {
-    const m = await (await fetch('/api/edits/' + items[lbIdx].sha1)).json();
-    return {open: $('lb').classList.contains('show'), ops: m.edits.map(e => e.op), w: $('lbimg').getBoundingClientRect().width};
+    const sha = items[lbIdx].sha1;
+    let ops = [];
+    await until(async () => false, 300); // 確定処理が走り出すのを一拍待つ
+    for (let k = 0; k < 40; k++) { // 保存完了をポーリング(サーバが混んでいても待つ)
+      const m = await (await fetch('/api/edits/' + sha)).json();
+      ops = m.edits.map(e => e.op);
+      if (ops.includes('crop')) break;
+      await new Promise(r => setTimeout(r, 200));
+    }
+    return {open: $('lb').classList.contains('show'), ops, w: $('lbimg').getBoundingClientRect().width};
   });
   check('クロップ', crop.open && crop.ops.includes('crop') && crop.w > 50, `w=${crop.w.toFixed(0)} ops=${crop.ops}`);
   await p.evaluate(async () => { edClear(); await new Promise(r => setTimeout(r, 600)); edToggle(); });
@@ -136,7 +155,7 @@ const check = (name, ok, detail = '') => {
 
   // 9) 連続削除: 5連打で5枚消え、詰まらない
   const del = await p.evaluate(async () => {
-    openLb(0); await new Promise(r => setTimeout(r, 600));
+    openLb(0); await until(() => $('lbimg').dataset.tier);
     const start = items.length;
     for (let i = 0; i < 5; i++) { lbDel(); await new Promise(r => setTimeout(r, 120)); }
     await new Promise(r => setTimeout(r, 2500));

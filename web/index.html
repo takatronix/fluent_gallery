@@ -259,6 +259,7 @@
     aside { flex-direction:row; gap:2px; overflow-x:auto; border-right:none; padding:8px 10px;
             border-bottom:1px solid var(--hair); align-items:center; }
     .brand, .sec, #ai_activity { display:none; }
+    #fsbtn { display:none; } /* 全画面はスマホには出さない(ブラウザUIが元々薄い・指示2026-09-03) */
     .nav { flex:none; }
     .nav .n { display:none; }
     .grid { grid-template-columns:repeat(auto-fill,minmax(110px,1fr)); gap:4px; }
@@ -339,6 +340,8 @@
     </select>
     <button class="ghost" id="sortbtn" onclick="cycleSort()" title="クリックで並び順を切替">新しい順</button>
     <span class="sp"></span>
+    <button class="ghost" id="fsbtn" onclick="fsToggle()"
+      title="全画面 — ブラウザのUIごと消して画像だけに(戻る: もう一度押す / Esc)"></button>
   </div>
   <div class="chips" id="chips_wrap"><span class="chip" id="enrich_chip" onclick="enrich()"
       title="いま表示中の絞り込み範囲で、まだ属性の無い画像にVLMが属性を付けます(通常は開いた時に自動で付くので、まとめて付けたい時用)"></span><span id="chips" style="display:contents"></span></div>
@@ -768,6 +771,7 @@ $('up_cam_btn').innerHTML = ic('img', 13) + ' カメラで撮る';
 $('gen_ico').innerHTML = ic('seed', 15);
 $('sb_keep').innerHTML = ic('star', 13) + 'お気に入り';
 $('facesbtn').innerHTML = ic('bot', 11) + ' 顔ID';
+fsSync();
 loadPersonSet(); // 顔IDタグを金色表示するための人物名セット
 $('sb_gen').innerHTML = ic('seed', 13) + '指示で量産';
 $('sb_del').innerHTML = ic('trash', 13) + '消す';
@@ -2904,6 +2908,17 @@ function setCur(i, opts = {}) {
     if (opts.scroll !== false) el.scrollIntoView({block: 'nearest'});
   }
 }
+// ギャラリー全体の全画面(ブラウザのフルスクリーンAPI)。スマホは自前UIで足りるので出さない
+function fsToggle() {
+  if (document.fullscreenElement) document.exitFullscreen?.();
+  else document.documentElement.requestFullscreen?.().catch(() => toast('全画面にできませんでした'));
+}
+function fsSync() {
+  const on = !!document.fullscreenElement;
+  $('fsbtn').innerHTML = ic('box', 13) + (on ? ' 戻す' : ' 全画面');
+  $('fsbtn').classList.toggle('on', on);
+}
+document.addEventListener('fullscreenchange', () => { fsSync(); setTimeout(() => { commitCell(); lbView.refit(); }, 60); });
 function immToggle() {
   $('lb').classList.toggle('imm');
   lbView.refit(); // 箱を全画面/通常サイズへ引き直す
@@ -2941,6 +2956,7 @@ document.addEventListener('keydown', e => {
       const sha = (e.key === 'Enter' ? curSha : (window._hoverSha || curSha));
       if (sha) { e.preventDefault(); ckSelSha(sha, e); }
     }
+    else if (e.key === 'f' || e.key === 'F') { e.preventDefault(); fsToggle(); } // グリッドのF=全画面
     else if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); delSelected(); }
     else if (e.key === 'z' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); undoTrash(); }
     return;
