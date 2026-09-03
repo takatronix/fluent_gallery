@@ -39,21 +39,22 @@ bash deploy.sh
 
 | feature | 既定 | 内容 |
 |---|---|---|
-| `faceid` | ON | 顔ID(SCRFD+ArcFace)。insightface の buffalo_l モデルは**非商用限定**なので、販売ビルドでは外す |
+| `faceid` | ON | 顔ID(SCRFD+ArcFace)。insightface の buffalo_l モデルは**非商用限定**なので、ストア版では外す。モデルは初回に `/api/faces/pull` で自動取得(288MB) |
+| `store` | OFF | ストア提出版の制限: YouTube/X/Instagram 等の取り込み拒否、COCO は CC BY 系のみ。既定OFF=フル機能 |
 | `cuda` | ON | 内蔵LLM(llama.cpp)を CUDA で動かす(Linux/NVIDIA) |
 | `metal` | OFF | 同 Metal(Apple Silicon)。`cuda` とどちらか一つ |
 
 ```bash
 cargo build --release                                              # Linux/CUDA・顔IDあり(=deploy.sh)
-cargo build --release --no-default-features --features metal        # Mac・顔IDなし(販売ビルド)
-cargo build --release --no-default-features --features metal,faceid # Mac・顔IDあり
+cargo build --release --no-default-features --features metal,faceid # Mac・フル機能(自分用)
+cargo build --release --no-default-features --features metal,store  # Mac・ストア提出版
 ```
 
 ### Mac 販売ビルド(.app / .dmg)
 
 ```bash
-bash mac/build_mac.sh            # Metal・顔IDなし → 回帰テスト → dist/FluentGallery.app + .dmg
-bash mac/build_mac.sh --faceid   # 顔IDを含める(非商用限定モデルなので販売版には付けない)
+bash mac/build_mac.sh            # Metal・フル機能(顔IDあり) → 回帰テスト → dist/FluentGallery.app + .dmg
+bash mac/build_mac.sh --store    # ストア提出版(顔IDなし・YouTube/X拒否・COCOはCC BY系のみ)
 SIGN="Developer ID Application: ..." NOTARY_PROFILE=fg bash mac/build_mac.sh   # 署名+notarize
 ```
 
@@ -66,7 +67,7 @@ SIGN="Developer ID Application: ..." NOTARY_PROFILE=fg bash mac/build_mac.sh   #
 ### 依存
 
 - **必須**: Rust, Chrome(回帰テスト用), Node.js(回帰テスト用)
-- **任意**: ollama(内蔵VLM `qwen2.5vl:7b`)、ml-hub(マスク生成)、OpenRouter/Anthropic/xAI/Pexels/Pixabayの各APIキー
+- **任意**: ollama(内蔵VLM `qwen2.5vl:7b`)、ml-hub(マスク生成)、yt-dlp + ffmpeg(動画/SNS取り込み。Mac は `brew install yt-dlp ffmpeg`、`~/.local/bin` と `/opt/homebrew/bin` を探す)、OpenRouter/Anthropic/xAI/Pexels/Pixabayの各APIキー
 - キーは `~/ml-hub/config/settings.json` に置く(`openrouter_api_key`, `anthropic_api_key`, `gallery_judge_model` など)
 
 > **内蔵VLMはVRAMに8GBの空きが必要。** 足りないとollamaがCPUへ部分オフロードし、CPUを食い尽くしてUIまで重くなる。サイドバーのVRAMメーターで空きを確認できる。
@@ -137,7 +138,7 @@ POST /api/ingest {path,source,move}                     収蔵(ジョブ)
 GET  /api/samples / POST /api/samples/{id}?n=1000        権利クリアなサンプル取得(CC0/PD/CC BY: Commons, Met, CMA, ARTIC, NASA, Wellcome, SMK, COCO(CC BY系のみ), Open Images 顔/実写)
                                                           n は最大2万。取った物は源ごとの台帳に残り、次回は続きから(押すほど溜まる)
 POST /api/ingest/stop                                     取り込み/まとめ取りを途中で止める(取った分は残る)
-POST /api/ingest/url {url,source?,max?}                  指定ページ(または画像URL)の画像を取り込む。YouTube/X/Instagram等は拒否、内部ネットワーク拒否
+POST /api/ingest/url {url,source?,max?}                  指定ページ(または画像URL)の画像を取り込む。YouTube/X等の動画・SNSは yt-dlp でコマ取り込み(要 yt-dlp+ffmpeg、store版は拒否)、内部ネットワーク拒否
 POST /api/crawl  {album,n,minutes}                      AIフォルダの収集を開始
 POST /api/enrich {backend,n}                            VLM属性付け
 POST /api/faces/enroll {album,person,shas,point}        顔IDの人物登録(pointで顔を指定)

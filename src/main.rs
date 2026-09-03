@@ -832,6 +832,18 @@ async fn api_move(State(app): S, Json(p): Json<MoveIn>) -> impl IntoResponse {
 }
 
 // ==== 顔ID(docs/face-id-design.md 2026-09-03) ====
+/// 顔IDモデル(buffalo_l 288MB・非商用限定)の初回取得。進捗は /api/ai/status の faceid
+#[cfg(feature = "faceid")]
+async fn api_faces_pull(State(app): S) -> Json<Value> {
+    let client = app.http.clone();
+    tokio::spawn(async move {
+        if let Err(e) = faceid::ensure_models(&client).await {
+            println!("🧭 顔IDモデルDL失敗: {e}");
+        }
+    });
+    Json(json!({"ok": true, "note": "進捗は GET /api/ai/status"}))
+}
+
 #[cfg(feature = "faceid")]
 #[derive(Deserialize)]
 struct FaceEnrollIn {
@@ -1988,12 +2000,26 @@ async fn ai_status(app: &'static App) -> Value {
         "clip": onnx::status(&app.root),
         "vlm": {"backend": "ollama", "model": enrich::BUILTIN_MODEL, "reachable": vlm_reachable, "present": vlm_present},
         "seg": {"backend": "ml-hub", "reachable": seg_ok},
-        "faceid": cfg!(feature = "faceid"),
+        "faceid": faceid_status(),
+        "store": cfg!(feature = "store"),
+        "tools": {"yt_dlp": tool_present("yt-dlp"), "ffmpeg": tool_present("ffmpeg")},
         "keys": {"anthropic": key("anthropic_api_key"), "openai": key("openai_api_key"), "openrouter": key("openrouter_api_key"),
                  "xai": key("xai_api_key"), "pexels": key("pexels_api_key"), "pixabay": key("pixabay_api_key")},
     });
     *CACHE.lock().unwrap() = Some((std::time::Instant::now(), v.clone()));
     v
+}
+
+#[cfg(feature = "faceid")]
+fn faceid_status() -> Value { faceid::status() }
+#[cfg(not(feature = "faceid"))]
+fn faceid_status() -> Value { json!({"enabled": false, "present": false}) }
+
+/// 外部ツールの有無(絶対パスで見つかるか、PATHで実行できるか)
+fn tool_present(name: &str) -> bool {
+    let p = media::tool_bin(name);
+    if p.contains('/') { return std::path::Path::new(&p).exists(); }
+    std::env::var("PATH").unwrap_or_default().split(':').any(|d| std::path::Path::new(d).join(&p).exists())
 }
 
 async fn api_ai_status(State(app): S) -> Json<Value> {
@@ -2179,6 +2205,43 @@ async fn api_ingest_url(State(app): S, Json(i): Json<IngestUrlIn>) -> impl IntoR
     if app.ingest.alive.load(Relaxed) {
         return (StatusCode::CONFLICT, Json(json!({"detail": "収蔵ジョブが実行中です"}))).into_response();
     }
+    // 動画/SNS媒体(YouTube/X等)は yt-dlp でメディアを落として 0.5fps でフレーム化(フル機能版のみ・ストア版は上で拒否済み)
+    if urlimport::media_host(&host) {
+        for t in ["yt-dlp", "ffmpeg"] {
+            if !tool_present(t) {
+                return bad(format!("{t} が見つかりません。動画/SNSの取り込みには yt-dlp と ffmpeg が必要です(Mac: brew install yt-dlp ffmpeg)"));
+            }
+        }
+        let source = if i.source.trim().is_empty() { format!("url:{host}") } else { i.source.trim().to_string() };
+        let p = app.ingest.clone();
+        p.alive.store(true, Relaxed);
+        for a in [&p.total, &p.done, &p.added, &p.dup, &p.bad] { a.store(0, Relaxed); }
+        *app.ingest_label.lock().unwrap() = format!("URL(動画): {host} — yt-dlpで取得中");
+        let page_s = page.to_string();
+        let host_resp = host.clone();
+        tokio::spawn(async move {
+            let scratch = app.root.join("store/.upload_tmp");
+            let _ = std::fs::create_dir_all(&scratch);
+            let (sc, pu) = (scratch.clone(), page_s.clone());
+            let frames = tokio::task::spawn_blocking(move || crawl::media_frames_from_urls(&sc, &[pu])).await.unwrap_or_default();
+            p.total.store(frames.len(), Relaxed);
+            *app.ingest_label.lock().unwrap() = format!("URL(動画): {host} — {}コマを収蔵中", frames.len());
+            for (data, u, title) in frames {
+                let extra = json!({"rights": "unknown", "origin": "real",
+                    "crawl": {"url": u, "landing": page_s, "title": title, "engine": "url:media", "query": "", "album": "", "tags": [format!("url:{host}")]}});
+                let (root, src) = (app.root.clone(), source.clone());
+                let res = tokio::task::spawn_blocking(move || {
+                    let db = app.db.lock().unwrap();
+                    store::ingest_bytes(&root, &db, &data, "jpg", &src, &extra).map(|_| ())
+                }).await.unwrap_or(Err("bad"));
+                match res { Ok(()) => p.added.fetch_add(1, Relaxed), Err("dup") => p.dup.fetch_add(1, Relaxed), Err(_) => p.bad.fetch_add(1, Relaxed) };
+                p.done.fetch_add(1, Relaxed);
+            }
+            println!("🔗 URL(動画) {page_s}: +{} (重複{} 不採用{})", p.added.load(Relaxed), p.dup.load(Relaxed), p.bad.load(Relaxed));
+            p.alive.store(false, Relaxed);
+        });
+        return Json(json!({"ok": true, "job": "ingest", "candidates": 0, "media": true, "title": host_resp, "source": ""})).into_response();
+    }
     const UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15 fluent_gallery/0.2";
     let resp = match app.http.get(page.clone()).header("User-Agent", UA).timeout(std::time::Duration::from_secs(30)).send().await {
         Ok(r) => r,
@@ -2272,7 +2335,7 @@ async fn api_sample_fetch(State(app): S, AxPath(id): AxPath<String>, axum::extra
     if app.ingest.alive.load(Relaxed) {
         return (StatusCode::CONFLICT, Json(json!({"detail": "収蔵ジョブが実行中です"}))).into_response();
     }
-    let n = q.n.clamp(1, 20000); // まとめ取り(数千枚)前提。続きは既読台帳が面倒を見る
+    let n = if q.n == 0 { 0 } else { q.n.min(20000) }; // 0=全部(注釈一覧を持つ COCO / Open Images 向け)。API源は2万上限
     let p = app.ingest.clone();
     p.alive.store(true, Relaxed);
     p.stop.store(false, Relaxed);
@@ -2790,7 +2853,7 @@ async fn api_cache_clean(State(app): S) -> Json<Value> {
 
 /// ビルド時機能(Cargo feature)。UIは無効な機能の操作を隠す(販売ビルドで顔ID等を外すため)
 async fn api_caps() -> impl IntoResponse {
-    Json(json!({"faceid": cfg!(feature = "faceid"), "version": env!("CARGO_PKG_VERSION")}))
+    Json(json!({"faceid": cfg!(feature = "faceid"), "store": cfg!(feature = "store"), "version": env!("CARGO_PKG_VERSION")}))
 }
 
 async fn index_page(State(app): S) -> impl IntoResponse {
@@ -2824,6 +2887,8 @@ async fn main() {
         micro_inflight: Mutex::new(std::collections::HashSet::new()),
         workers: Mutex::new(serde_json::Map::new()),
     }));
+    #[cfg(feature = "faceid")]
+    faceid::set_root(&app.root);
     let router = Router::new()
         .route("/", get(index_page))
         .route("/api/images", get(api_images))
@@ -2890,6 +2955,7 @@ async fn main() {
     // 顔ID(feature "faceid")。無効ビルドではルート自体が無い=404。UIは/api/capsを見て操作を隠す
     #[cfg(feature = "faceid")]
     let router = router
+        .route("/api/faces/pull", post(api_faces_pull))
         .route("/api/faces", get(api_faces_list).delete(api_faces_delete))
         .route("/api/faces/enroll", post(api_faces_enroll))
         .route("/api/faces/detect", post(api_faces_detect))

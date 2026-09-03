@@ -25,6 +25,44 @@ const MAX_KEEP_PER_VIDEO: usize = 6; // 1本の動画から採る上限(多様�
 // yt-dlp経由のffmpegにCA束を教える(2026-09-03 YouTube全滅の真因)
 const CA_BUNDLE: &str = "/etc/ssl/certs/ca-certificates.crt";
 
+/// 静的ffmpeg向けのCA束指定(Linux)。無い環境(Mac)では何もしない
+fn ca_env(c: &mut std::process::Command) {
+    if std::path::Path::new(CA_BUNDLE).exists() {
+        c.env("SSL_CERT_FILE", CA_BUNDLE);
+    }
+}
+
+/// 外部コマンドを秒数つきで実行(macOSには timeout コマンドが無いので自前)。期限で kill、成功可否を返す
+pub(crate) fn status_timeout(c: &mut std::process::Command, secs: u64) -> bool {
+    let Ok(mut child) = c.spawn() else { return false };
+    let t0 = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(st)) => return st.success(),
+            Ok(None) if t0.elapsed().as_secs() >= secs => { let _ = child.kill(); let _ = child.wait(); return false; }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(200)),
+            Err(_) => return false,
+        }
+    }
+}
+
+/// 同上・標準出力を返す版
+pub(crate) fn output_timeout(c: &mut std::process::Command, secs: u64) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut child = c.stdout(std::process::Stdio::piped()).spawn()?;
+    let mut so = child.stdout.take().unwrap();
+    let reader = std::thread::spawn(move || { let mut b = Vec::new(); let _ = so.read_to_end(&mut b); b });
+    let t0 = std::time::Instant::now();
+    loop {
+        match child.try_wait()? {
+            Some(_) => break,
+            None if t0.elapsed().as_secs() >= secs => { let _ = child.kill(); let _ = child.wait(); break; }
+            None => std::thread::sleep(std::time::Duration::from_millis(200)),
+        }
+    }
+    Ok(reader.join().unwrap_or_default())
+}
+
 #[derive(Default)]
 pub struct CrawlState {
     pub alive: AtomicBool,
@@ -451,27 +489,23 @@ async fn x_syndication_photos(client: &reqwest::Client, post_url: &str) -> Vec<S
 
 /// 任意URL群(X投稿等)のメディアをyt-dlpでDL→フレーム化。(bytes, 出典URL, タイトル)を返す。
 /// yt-dlpはtimeoutで強制打ち切り(ログイン壁等での無限ハング根絶)
-fn media_frames_from_urls(scratch: &Path, urls: &[String]) -> Vec<(Vec<u8>, String, String)> {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let ytdlp = format!("{home}/.local/bin/yt-dlp");
+pub(crate) fn media_frames_from_urls(scratch: &Path, urls: &[String]) -> Vec<(Vec<u8>, String, String)> {
+    let ytdlp = crate::media::tool_bin("yt-dlp");
     let dir = scratch.join("xmedia");
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::create_dir_all(&dir);
     let mut out = vec![];
     for (i, u) in urls.iter().enumerate() {
         let f = dir.join(format!("m{i}.mp4"));
-        let ok = std::process::Command::new("timeout")
-            .args(["-k", "5", "75"])
-            .arg(&ytdlp)
-            .env("LD_LIBRARY_PATH", "")
-            .env("SSL_CERT_FILE", CA_BUNDLE) // 静的ffmpegのTLS検証失敗(code251でYT収穫0)の根治 2026-09-03
-            .args(["-f", "b[height<=720]/b", "--max-filesize", "60M", "--no-playlist",
+        let mut c = std::process::Command::new(&ytdlp);
+        c.env("LD_LIBRARY_PATH", "")
+            // 映像だけあればよい(音声不要)。新しいYouTubeは進行形式(b)が無いことがあるので bv* を先に
+            .args(["-f", "bv*[height<=720]/b[height<=720]/bv*/b", "--max-filesize", "60M", "--no-playlist",
                    "--socket-timeout", "15", "--quiet", "--no-warnings", "-o"])
             .arg(&f)
-            .arg(u)
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
+            .arg(u);
+        ca_env(&mut c); // 静的ffmpegのTLS検証失敗(code251でYT収穫0)の根治 2026-09-03
+        let ok = status_timeout(&mut c, 120);
         if !ok {
             continue; // 画像のみのポストはyt-dlpで取れないことがある(ml-hubと同じ割り切り)
         }
@@ -505,21 +539,17 @@ fn yt_relevance(title: &str, query: &str) -> f64 {
 /// YouTube: メタ検索(DLなし)→タイトル関連度+再生数+長さで選定→上位だけDL→0.5fpsフレーム抽出。
 /// 「検索上位2本を無条件DL」だとMV/広告/無関係が混ざる — 選んでから落とす(2026-09-03)
 fn youtube_frames(scratch: &Path, query: &str, videos: usize) -> Result<Vec<(Vec<u8>, String, String)>, String> {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let ytdlp = format!("{home}/.local/bin/yt-dlp");
+    let ytdlp = crate::media::tool_bin("yt-dlp");
     let dir = scratch.join("yt");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     // ① メタだけ12件(数秒・DLなし)
-    let out = std::process::Command::new("timeout")
-        .args(["-k", "5", "60"])
-        .arg(&ytdlp)
-        .env("LD_LIBRARY_PATH", "")
-        .args([&format!("ytsearch12:{query}"), "--flat-playlist", "-j", "--quiet", "--no-warnings"])
-        .output()
-        .map_err(|e| format!("yt-dlp起動失敗: {e}"))?;
+    let mut mc = std::process::Command::new(&ytdlp);
+    mc.env("LD_LIBRARY_PATH", "")
+        .args([&format!("ytsearch12:{query}"), "--flat-playlist", "-j", "--quiet", "--no-warnings"]);
+    let out = output_timeout(&mut mc, 60).map_err(|e| format!("yt-dlp起動失敗: {e}"))?;
     let mut cands: Vec<(String, String, String, f64)> = vec![]; // (id,url,title,score)
-    for l in String::from_utf8_lossy(&out.stdout).lines() {
+    for l in String::from_utf8_lossy(&out).lines() {
         let Ok(v) = serde_json::from_str::<Value>(l) else { continue };
         let (Some(id), Some(title)) = (v["id"].as_str(), v["title"].as_str()) else { continue };
         let dur = v["duration"].as_f64().unwrap_or(0.0);
@@ -540,13 +570,10 @@ fn youtube_frames(scratch: &Path, query: &str, videos: usize) -> Result<Vec<(Vec
     cands.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal));
     cands.truncate(videos.max(1));
     // ② 選ばれた動画だけDL(冒頭60秒・480p)
-    let mut dl = std::process::Command::new("timeout");
-    dl.args(["-k", "5", "180"])
-        .arg(&ytdlp)
-        .env("LD_LIBRARY_PATH", "")
-        .env("SSL_CERT_FILE", CA_BUNDLE) // 静的ffmpegのTLS検証失敗(code251でYT収穫0)の根治 2026-09-03
+    let mut dl = std::process::Command::new(&ytdlp);
+    dl.env("LD_LIBRARY_PATH", "")
         .args([
-            "-f", "b[height<=480]/bv*[height<=480]+ba/b",
+            "-f", "bv*[height<=480]/b[height<=480]/bv*/b", // 映像のみで足りる(音声結合なし=ffmpeg合成不要)
             "--max-filesize", "80M",
             "--download-sections", "*0-60", // 冒頭60秒だけ(データ量の舵)
             "--socket-timeout", "15",
@@ -558,7 +585,8 @@ fn youtube_frames(scratch: &Path, query: &str, videos: usize) -> Result<Vec<(Vec
     for (_, u, _, _) in &cands {
         dl.arg(u);
     }
-    let st = dl.status().map_err(|e| format!("yt-dlp起動失敗: {e}"))?;
+    ca_env(&mut dl); // 静的ffmpegのTLS検証失敗(code251でYT収穫0)の根治 2026-09-03
+    let st_ok = status_timeout(&mut dl, 180);
     let metas: Vec<(String, String, String)> =
         cands.into_iter().map(|(id, u, t, _)| (id, u, t)).collect();
     // 失敗判定はファイル実在で(exit codeは--ignore-errorsでも一部失敗で非0になる)
@@ -566,7 +594,7 @@ fn youtube_frames(scratch: &Path, query: &str, videos: usize) -> Result<Vec<(Vec
         .map(|rd| rd.flatten().any(|e| e.path().extension().map(|x| x != "txt").unwrap_or(false)))
         .unwrap_or(false);
     if !got_any {
-        return Err(format!("yt-dlpが失敗(DL不可 exit={:?})", st.code()));
+        return Err(format!("yt-dlpが失敗(DL不可 ok={st_ok})"));
     }
     let mut out = vec![];
     for (id, url, title) in metas {

@@ -32,12 +32,14 @@ pub fn sets() -> Vec<SampleSet> {
             note: "Wellcome Collection(英)。license が cc0 または pdm の画像だけ取得", origin: "real" },
         SampleSet { id: "smk", label: "🎨 デンマーク国立美術館 SMK", license: "public-domain", license_label: "パブリックドメイン",
             note: "Statens Museum for Kunst Open Data。public_domain=true の作品のみ", origin: "real" },
-        SampleSet { id: "coco", label: "📷 COCO 2017(実写・物体検出の定番)", license: "cc-by-2.0", license_label: "CC BY系のみ(帰属必要)",
-            note: "COCO 2017(val 5千枚→足りなければ train 11.8万枚)のうち、画像ごとの Flickr ライセンスが CC BY 2.0 / CC BY-SA 2.0 / 制限なし / 米政府作品のものだけ(非商用・改変禁止は除外)。取得できるのは全体の約4分の1。初回に注釈zip 253MB を取得。帰属(作者URL)はサイドカーに保存", origin: "real" },
+        SampleSet { id: "coco", label: "📷 COCO 2017(実写・物体検出の定番)", license: "cc-by-2.0", license_label: "画像ごとのCC(ストア版はCC BY系のみ)",
+            note: "COCO 2017(val 5千枚→足りなければ train 11.8万枚)。画像ごとの Flickr ライセンス(CC BY / BY-SA / BY-NC 等)をサイドカーに記録。ストア版は CC BY 2.0 / BY-SA 2.0 / 制限なし / 米政府作品だけ(全体の約4分の1)。初回に注釈zip 253MB を取得", origin: "real" },
         SampleSet { id: "oi_faces", label: "🧑 Open Images 顔写真(Human face)", license: "cc-by-2.0", license_label: "CC BY 2.0(帰属必要)",
             note: "Open Images validation の Human face ラベル付き写真(全て Flickr CC BY 2.0)。初回に CSV 26MB を取得。実在の人物なので肖像権には別途注意", origin: "real" },
         SampleSet { id: "oi_photos", label: "📷 Open Images 実写いろいろ", license: "cc-by-2.0", license_label: "CC BY 2.0(帰属必要)",
             note: "Open Images validation(41,620枚・全て Flickr CC BY 2.0)からランダムに取得。初回に CSV 15MB を取得", origin: "real" },
+        SampleSet { id: "oi_test", label: "📷 Open Images test(125,436枚・約36GB)", license: "cc-by-2.0", license_label: "CC BY 2.0(帰属必要)",
+            note: "Open Images test 全量(全て Flickr CC BY 2.0・bbox注釈あり)。train(170万枚・500GB超)は対象外。「全部」で数時間", origin: "real" },
     ]
 }
 
@@ -84,10 +86,12 @@ pub async fn fetch_list(client: &reqwest::Client, root: &Path, p: &Progress, lab
                        id: &str, n: usize, already: &Seen) -> Result<Vec<Item>, String> {
     match id {
         "coco" => return coco(client, root, p, label, n, already).await,
-        "oi_faces" => return openimages(client, root, p, label, true, n, already).await,
-        "oi_photos" => return openimages(client, root, p, label, false, n, already).await,
+        "oi_faces" => return openimages(client, root, p, label, "validation", true, n, already).await,
+        "oi_photos" => return openimages(client, root, p, label, "validation", false, n, already).await,
+        "oi_test" => return openimages(client, root, p, label, "test", false, n, already).await,
         _ => {}
     }
+    let n = if n == 0 { 20000 } else { n }; // API検索の源に「全部」は無い(2万を上限に掘る)
     let mut out: Vec<Item> = Vec::new();
     // 既に取った物を種にしておけば push が弾く。skip はAPIのページ送り(同じ先頭を読み直さない)
     let mut seen: std::collections::HashSet<String> = already.clone();
@@ -397,7 +401,14 @@ async fn coco(client: &reqwest::Client, root: &Path, p: &Progress, label: &std::
     };
     // licenses: 1-3=CC NC系(除外) 4=CC BY 2.0 5=CC BY-SA 2.0 6=CC BY-ND 2.0(改変禁止・除外) 7=No known copyright restrictions 8=US Government Work
     let rights_of = |id: i64| -> Option<&'static str> {
-        match id { 4 => Some("cc-by-2.0"), 5 => Some("cc-by-sa-2.0"), 7 => Some("no-known-restrictions"), 8 => Some("us-government"), _ => None }
+        match id {
+            4 => Some("cc-by-2.0"), 5 => Some("cc-by-sa-2.0"), 7 => Some("no-known-restrictions"), 8 => Some("us-government"),
+            1 if !cfg!(feature = "store") => Some("cc-by-nc-sa-2.0"),
+            2 if !cfg!(feature = "store") => Some("cc-by-nc-2.0"),
+            3 if !cfg!(feature = "store") => Some("cc-by-nc-nd-2.0"),
+            6 if !cfg!(feature = "store") => Some("cc-by-nd-2.0"),
+            _ => None,
+        }
     };
     let harvest = |json: &Value, part: &'static str| -> Vec<Item> {
         let lic: std::collections::HashMap<i64, String> = json["licenses"].as_array().map(|a| a.iter()
@@ -417,6 +428,7 @@ async fn coco(client: &reqwest::Client, root: &Path, p: &Progress, label: &std::
             })
         }).collect()
     };
+    let n = if n == 0 { usize::MAX } else { n }; // 0=全部
     let mut rows = harvest(&read_part("annotations/captions_val2017.json").await?, "val2017");
     // val2017 で権利が通るのは5000枚中1279枚だけ。まとめ取りではすぐ底を突くので train2017 も開く
     // (同じzipに入っている。104MBのJSONなので、必要になった時だけ読む)
@@ -432,9 +444,10 @@ async fn coco(client: &reqwest::Client, root: &Path, p: &Progress, label: &std::
 }
 
 /// Open Images validation(全て Flickr CC BY 2.0)。faces=true なら Human face(/m/0dzct) ラベルが付いた画像だけ
-async fn openimages(client: &reqwest::Client, root: &Path, p: &Progress, label: &std::sync::Mutex<String>, faces: bool, n: usize, already: &Seen) -> Result<Vec<Item>, String> {
-    let rot = ensure_file(client, root, "openimages/validation-images-with-rotation.csv",
-                          "https://storage.googleapis.com/openimages/2018_04/validation/validation-images-with-rotation.csv", p, label, "Open Images 画像一覧(15MB)").await?;
+async fn openimages(client: &reqwest::Client, root: &Path, p: &Progress, label: &std::sync::Mutex<String>, split: &str, faces: bool, n: usize, already: &Seen) -> Result<Vec<Item>, String> {
+    let rot = ensure_file(client, root, &format!("openimages/{split}-images-with-rotation.csv"),
+                          &format!("https://storage.googleapis.com/openimages/2018_04/{split}/{split}-images-with-rotation.csv"), p, label,
+                          &format!("Open Images {split} 画像一覧")).await?;
     let allowed: Option<std::collections::HashSet<String>> = if faces {
         let lab = ensure_file(client, root, "openimages/validation-annotations-human-imagelabels-boxable.csv",
                               "https://storage.googleapis.com/openimages/v5/validation-annotations-human-imagelabels-boxable.csv", p, label, "Open Images ラベル(11MB)").await?;
@@ -450,7 +463,7 @@ async fn openimages(client: &reqwest::Client, root: &Path, p: &Progress, label: 
         if f.len() < 8 || !f[4].contains("licenses/by/2.0") { return None; }
         if let Some(a) = &allowed { if !a.contains(&f[0]) { return None; } }
         Some(Item {
-            url: format!("https://open-images-dataset.s3.amazonaws.com/validation/{}.jpg", f[0]),
+            url: format!("https://open-images-dataset.s3.amazonaws.com/{split}/{}.jpg", f[0]),
             title: f[7].clone(),
             credit: format!("{} / Flickr (CC BY 2.0) via Open Images", f[6]),
             landing: f[3].clone(),
@@ -459,6 +472,6 @@ async fn openimages(client: &reqwest::Client, root: &Path, p: &Progress, label: 
     }).collect();
     rows.retain(|it| !already.contains(&it.url)); // 既に取った分は候補から外す(次は続きが来る)
     shuffle(&mut rows);
-    rows.truncate(n);
+    if n > 0 { rows.truncate(n); } // 0=全部
     Ok(rows)
 }

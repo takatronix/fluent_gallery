@@ -7,11 +7,16 @@ use std::process::Command;
 
 pub const VIDEO_EXTS: [&str; 6] = ["mp4", "mov", "webm", "mkv", "avi", "m4v"];
 
-fn ffbin(name: &str) -> String {
-    // 静的ffmpegは~/.local/bin(LD_LIBRARY_PATH汚染に注意: 空で呼ぶのが作法)
+fn ffbin(name: &str) -> String { tool_bin(name) }
+
+/// 外部ツール(ffmpeg/ffprobe/yt-dlp)の場所。Linux=~/.local/bin の静的ビルド、Mac=Homebrew。無ければPATH任せ
+pub fn tool_bin(name: &str) -> String {
     let home = std::env::var("HOME").unwrap_or_default();
-    let p = format!("{home}/.local/bin/{name}");
-    if Path::new(&p).exists() { p } else { name.to_string() }
+    for dir in [format!("{home}/.local/bin"), "/opt/homebrew/bin".into(), "/usr/local/bin".into()] {
+        let p = format!("{dir}/{name}");
+        if Path::new(&p).exists() { return p; }
+    }
+    name.to_string()
 }
 
 fn is_hdr(path: &Path) -> bool {

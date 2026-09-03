@@ -25,6 +25,8 @@ zip = { version = "2", default-features = false, features = ["deflate"] } # COCO
 default = ["faceid", "cuda"]
 # 顔ID(SCRFD+ArcFace)。insightface の buffalo_l モデルは非商用限定なので、販売ビルドでは外す
 faceid = []
+# ストア版(App Store 提出用)の制限: YouTube/X 等の取り込み拒否、COCO は CC BY 系のみ。既定OFF=フル機能
+store = []
 # 内蔵LLM(llama.cpp)のGPUバックエンド。どちらか一つを選ぶ
 cuda = ["llama-cpp-2/cuda"]
 metal = ["llama-cpp-2/metal"]

@@ -16,16 +16,91 @@ pub const FACE_DIFF: f32 = 0.28;
 
 const DET_SIZE: usize = 640;
 
+static ROOT: OnceLock<PathBuf> = OnceLock::new();
+pub fn set_root(root: &std::path::Path) { let _ = ROOT.set(root.to_path_buf()); }
+
+pub const MODEL_FILES: [&str; 2] = ["det_10g.onnx", "w600k_r50.onnx"];
+const PACK_URL: &str = "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip";
+static DOWNLOADING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static GOT_MB: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static TOTAL_MB: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// モデル置き場: Deep-Live-Cam 導入済みなら ~/.insightface/models/buffalo_l を再利用、無ければ engine/models/buffalo_l(自動DL先)
 fn models_dir() -> PathBuf {
-    std::env::var("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| "/root".into())
-        .join(".insightface/models/buffalo_l")
+    let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| "/root".into()).join(".insightface/models/buffalo_l");
+    if home.join(MODEL_FILES[0]).exists() {
+        return home;
+    }
+    ROOT.get().cloned().unwrap_or_else(|| PathBuf::from(".")).join("engine/models/buffalo_l")
+}
+
+pub fn models_present() -> bool {
+    let d = models_dir();
+    MODEL_FILES.iter().all(|f| d.join(f).exists())
+}
+
+pub fn status() -> serde_json::Value {
+    use std::sync::atomic::Ordering::Relaxed;
+    serde_json::json!({
+        "enabled": true, "present": models_present(), "dir": models_dir(),
+        "downloading": DOWNLOADING.load(Relaxed), "got_mb": GOT_MB.load(Relaxed), "total_mb": TOTAL_MB.load(Relaxed),
+        "license": "insightface buffalo_l — 非商用限定(研究・個人利用)",
+    })
+}
+
+/// buffalo_l.zip(288MB)を取得して det_10g / w600k_r50 だけ展開。※非商用限定モデル。ストア版には feature ごと入れない
+pub async fn ensure_models(client: &reqwest::Client) -> Result<(), String> {
+    use std::io::Write;
+    use std::sync::atomic::Ordering::Relaxed;
+    if models_present() {
+        return Ok(());
+    }
+    if DOWNLOADING.swap(true, Relaxed) {
+        return Err("顔IDモデルDL中です".into());
+    }
+    let r = async {
+        let dir = models_dir();
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let zip_p = dir.join("buffalo_l.zip.part");
+        let mut resp = client.get(PACK_URL).send().await.map_err(|e| format!("顔IDモデルDL接続失敗: {e}"))?
+            .error_for_status().map_err(|e| format!("顔IDモデルDL失敗: {e}"))?;
+        let total = resp.content_length().unwrap_or(0);
+        TOTAL_MB.store((total >> 20) as usize, Relaxed);
+        GOT_MB.store(0, Relaxed);
+        let mut f = std::fs::File::create(&zip_p).map_err(|e| e.to_string())?;
+        let mut got = 0u64;
+        while let Some(chunk) = resp.chunk().await.map_err(|e| format!("DL中断: {e}"))? {
+            f.write_all(&chunk).map_err(|e| e.to_string())?;
+            got += chunk.len() as u64;
+            GOT_MB.store((got >> 20) as usize, Relaxed);
+        }
+        drop(f);
+        let dir2 = dir.clone();
+        tokio::task::spawn_blocking(move || -> Result<(), String> {
+            let f = std::fs::File::open(&zip_p).map_err(|e| e.to_string())?;
+            let mut ar = zip::ZipArchive::new(f).map_err(|e| e.to_string())?;
+            for name in MODEL_FILES {
+                let mut e = ar.by_name(name).map_err(|e| format!("{name}: {e}"))?;
+                let mut out = std::fs::File::create(dir2.join(name)).map_err(|e| e.to_string())?;
+                std::io::copy(&mut e, &mut out).map_err(|e| e.to_string())?;
+            }
+            let _ = std::fs::remove_file(&zip_p);
+            Ok(())
+        }).await.map_err(|e| e.to_string())??;
+        println!("🧭 顔IDモデル取得完了 → {}", dir.display());
+        Ok(())
+    }.await;
+    DOWNLOADING.store(false, Relaxed);
+    r
 }
 
 fn session(cell: &'static OnceLock<Option<Mutex<ort::session::Session>>>, file: &str)
            -> Option<&'static Mutex<ort::session::Session>> {
     let file = file.to_string();
+    // モデルが無い間は OnceLock を確定させない(後からDLした時に読めるように)
+    if cell.get().is_none() && !models_dir().join(&file).exists() {
+        return None;
+    }
     cell.get_or_init(move || {
         let p = models_dir().join(&file);
         let built = (|| -> Result<ort::session::Session, String> {

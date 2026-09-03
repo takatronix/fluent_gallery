@@ -2,7 +2,7 @@
 # fluent_gallery Mac販売ビルド: 依存チェック → Metalビルド(顔IDなし) → UI回帰テスト → .app → .dmg → (署名/notarize)
 #
 #   bash mac/build_mac.sh                      # dist/FluentGallery.app と dist/FluentGallery.dmg を作る
-#   bash mac/build_mac.sh --faceid             # 顔IDを含める(insightfaceモデルは非商用限定。販売ビルドでは付けない)
+#   bash mac/build_mac.sh --store              # ストア提出版(顔IDなし・YouTube/X拒否・COCOはCC BY系のみ)。既定はフル機能
 #   bash mac/build_mac.sh --no-test            # 回帰テストを飛ばす
 #   bash mac/build_mac.sh --plain              # Tauri殻なし(素のバイナリ+ブラウザ起動の仮.app)
 #   SIGN="Developer ID Application: Your Name (TEAMID)" bash mac/build_mac.sh   # 署名(Tauri/plain共通)
@@ -12,9 +12,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."; ROOT=$PWD
 export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:$PATH"
-FEATURES="metal"; RUN_TEST=1; PLAIN=0
+FEATURES="metal,faceid"; RUN_TEST=1; PLAIN=0
 for a in "$@"; do case "$a" in
-  --faceid) FEATURES="metal,faceid";;
+  --store) FEATURES="metal,store";;   # ストア提出版: 顔ID(非商用モデル)なし・YouTube/X取り込み拒否・COCOはCC BY系のみ
   --no-test) RUN_TEST=0;;
   --plain) PLAIN=1;;   # Tauri殻を使わず、素のバイナリ+ブラウザ起動の .app(mac/launcher.sh)を作る
   *) echo "unknown option: $a" >&2; exit 2;;

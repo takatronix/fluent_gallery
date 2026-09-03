@@ -10,9 +10,23 @@ const BLOCKED_HOSTS: [&str; 12] = [
     "facebook.com", "fbcdn.net", "tiktok.com", "threads.net", "pinterest.com",
 ];
 
-pub fn blocked_host(host: &str) -> Option<&'static str> {
+fn host_in(host: &str, list: &[&'static str]) -> Option<&'static str> {
     let h = host.to_ascii_lowercase();
-    BLOCKED_HOSTS.iter().copied().find(|b| h == *b || h.ends_with(&format!(".{b}")))
+    list.iter().copied().find(|b| h == *b || h.ends_with(&format!(".{b}")))
+}
+
+/// ストア版(feature "store")だけ拒否する。フル機能版では None=取り込み可(利用者自身の責任で)
+pub fn blocked_host(host: &str) -> Option<&'static str> {
+    if cfg!(feature = "store") { host_in(host, &BLOCKED_HOSTS) } else { None }
+}
+
+/// 動画/SNS媒体: ページの<img>では取れないので yt-dlp でメディアを落としてフレーム化する
+const MEDIA_HOSTS: [&str; 12] = [
+    "youtube.com", "youtu.be", "x.com", "twitter.com", "instagram.com", "tiktok.com", "facebook.com",
+    "vimeo.com", "nicovideo.jp", "twitch.tv", "bilibili.com", "dailymotion.com",
+];
+pub fn media_host(host: &str) -> bool {
+    host_in(host, &MEDIA_HOSTS).is_some()
 }
 
 /// HTMLから画像候補URLを抜く(依存ゼロの素朴なタグ走査)。<img src/srcset/data-src>, og:image, 画像拡張子の <a href>
@@ -139,8 +153,8 @@ mod tests {
         ]);
         let (_, w) = extract(&base, r#"<img src="https://upload.wikimedia.org/wikipedia/commons/thumb/2/25/Siam.jpg/220px-Siam.jpg">"#);
         assert_eq!(w, vec!["https://upload.wikimedia.org/wikipedia/commons/2/25/Siam.jpg"]);
-        assert_eq!(blocked_host("www.youtube.com"), Some("youtube.com"));
-        assert_eq!(blocked_host("pbs.twimg.com"), Some("twimg.com"));
+        assert_eq!(blocked_host("www.youtube.com"), if cfg!(feature = "store") { Some("youtube.com") } else { None });
         assert_eq!(blocked_host("commons.wikimedia.org"), None);
+        assert!(media_host("www.youtube.com") && media_host("youtu.be") && !media_host("commons.wikimedia.org"));
     }
 }
