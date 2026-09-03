@@ -14,6 +14,8 @@ const check = (name, ok, detail = '') => {
 
 (async () => {
   // テストデータ収蔵
+  // 前回が途中で落ちていると掃除が走っていないので、まず残骸を消す(次の実行を巻き添えにしない)
+  for (const al of ['_uitest', '_uitest2', '_uitest_b']) await fetch(BASE + '/api/albums/' + al, {method: 'DELETE'});
   const fx = path.join(__dirname, 'fixtures');
   await fetch(BASE + '/api/ingest', {method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({path: fx, source: 'crawl:_uitest', move: false})});
@@ -187,6 +189,45 @@ const check = (name, ok, detail = '') => {
   });
   check('フォルダ改名(中身ごと引っ越す)', ren.shown && ren.gone && ren.before > 0 && ren.after === ren.before,
     `${ren.before}枚→${ren.after}枚`);
+
+  // 10b) 改名を開いたまま別の行の✎を押せる(取消時にサイドバーを描き直すと押せなくなっていた)
+  // 前の検査(連続削除)がライトボックスを開いたままなので閉じる。
+  // 開いていると全面オーバーレイがサイドバーを覆い、実マウスのクリックが届かない
+  await p.evaluate(() => closeLb());
+  await new Promise(r => setTimeout(r, 500));
+  // 操作アイコンはホバーで出て、その瞬間に行の間隔も詰まる(枚数が隠れる)。
+  // だから「ホバーしてから座標を測って押す」順でないと、ズレた場所を押して何も起きない
+  const penClick = async sel => {
+    const home = await p.evaluate(s => {
+      const row = document.querySelector(s);
+      if (!row) return null;
+      row.scrollIntoView({block: 'center'});
+      const r = row.getBoundingClientRect();
+      return {x: r.x + 20, y: r.y + r.height / 2};
+    }, sel);
+    if (!home) return false;
+    await p.mouse.move(home.x, home.y); // ホバー
+    await new Promise(r => setTimeout(r, 150));
+    const pt = await p.evaluate(s => {
+      const d = [...document.querySelector(s).querySelectorAll('.del')].find(x => x.title.startsWith('名前を変える'));
+      const r = d?.getBoundingClientRect();
+      return r && r.width ? {x: r.x + r.width / 2, y: r.y + r.height / 2} : null;
+    }, sel);
+    if (!pt) return false;
+    await p.mouse.click(pt.x, pt.y); // 実マウスで押す(編集中の入力のblurとの順番を本番どおりに再現)
+    return true;
+  };
+  await penClick('.nav[data-album="_uitest_b"]');
+  await new Promise(r => setTimeout(r, 300));
+  const open1 = await p.evaluate(() => document.querySelector('input.rn')?.closest('.nav')?.dataset.album);
+  await penClick('.nav[data-album="_uitest2"]'); // 開いたまま別の✎を押す
+  await new Promise(r => setTimeout(r, 400));
+  const open2 = await p.evaluate(() => document.querySelector('input.rn')?.closest('.nav')?.dataset.album);
+  await p.keyboard.press('Escape');
+  await new Promise(r => setTimeout(r, 300));
+  const closed = await p.evaluate(() => !document.querySelector('input.rn') && !renaming);
+  check('✎連打(開いたまま別の行も押せる)', open1 === '_uitest_b' && open2 === '_uitest2' && closed,
+    `${open1} → ${open2}`);
 
   // 11) D&Dでグループへ移動
   const dnd = await p.evaluate(async () => {

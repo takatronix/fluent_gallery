@@ -894,6 +894,7 @@ function refoldPrefix(from, to) {
 // ---- インライン改名(prompt禁止=憲法5条。その場で書き換えてEnter/フォーカスアウトで確定、Escで取消) ----
 function startRename(ev, kind, key) {
   ev.stopPropagation(); ev.preventDefault();
+  if (renaming) document.querySelector('input.rn')?.blur(); // 開きっぱなしの別の入力を先に閉じる
   const row = ev.currentTarget.closest('.nav');
   const nm = row?.querySelector('.nm');
   if (!nm || renaming) return;
@@ -920,8 +921,12 @@ async function endRename(inp, kind, key) {
   inp.dataset.done = '1';
   const v = inp.value.trim(), cancelled = inp.dataset.cancel === '1';
   const cur = kind === 'group' ? key.split('/').pop() : key;
+  const nm = inp.parentElement, row = inp.closest('.nav');
   renaming = null;
-  if (cancelled || !v || v === cur) { renderSide(); return; }
+  // 取消/変更なしは元の文字に戻すだけ。ここでサイドバーを描き直すと、
+  // 次に押されるはずのボタンが消えて「押しても何も起きない」になる(2026-09-04報告の真因)
+  const restore = () => { if (nm) nm.textContent = cur; if (row) row.draggable = true; };
+  if (cancelled || !v || v === cur) { restore(); return; }
   try {
     if (kind === 'album') {
       const r = await j('/api/albums/' + encodeURIComponent(key) + '/rename', {method: 'POST',
@@ -937,7 +942,7 @@ async function endRename(inp, kind, key) {
       toast(`グループ「${cur}」→「${v}」に変更(${r.changed}個のフォルダ)`);
       await loadAlbums();
     }
-  } catch (e) { toast('❌ ' + e.message); renderSide(); }
+  } catch (e) { toast('❌ ' + e.message); restore(); }
 }
 
 // ---- 確認ポップアップ(ネイティブconfirm禁止=憲法5条。戻すのが大変な操作にだけ出す) ----
