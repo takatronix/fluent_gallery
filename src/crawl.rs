@@ -865,6 +865,10 @@ async fn judge_builtin(client: &reqwest::Client, img: &image::DynamicImage, goal
         .encode_image(&th)
         .map_err(|e| e.to_string())?;
     let b64 = base64::engine::general_purpose::STANDARD.encode(buf.get_ref());
+    if let Some(base) = enrich::local_vlm_base() {
+        let text = enrich::describe_openai_compat(client, &base, "vlm", &b64, &judge_prompt(goal, hints, false), 0.0, 300, Some(enrich::judge_schema())).await?;
+        return parse_judge(&text);
+    }
     let v: Value = client
         .post(format!("{}/api/generate", enrich::OLLAMA))
         .json(&json!({"model": enrich::BUILTIN_MODEL, "prompt": judge_prompt(goal, hints, false), "images": [b64],

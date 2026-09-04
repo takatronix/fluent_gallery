@@ -67,6 +67,10 @@ impl App {
 
 type S = State<&'static App>;
 
+/// ♻自動収集の見回り周期と次回時刻(epoch 秒)。UI に出すために公開する
+const AUTOPILOT_INTERVAL_SECS: u64 = 1800;
+static AUTOPILOT_NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 // ---------- 読み ----------
 
 #[derive(Deserialize, Default)]
@@ -2178,18 +2182,19 @@ async fn ai_status(app: &'static App) -> Value {
         Some(r) if r.status().is_success() => r.text().await.map(|t| t.contains("annotation")).unwrap_or(false),
         _ => false,
     };
-    let vlm_reachable = ollama.is_some();
-    let vlm_present = match ollama {
+    let local_vlm = enrich::local_vlm_ok(&app.http).await;
+    let vlm_reachable = local_vlm || ollama.is_some();
+    let vlm_present = if local_vlm { true } else { match ollama {
         Some(r) => r.json::<Value>().await.ok()
             .and_then(|t| t["models"].as_array().map(|a| a.iter().any(|m| m["name"].as_str().unwrap_or("").starts_with("qwen2.5vl"))))
             .unwrap_or(false),
         None => false,
-    };
+    } };
     let key = |k: &str| enrich::mlhub_key(k).is_some();
     let v = json!({
         "llm": app.llm.status(&app.root),
         "clip": onnx::status(&app.root),
-        "vlm": {"backend": "ollama", "model": enrich::BUILTIN_MODEL, "reachable": vlm_reachable, "present": vlm_present},
+        "vlm": {"backend": if local_vlm { "llama-server" } else { "ollama" }, "model": if local_vlm { "local:vlm" } else { enrich::BUILTIN_MODEL }, "reachable": vlm_reachable, "present": vlm_present},
         "seg": {"backend": "ml-hub", "reachable": seg_ok},
         "faceid": faceid_status(),
         "store": cfg!(feature = "store"),
@@ -2244,6 +2249,7 @@ async fn api_activity(State(app): S) -> Json<Value> {
             "label": app.ingest_label.lock().unwrap().clone(),
         },
         "workers": Value::Object(app.workers.lock().unwrap().clone()),
+        "autopilot": {"interval_secs": AUTOPILOT_INTERVAL_SECS, "next_at": AUTOPILOT_NEXT.load(Relaxed), "per_run_default": 30, "run_minutes": 15, "min_quality": 5},
         "system": sys_stats(),
     }))
 }
@@ -3314,7 +3320,10 @@ async fn main() {
     // 「置いとくと増える・キュレーションで消してもまた埋まる」の実体。一度に走るのは1フォルダ(直列)。
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(1800)).await;
+            // 次回の見回り時刻を黒板に出す(UI の「自動収集: 30分ごと・次回 N 分後」用)
+            let next = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + AUTOPILOT_INTERVAL_SECS;
+            AUTOPILOT_NEXT.store(next, Relaxed);
+            tokio::time::sleep(std::time::Duration::from_secs(AUTOPILOT_INTERVAL_SECS)).await;
             if app.crawl.alive.load(Relaxed) {
                 continue;
             }

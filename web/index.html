@@ -1230,8 +1230,9 @@ function folderHeadHtml(a, isNew) {
         title="このフォルダの累計消費(クリックで トークン/$/¥ 切替) / 上限$${a.agent?.budget_usd ?? 3}(設定欄で変更)">
         ${fmtCost(a.agent?.spent_tok, a.agent?.spent_usd)}<span style="color:var(--faint)"> / $${a.agent?.budget_usd ?? 3}</span></span>` : ''}
       <span class="switch ${a.agent?.auto ? 'on' : ''}" onclick="toggleAutoHead()"
-        title="ONの間は30分ごとに見回り、目標枚数まで勝手に補充し続けます(消して減ってもまた埋める)">
-        <span class="track"></span>自動で目標まで保つ</span>
+        title="ONの間は30分ごとに見回り、目標枚数に足りなければ1回ぶん(既定30枚・最長15分)集めます。消して減ってもまた埋めます">
+        <span class="track"></span>自動収集</span>
+      <span class="lbl" id="ah_cycle" style="width:auto; color:var(--faint)" title="見回りの周期と次回時刻(サーバの実測)">${a.agent?.auto ? '30分ごと' : ''}</span>
       <span class="switch ${a.agent?.rights_clean ? 'on' : ''}" onclick="toggleCleanHead()"
         title="ONの間はCC/公式APIの検索元(Openverse/Wikimedia/Pexels/Pixabay)だけで集めます。DDG/YouTube/Xは権利不明のため使いません(サーバー側で強制)">
         <span class="track"></span>${a.agent?.rights_clean ? '🟢' : ''}権利クリーン</span>
@@ -1479,7 +1480,7 @@ async function toggleAutoHead() {
     await j('/api/albums', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({name: a.name, folder: a.folder || '', goal: a.goal || '',
                             agent, keywords: a.keywords || [], engines: a.engines || [], criteria: a.criteria})});
-    toast(agent.auto ? `放置で自動収集ON — 目標${agent.target}枚まで勝手に増えます` : '自動収集OFF');
+    toast(agent.auto ? `自動収集ON — 30分ごとに見回り、目標${agent.target}枚まで1回${agent.batch || 30}枚ずつ集めます` : '自動収集OFF');
     await loadAlbums(); renderViewhead();
   } catch (e) { toast('❌ ' + e.message); }
 }
@@ -3360,6 +3361,14 @@ async function watchActivity() {
       <span style="flex:none; font-variant-numeric:tabular-nums">${s.ram.used_gb.toFixed(0)}G</span></div>` : '';
     const qn = c.queue?.length || 0;
     const w = a.workers || {};
+    // ♻自動収集: 周期と次回時刻を必ず出す(ON/OFF に関わらず「いつ動くか」が見えるように)
+    const apRow = () => {
+      const ap = a.autopilot || {}; const x = w.autopilot || {};
+      const left = ap.next_at ? Math.max(0, Math.round((ap.next_at * 1000 - Date.now()) / 60000)) : null;
+      const cyc = `${Math.round((ap.interval_secs || 1800) / 60)}分ごと` + (left != null ? ` · 次回 ${left}分後` : '');
+      const el = document.getElementById('ah_cycle'); if (el && el.textContent) el.textContent = cyc;
+      return row('loop', '自動収集', !!x.on, (x.detail ? x.detail + ' · ' : '') + cyc);
+    };
     const wrow = (icon, name, key) => {
       const x = w[key];
       return x ? row(icon, name, !!x.on, x.detail || '') : '';
@@ -3378,7 +3387,7 @@ async function watchActivity() {
       (a.ai?.clip && !a.ai.clip.present
         ? row('spark', 'CLIP', a.ai.clip.downloading, a.ai.clip.downloading ? `DL ${Math.round(100 * a.ai.clip.got_mb / (a.ai.clip.total_mb || 1))}%${eta('clip', a.ai.clip.got_mb, a.ai.clip.total_mb)}` : 'モデル未取得')
         : wrow('spark', 'CLIP', 'clip')) +       // 似た画像の索引(裏方)。モデルが無ければその旨
-      wrow('loop', '見回り', 'autopilot') + // ♻自動補充の巡回
+      apRow() + // ♻自動収集の巡回(周期と次回)
       wrow('bot', 'お手入れ', 'groom') +    // 属性/マスクの穴埋め巡回
       cpu + gpu + ram;
     // ストレージ(ml-hub風メーター): ライブラリの量と、ディスクの余白

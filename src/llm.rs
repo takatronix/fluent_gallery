@@ -135,7 +135,8 @@ fn engine_thread(root: PathBuf, rx: std::sync::mpsc::Receiver<Req>) {
     for req in rx {
         let out = (|| -> Result<String, String> {
             let cparams = LlamaContextParams::default()
-                .with_n_ctx(std::num::NonZeroU32::new(4096));
+                .with_n_ctx(std::num::NonZeroU32::new(4096))
+                .with_n_batch(4096); // 修正: 既定 2048 のままだと 2049〜3800 トークンで GGML_ASSERT → プロセスごと落ちる
             let mut ctx = model.new_context(&backend, cparams).map_err(|e| e.to_string())?;
             let tokens = model.str_to_token(&req.prompt, AddBos::Never).map_err(|e| e.to_string())?;
             if tokens.is_empty() || tokens.len() > 3800 {
@@ -151,7 +152,9 @@ fn engine_thread(root: PathBuf, rx: std::sync::mpsc::Receiver<Req>) {
                 LlamaSampler::temp(req.temp),
                 LlamaSampler::dist(42),
             ]);
-            let mut out = String::new();
+            // 修正: 1トークンずつ文字列化すると多バイト文字(漢字)がトークン境界で割れて
+            // 無効UTF-8→欠落/U+FFFD になる。バイト列で貯めて最後にまとめて復号する
+            let mut out_bytes: Vec<u8> = Vec::new();
             let mut n_cur = tokens.len() as i32;
             for _ in 0..req.max_tokens {
                 let token = sampler.sample(&ctx, batch.n_tokens() - 1);
@@ -159,13 +162,13 @@ fn engine_thread(root: PathBuf, rx: std::sync::mpsc::Receiver<Req>) {
                 if model.is_eog_token(token) {
                     break;
                 }
-                out.push_str(&model.token_to_str(token, Special::Tokenize).unwrap_or_default());
+                out_bytes.extend(model.token_to_bytes(token, Special::Tokenize).unwrap_or_default());
                 batch.clear();
                 batch.add(token, n_cur, &[0], true).map_err(|e| e.to_string())?;
                 n_cur += 1;
                 ctx.decode(&mut batch).map_err(|e| e.to_string())?;
             }
-            Ok(out)
+            Ok(String::from_utf8_lossy(&out_bytes).into_owned())
         })();
         let _ = req.resp.send(out);
     }

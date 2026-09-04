@@ -67,7 +67,7 @@ SIGN="Developer ID Application: ..." NOTARY_PROFILE=fg bash mac/build_mac.sh   #
 ### 依存
 
 - **必須**: Rust, Chrome(回帰テスト用), Node.js(回帰テスト用)
-- **任意**: ollama(内蔵VLM `qwen2.5vl:7b`)、ml-hub(マスク生成)、yt-dlp + ffmpeg(動画/SNS取り込み。Mac は `brew install yt-dlp ffmpeg`、`~/.local/bin` と `/opt/homebrew/bin` を探す)、OpenRouter/Anthropic/xAI/Pexels/Pixabayの各APIキー
+- **任意**: ローカルVLM(llama.cpp の `llama-server` に Qwen3-VL 系 GGUF+mmproj を載せ、`FG_VLM_BASE=http://127.0.0.1:8081/v1` で指す。OpenAI互換+json_schema。Mac既定はこれ、無ければ ollama へ)、ollama(内蔵VLM `qwen2.5vl:7b`)、ml-hub(マスク生成)、yt-dlp + ffmpeg(動画/SNS取り込み。Mac は `brew install yt-dlp ffmpeg`、`~/.local/bin` と `/opt/homebrew/bin` を探す)、OpenRouter/Anthropic/xAI/Pexels/Pixabayの各APIキー
 - キーは `~/ml-hub/config/settings.json` に置く(`openrouter_api_key`, `anthropic_api_key`, `gallery_judge_model` など)
 
 > **内蔵VLMはVRAMに8GBの空きが必要。** 足りないとollamaがCPUへ部分オフロードし、CPUを食い尽くしてUIまで重くなる。サイドバーのVRAMメーターで空きを確認できる。

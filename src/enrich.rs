@@ -9,6 +9,59 @@ use std::sync::Mutex;
 pub const OLLAMA: &str = "http://127.0.0.1:11434";
 pub const BUILTIN_MODEL: &str = "qwen2.5vl:7b";
 
+/// Mac 既定: アプリ同梱の llama-server(OpenAI 互換, 画像入力可)を内蔵 VLM として使う。
+/// FG_VLM_BASE(例 http://127.0.0.1:8081/v1)が設定され /health が通れば ollama より優先。
+pub fn local_vlm_base() -> Option<String> {
+    std::env::var("FG_VLM_BASE").ok().filter(|s| !s.is_empty()).map(|s| s.trim_end_matches('/').to_string())
+}
+pub async fn local_vlm_ok(client: &reqwest::Client) -> bool {
+    let Some(base) = local_vlm_base() else { return false };
+    let health = base.trim_end_matches("/v1").to_string() + "/health";
+    client.get(health).timeout(std::time::Duration::from_secs(2)).send().await.map(|r| r.status().is_success()).unwrap_or(false)
+}
+/// OpenAI 互換 chat/completions に画像+プロンプトを投げて JSON を返す(llama-server / LM Studio / vLLM 共通)
+/// 属性付け JSON の形(llama-server の json_schema 制約用)。列挙値は PROMPT と同じ。
+/// 実測: 制約なしだと 7B でも 3 割が caption だけ/暴走で壊れる → 制約ありで 30/30 が通る
+pub fn enrich_schema() -> Value {
+    json!({"type":"object","properties":{
+        "caption":{"type":"string"},
+        "tags":{"type":"array","items":{"type":"string"},"minItems":5,"maxItems":12},
+        "attrs":{"type":"object","properties":{
+            "scene":{"enum":["indoor","outdoor","studio","street","nature","abstract","other"]},
+            "subject":{"enum":["person","face","animal","food","vehicle","building","object","landscape","text","other"]},
+            "gender":{"enum":["male","female","mixed","none"]},
+            "animal":{"enum":["dog","cat","bird","fish","horse","rabbit","reptile","insect","farm","wild","other","none"]},
+            "people_count":{"enum":["0","1","2","group"]},
+            "age_group":{"enum":["child","teen","adult","senior","none"]},
+            "framing":{"enum":["closeup","upper_body","full_body","wide"]},
+            "watermark":{"type":"boolean"},
+            "lighting":{"enum":["daylight","night","indoor","studio","dramatic","flat","other"]},
+            "style":{"enum":["photo","illustration","anime","3dcg","painting","sketch","other"]},
+            "quality":{"type":"integer","minimum":1,"maximum":10},
+            "nsfw":{"type":"boolean"}},
+          "required":["scene","subject","gender","animal","people_count","age_group","framing","watermark","lighting","style","quality","nsfw"]}},
+      "required":["caption","tags","attrs"]})
+}
+pub fn judge_schema() -> Value {
+    json!({"type":"object","properties":{"match":{"type":"boolean"},"quality":{"type":"integer","minimum":1,"maximum":10}},"required":["match","quality"]})
+}
+pub async fn describe_openai_compat(client: &reqwest::Client, base: &str, model: &str, b64: &str, prompt: &str, temp: f64, max_tokens: u32, schema: Option<Value>) -> Result<String, String> {
+    let mut body = json!({"model": model, "max_tokens": max_tokens, "temperature": temp,
+            "messages": [{"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": format!("data:image/jpeg;base64,{b64}")}},
+                {"type": "text", "text": prompt}]}]});
+    if let Some(sc) = schema {
+        body["response_format"] = json!({"type": "json_schema", "json_schema": {"name": "out", "schema": sc}});
+    }
+    let v: Value = client
+        .post(format!("{base}/chat/completions"))
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(300))
+        .send().await.map_err(|e| format!("内蔵VLM(llama-server)接続失敗: {e}"))?
+        .json().await.map_err(|e| e.to_string())?;
+    v["choices"][0]["message"]["content"].as_str().map(str::to_string).ok_or_else(|| format!("応答無し: {}", v))
+}
+
 pub const PROMPT: &str = r#"Describe this image for a dataset library. Reply with ONLY a JSON object:
 {"caption": "one sentence, concrete, in English",
  "tags": ["5-12 short lowercase tags"],
@@ -95,6 +148,9 @@ fn parse_json(text: &str) -> Option<Value> {
 }
 
 pub async fn ensure_builtin(client: &reqwest::Client) -> Result<(), String> {
+    if local_vlm_ok(client).await {
+        return Ok(());
+    }
     let tags: Value = client
         .get(format!("{OLLAMA}/api/tags"))
         .send()
@@ -123,6 +179,12 @@ pub async fn describe(client: &reqwest::Client, img: &Path, backend: &str) -> Re
     let b64 = base64::engine::general_purpose::STANDARD.encode(std::fs::read(img).map_err(|e| e.to_string())?);
     for attempt in 0..2 {
         let r: Result<Value, String> = match backend {
+            "builtin" if local_vlm_base().is_some() => async {
+                let base = local_vlm_base().unwrap();
+                let text = describe_openai_compat(client, &base, "vlm", &b64, PROMPT, 0.1 + attempt as f64 * 0.4, 700, Some(enrich_schema())).await?;
+                parse_json(&text).ok_or_else(|| "JSON壊れ".into())
+            }
+            .await,
             "builtin" => async {
                 let v: Value = client
                     .post(format!("{OLLAMA}/api/generate"))
