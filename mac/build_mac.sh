@@ -22,6 +22,8 @@ esac; done
 BUNDLE_ID="${BUNDLE_ID:-com.takatronix.fluentgallery}"
 VERSION=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')
 LLAMA_BUILD="${LLAMA_BUILD:-b10797}"   # 同梱する llama.cpp のビルド(macOS arm64 tar.gz がある番号)
+SD_BUILD="${SD_BUILD:-master-841-6b3edaa}"  # 同梱する stable-diffusion.cpp のリリース(生成エンジン、MIT、macOS arm64 zip)
+SD_ZIP="${SD_ZIP:-sd-master-${SD_BUILD##*-}-bin-Darwin-macOS-26.5.2-arm64.zip}"  # 資産名(sd-master-<hash>-bin-…)の macOS 版数はリリースごとに変わる
 APP=dist/FluentGallery.app
 DMG=dist/FluentGallery-$VERSION.dmg
 step() { printf '\n\033[1;36m== %s\033[0m\n' "$*"; }
@@ -68,6 +70,16 @@ if [ "$PLAIN" = 0 ]; then
     cp "$TMPL"/llama-*/llama-server "$TMPL"/llama-*/*.dylib "$LL/"; rm -rf "$TMPL"
   fi
   ls "$LL" | wc -l | xargs echo "  llama/ files:"
+  step "生成エンジン sd-server(stable-diffusion.cpp $SD_BUILD, macOS arm64 Metal, MIT)を同梱"
+  SD=mac/tauri/src-tauri/sd
+  if [ ! -x "$SD/sd-server" ]; then
+    rm -rf "$SD"; mkdir -p "$SD"; TMPS=$(mktemp -d)
+    curl -sL -o "$TMPS/sd.zip" "https://github.com/leejet/stable-diffusion.cpp/releases/download/$SD_BUILD/$SD_ZIP"
+    unzip -q -o "$TMPS/sd.zip" -d "$TMPS/sd"
+    find "$TMPS/sd" -type f \( -name 'sd-server' -o -name 'sd-cli' -o -name '*.dylib' \) -exec cp {} "$SD/" \;
+    rm -rf "$TMPS"; chmod +x "$SD"/sd-*
+  fi
+  ls "$SD" | wc -l | xargs echo "  sd/ files:"
   if [ -n "${SIGN:-}" ]; then export APPLE_SIGNING_IDENTITY="$SIGN"; else unset APPLE_SIGNING_IDENTITY; fi  # 未指定=未署名
   (cd mac/tauri && npx tauri build --ci 2>&1 | grep -vE '^\s+(Compiling|Finished)')
   BUNDLE=mac/tauri/src-tauri/target/release/bundle
@@ -86,6 +98,7 @@ cp "$BIN" "$APP/Contents/MacOS/fluent_gallery"
 cp mac/launcher.sh "$APP/Contents/MacOS/FluentGallery"; chmod +x "$APP/Contents/MacOS/"*
 cp web/index.html "$APP/Contents/Resources/web/index.html"
 if [ -x mac/tauri/src-tauri/llama/llama-server ]; then mkdir -p "$APP/Contents/Resources/llama"; cp mac/tauri/src-tauri/llama/* "$APP/Contents/Resources/llama/"; fi
+if [ -x mac/tauri/src-tauri/sd/sd-server ]; then mkdir -p "$APP/Contents/Resources/sd"; cp mac/tauri/src-tauri/sd/* "$APP/Contents/Resources/sd/"; fi
 [ -f mac/AppIcon.icns ] && cp mac/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 sed -e "s/__BUNDLE_ID__/$BUNDLE_ID/" -e "s/__VERSION__/$VERSION/" mac/Info.plist > "$APP/Contents/Info.plist"
 echo "同梱: $(du -sh "$APP" | cut -f1)"

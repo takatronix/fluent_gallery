@@ -12,6 +12,7 @@
 |---|---|
 | **収蔵** | フォルダ/カメラ/動画(1fps間引き+HDRトーンマップ)/URL。SHA-1のcontent-addressed保存+ハードリンク収蔵で容量ゼロ |
 | **AIフォルダ** | 「何を集めたいか」を日本語で書くと、AIがクエリを作り7つの検索元から集め、目利きAIが1枚ずつ合否判定して収蔵。♻自動補充で置いとくと増える |
+| **生成フォルダ** | 「何を作りたいか」を日本語で書くと、内蔵LLMが英語プロンプトを設計し、内蔵の画像生成AI(stable-diffusion.cpp + FLUX.2 klein 4B、全部 Apache-2.0)が棚の素材を量産。参照(画像=固定 / フォルダ・データセット=毎回抽選)を付けると被写体を保った変種になる(サムネ右クリック「似た画像を作る」)。途中経過を各ステップ表示。モデルは klein / Z-Image Turbo / Qwen-Image-Edit-2509 から選択。近重複と内蔵VLMの目利きで門前払いして収蔵(来歴=プロンプト/seed/参照 をサイドカーに)。♻自動生成で夜間に増える。1024²で約27秒/枚(M3 Ultra)。設計: [docs/gen-design.md](docs/gen-design.md) |
 | **顔ID** | 顔検出(SCRFD)+顔埋め込み(ArcFace)で本人を無料・確定的に判定。登録した人物以外は収集時に門前払い、既存画像にも遡及タグ付け、人物名で検索 |
 | **VLM属性** | 内蔵qwen2.5vlが caption/tags/scene/subject/style/gender/age/framing/watermark 等を自動付与 |
 | **マスク** | GroundingDINO+SAM2(ml-hub経由)で自動セグメント。点/箱クリックの手動修正、切り抜きPNG書き出し |
@@ -20,6 +21,7 @@
 | **整理** | フォルダ/グループ/データセット/棚の名称変更(ダブルクリック or ✎)、D&Dで移動(同じ木の中だけ)、フォルダ同士の合流(確認ポップアップ付き・画像は消えない) |
 | **払い出し** | 選択やフィルタ結果を `store/datasets/<name>/` へsymlink+manifestで出荷。ml-hubの学習にそのまま使える |
 | **AI 1st** | 全操作がAPI。MCPサーバ(`mcp/`)経由でAIが自律運用できる |
+| **設定** | サイドバー最下段の歯車。AIの役の既定・別マシンの接続先(sd-server/VLM)・APIキー(末尾4桁表示+疎通確認)・モデル取得・外部ツール・自動運転の周期・キャッシュ上限を行ごとに自動保存。正本は `store/config.json`、環境変数(`FG_*`)は開発用の上書き |
 
 ---
 
@@ -49,6 +51,13 @@ cargo build --release                                              # Linux/CUDA�
 cargo build --release --no-default-features --features metal,faceid # Mac・フル機能(自分用)
 cargo build --release --no-default-features --features metal,store  # Mac・ストア提出版
 ```
+
+### 生成エンジン(stable-diffusion.cpp)
+
+生成フォルダはローカルでは `sd-cli`(stable-diffusion.cpp の公式リリース、MIT)を 1 枚ごとに起動する(途中経過が出せ、待機中はメモリを持たない)。別マシンの `sd-server` も使える(設定の接続先)。Mac の .app は `mac/build_mac.sh` が `Resources/sd/` に同梱する。
+開発時は `engine/bin/sd-server`(+ `libstable-diffusion.dylib`)を置くか `FG_SD_SERVER=パス`。モデル 3 本(klein 4B Q8_0 / FLUX.2 VAE / Qwen3-4B、計 7.1GB)は
+AI配役の「取得」または `POST /api/gen/pull` で `engine/models/` に初回 DL。Linux/CUDA は `cmake -DSD_CUDA=ON` で自前ビルド。
+別マシンの sd-server を使うなら `FG_GEN_BASE=http://host:8092`。API: `POST /api/gen {album,n}` / `GET /api/gen/status` / `POST /api/gen/stop` / `POST /api/gen/plan` / `GET /api/gen/engine`。
 
 ### Mac 販売ビルド(.app / .dmg)
 

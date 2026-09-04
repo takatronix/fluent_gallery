@@ -28,7 +28,8 @@
     ],
     "resources": {
       "../../../web/index.html": "web/index.html",
-      "llama/": "llama/"
+      "llama/": "llama/",
+      "sd/": "sd/"
     },
     "macOS": {
       "minimumSystemVersion": "13.0"

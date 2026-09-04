@@ -223,7 +223,7 @@ COCO は val2017 で足りなければ train2017 も開く(CC BY系のみ=全体
 ## マイルストーン
 - M1: Rustコア読み系(/, images, facets, meta, img, thumb) — 既存storeをそのまま配信
 - M2: 書き系(ingest/presets/datasets/rebuild) + **ingest時サムネ焼き+ThumbHash** → Python版を退役
-- M3: enrichジョブ(ollama/Claude/GPT) + genvarをengineキューに内製化
+- M3: enrichジョブ(ollama/Claude/GPT) + genvarをengineキューに内製化 → **生成は [gen-design.md](gen-design.md) に置き換え(2026-09-04)**
 - M4: 非破壊調整 + フルエント閲覧の磨き込み(fluent_scene統合) — ✅2026-09-02実装:
   edits履歴API(push/pop/clear)+/render(revキャッシュ)+/preview 1080段+編集パネル
   (スライダCSSライブ近似→適用でサーバ焼き、fluent_scene様式チップのホバー染め、押下比較、E/S/⌘Z)
@@ -240,7 +240,7 @@ COCO は val2017 で足りなければ train2017 も開く(CC BY系のみ=全体
   動作リミット=枚数/分/連続エラー8。オートパイロット=30分毎に♻ONフォルダを目標枚数まで補充。
   E2E実証: 「可愛い犬の実写」8/8収蔵・通過率100%・$0.02・1分未満。
   残: Xウォッチャー/YouTube/権利フィルタUI/コスト実費の精密化/朝刊
-- M6: LoRA学習
+- M6: LoRA学習 → **学習は別アプリ、LoRA棚は gallery([gen-design.md](gen-design.md) §5、2026-09-04)**
 - M5.5: **内蔵LLM(本当の内蔵)** — ✅2026-09-03実装: src/llm.rs。llama.cppをバイナリに直リンク
   (llama-cpp-2/CUDA全層オフロード)、Qwen3-4B-Instruct GGUF(Apache 2.0/2.4GB)を初回自動DL。
   推論は専用スレッド1本(モデル常駐・直列)。API=/api/llm/status|pull|test。

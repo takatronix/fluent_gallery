@@ -32,6 +32,22 @@ TOOLS = [
      "description": "フォルダの収集台帳(使用済みクエリ/既読URL数/目標解釈brief)を読む",
      "inputSchema": {"type": "object", "properties": {
          "album": {"type": "string"}}, "required": ["album"]}},
+    {"name": "gen_status",
+     "description": "AI生成フォルダの現在状態(計画/生成/収蔵/却下/秒毎枚/直近ストリップ)とエンジン(sd-server, モデル取得状況)を返す",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "gen_start",
+     "description": "生成フォルダ(kind=gen のアルバム)で n 枚ぶんの生成を開始する(内蔵 klein 4B、無料)",
+     "inputSchema": {"type": "object", "properties": {
+         "album": {"type": "string", "description": "フォルダ名"},
+         "n": {"type": "integer", "description": "収蔵する枚数(既定30)"}},
+         "required": ["album"]}},
+    {"name": "gen_stop",
+     "description": "生成を停止する(描きかけの1枚が終わり次第)",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "gen_plan",
+     "description": "目標文からどんな英語プロンプトが作られるかを下見する(生成はしない)",
+     "inputSchema": {"type": "object", "properties": {
+         "album": {"type": "string"}, "goal": {"type": "string"}, "n": {"type": "integer"}}}},
     {"name": "api",
      "description": "ギャラリーの任意HTTP APIを叩く(デバッグ用)。例: path=/api/crawl/status",
      "inputSchema": {"type": "object", "properties": {
@@ -82,6 +98,14 @@ def call_tool(name, args):
                     "brief": d.get("brief", "")}
         except Exception as e:
             return {"error": str(e)}
+    if name == "gen_status":
+        return http("/api/gen/status")
+    if name == "gen_start":
+        return http("/api/gen", "POST", {"album": args["album"], "n": int(args.get("n") or 30)})
+    if name == "gen_stop":
+        return http("/api/gen/stop", "POST", {})
+    if name == "gen_plan":
+        return http("/api/gen/plan", "POST", {k: v for k, v in args.items() if k in ("album", "goal", "n")}, timeout=300)
     if name == "api":
         return http(args["path"], args.get("method", "GET"), args.get("body"))
     return {"error": f"unknown tool {name}"}

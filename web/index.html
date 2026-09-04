@@ -134,9 +134,37 @@
   .engchip.on { color:var(--tx); border-color:var(--acc); background:#4d9fff14; }
   .engchip.on svg { opacity:1; color:var(--acc); }
 
-  #crawlbar { display:none; margin:8px 16px 0; background:var(--panel);
+  #crawlbar, #genbar { display:none; margin:8px 16px 0; background:var(--panel);
     border:1px solid var(--line); border-radius:10px; padding:6px 12px; font-size:12px; color:var(--dim); }
-  #crawlbar.show { display:flex; }
+  #crawlbar.show, #genbar.show { display:flex; }
+  /* 種別アイコンの色(収集=青 / 生成=紫)と、動作中の行(脈打つ点+行の淡い光) docs/gen-design.md §3.2 */
+  .kic { display:flex; align-items:center; flex:none; }
+  .kic.crawl { color:#7fa7e0; } .kic.gen { color:#b48cff; }
+  .nav.running { background:linear-gradient(90deg, transparent 0%, #6ee7a014 50%, transparent 100%); background-size:200% 100%; animation:navglow 6s linear infinite; }
+  @keyframes navglow { from { background-position:200% 0; } to { background-position:-200% 0; } }
+  .nav .st.live svg { animation:pulse 1.2s ease infinite; }
+  @media (prefers-reduced-motion: reduce) { .nav.running { animation:none; } .nav .st.live svg { animation:none; } }
+  /* 設定ページ(docs/gen-design.md §8.1): 節ごとのカード、行ごとに自動保存 */
+  #grid.page { display:block; }  /* 設定ページはサムネのグリッドではなく普通の文書として流す */
+  .setpage { padding:14px 16px 40px; max-width:960px; }
+  .setpage h2 { white-space:nowrap; }
+  .setpage h2 { font-size:15px; margin:0 0 10px; display:flex; align-items:center; gap:8px; }
+  .setsec { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:10px 16px 12px; margin-bottom:12px; }
+  .setsec h3 { font-size:12.5px; margin:0 0 4px; color:var(--tx); }
+  .setsec .hint { font-size:11px; color:var(--faint); margin-bottom:6px; line-height:1.5; }
+  .setrow { display:flex; gap:10px; align-items:center; padding:5px 0; font-size:12.5px; border-top:1px solid var(--hair); flex-wrap:wrap; }
+  .setrow:first-of-type { border-top:none; }
+  .setrow .lbl { width:150px; flex:none; color:var(--dim); font-size:11.5px; }
+  .setrow input[type=text], .setrow input[type=password], .setrow input[type=number], .setrow select {
+    background:var(--bg); border:1px solid var(--line); border-radius:8px; color:var(--tx); padding:5px 9px; font-size:12.5px; }
+  .setrow input[type=text], .setrow input[type=password] { flex:1; min-width:160px; }
+  .setrow .note { font-size:11px; color:var(--faint); }
+  .setrow .ok { color:var(--ok); font-size:11px; }
+  .setrow .ng { color:#e06c75; font-size:11px; }
+  .setrow .saved { font-size:11px; color:var(--ok); opacity:0; transition:opacity .3s; }
+  .setrow .saved.show { opacity:1; }
+  #ah_plan { font-size:11.5px; color:var(--dim); line-height:1.5; margin:4px 0 0 0; padding-left:0; list-style:none; }
+  #ah_plan li::before { content:'· '; color:var(--faint); }
   /* フォルダパネルは1行に畳む(サムネの場所を食わない)。⌄で展開 */
   #viewhead .details { display:none; }
   #viewhead.open .details { display:block; }
@@ -195,13 +223,22 @@
   .cell:is(.m1,.m2,.m3,.m4,.m5,.m6,.m7)::after { box-sizing:border-box; padding:0 6px 5px;
     display:flex; align-items:flex-end; justify-content:flex-end; color:#e8ecf2c7;
     font-size:10px; font-weight:750; line-height:1; letter-spacing:2px; text-shadow:0 1px 3px #000; }
-  .cell.m1::after { content:'✓'; }
+  /* 権利クリーン(bit1)は緑の丸✓を左下に(2026-09-05 指摘「権利クリーンのアイコンが分からない」)。$/○ は従来どおり右下 */
+  .cell:is(.m1,.m3,.m5,.m7)::before { content:'✓'; position:absolute; left:6px; bottom:6px; width:16px; height:16px; border-radius:99px;
+    background:#22c55ee0; color:#fff; font-size:10px; font-weight:800; line-height:16px; text-align:center; z-index:1; pointer-events:none; box-shadow:0 1px 4px #0009; }
+  .cell.m1::after { content:''; }
   .cell.m2::after { content:'$'; }
-  .cell.m3::after { content:'✓ $'; }
+  .cell.m3::after { content:'$'; }
   .cell.m4::after { content:'○'; }
-  .cell.m5::after { content:'✓ ○'; }
+  .cell.m5::after { content:'○'; }
   .cell.m6::after { content:'$ ○'; }
-  .cell.m7::after { content:'✓ $ ○'; }
+  .cell.m7::after { content:'$ ○'; }
+  body.dense .cell:is(.m1,.m3,.m5,.m7)::before { content:''; background:transparent; box-shadow:none; }
+  .refchip { position:relative; display:inline-flex; align-items:center; gap:4px; border:1px solid var(--line); border-radius:8px; padding:2px 6px 2px 2px; font-size:11px; color:var(--dim); background:var(--bg); }
+  .refchip img { width:28px; height:28px; object-fit:cover; border-radius:5px; }
+  .refchip .rm { cursor:pointer; opacity:.6; } .refchip .rm:hover { opacity:1; color:#e06c75; }
+  #ah_prev { width:128px; height:128px; object-fit:cover; border-radius:10px; background:#0e1219; border:1px solid var(--line); }
+  #gn_prev { width:34px; height:34px; object-fit:cover; border-radius:6px; flex:none; background:#0e1219; }
   .cell .newb { position:absolute; bottom:6px; left:6px; z-index:1; font-size:9px; font-weight:700;
                 letter-spacing:.05em; color:#fff; background:var(--acc); border-radius:5px;
                 padding:1px 6px; box-shadow:0 1px 5px #0009; }
@@ -341,7 +378,7 @@
     #editpanel { flex:none; width:100%; max-height:65svh; overflow-y:auto; }
     #segfix { flex:none; width:100%; overflow-x:auto; }
 
-    #crawlbar { margin-inline:max(8px,env(safe-area-inset-left)) max(8px,env(safe-area-inset-right)); }
+    #crawlbar, #genbar { margin-inline:max(8px,env(safe-area-inset-left)) max(8px,env(safe-area-inset-right)); }
     #ingestpanel { width:calc(100vw - 20px - env(safe-area-inset-left) - env(safe-area-inset-right));
                    max-height:calc(100dvh - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
                    overflow-y:auto; overscroll-behavior:contain; }
@@ -464,6 +501,8 @@
       onclick="facesOpen()" title="顔ID台帳 — 登録済みの人物と参照顔の一覧/管理"></span></div>
   <div id="ai_activity" style="padding:0 10px 6px; font-size:11px; color:var(--faint)"></div>
   <div id="side_spacer" style="flex:1"></div>
+  <div class="nav" data-loc="settings:" onclick="go({type:'settings', key:'', criteria:{}})" title="AIの役・接続先・APIキー・モデル・自動運転・保存先(行ごとに自動保存)">
+    <span class="kic" id="settings_ic"></span><span class="nm">設定</span></div>
   <div class="sec">ストレージ</div>
   <div id="storagebox" style="padding:0 10px 4px; font-size:11px; color:var(--faint)"></div>
 </aside>
@@ -508,6 +547,11 @@
     <span id="cr_prog" style="flex:none; white-space:nowrap"></span>
     <div id="cr_strip" style="display:flex; gap:3px; overflow-x:auto; flex:1; min-width:60px"></div>
     <button class="ghost" style="flex:none; padding:1px 8px" onclick="j('/api/crawl/stop',{method:'POST'})">停止</button></div>
+  <div id="genbar" style="align-items:center; gap:8px"><span class="pulse" style="flex:none; background:#b48cff"></span>
+    <img id="gn_prev" alt="" title="いま描いている1枚の途中経過" onerror="this.style.visibility='hidden'" onload="this.style.visibility='visible'">
+    <span id="gn_prog" style="flex:none; white-space:nowrap"></span>
+    <div id="gn_strip" style="display:flex; gap:3px; overflow-x:auto; flex:1; min-width:60px"></div>
+    <button class="ghost" style="flex:none; padding:1px 8px" onclick="j('/api/gen/stop',{method:'POST'})">停止</button></div>
   <div id="viewhead"></div>
   <div class="gridwrap" id="gridwrap">
     <div id="gridspacer" style="height:0"></div>
@@ -644,6 +688,8 @@ const I = {
   bot:'<rect x="5" y="9" width="14" height="9" rx="2"/><path d="M12 9V6"/><circle cx="12" cy="4.7" r="1.2"/><circle cx="9.5" cy="13" r="1"/><circle cx="14.5" cy="13" r="1"/><path d="M9.5 15.7h5"/>',
   search:'<circle cx="11" cy="11" r="6"/><path d="m20 20-4.3-4.3"/>',
   smart:'<circle cx="11" cy="11" r="6"/><path d="m20 20-4.3-4.3"/><path d="M11 8.5v5M8.5 11h5"/>',
+  gear:'<circle cx="12" cy="12" r="3"/><path d="M12 2.5v2.4M12 19.1v2.4M2.5 12h2.4M19.1 12h2.4M5.3 5.3l1.7 1.7M17 17l1.7 1.7M18.7 5.3 17 7M7 17l-1.7 1.7"/>',
+  wand:'<path d="M4 20 14.5 9.5"/><path d="m16 4 .9 2.1 2.1.9-2.1.9L16 10l-.9-2.1L13 7l2.1-.9z"/><path d="m20 12 .5 1.2 1.2.5-1.2.5L20 15.4l-.5-1.2-1.2-.5 1.2-.5z"/><path d="m8.5 3 .5 1.1 1.1.5-1.1.5L8.5 6.2 8 5.1 6.9 4.6 8 4.1z"/>',
   box:'<path d="m12 3 8 4.5v9L12 21l-8-4.5v-9z"/><path d="M4 7.5 12 12l8-4.5M12 12v9"/>',
   plus:'<path d="M12 5v14M5 12h14"/>',
   play:'<path d="M8 5.5v13l11-6.5z"/>',
@@ -685,6 +731,7 @@ const I = {
 function ic(name, size = 15) {
   return `<svg class="ic" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${I[name] || ''}</svg>`;
 }
+$('settings_ic').innerHTML = ic('gear'); // サイドバー最下段の歯車(静的HTMLなので描画後に差す)
 
 // ================= 状態モデル(憲法): loc = 今いる場所 =================
 // {type:'lib'|'folder'|'source'|'dataset'|'search'|'new', key, criteria}
@@ -740,10 +787,14 @@ async function go(next, opts = {}) {
   renderViewhead();
   if (loc.type === 'new') { // 新規フォルダは空で生まれる(憲法2条)
     items = []; total = 0;
-    $('grid').innerHTML = `<div class="empty"><div class="big">${ic('bot', 44)}</div>
-      目標を書いて「作成」すると、空のフォルダが生まれます。<br>
-      <span class="sub">▶ を押せばAIが集め始め、ここに降ってきます</span></div>`;
+    $('grid').innerHTML = newEmptyHtml();
     drawSelbar();
+    return;
+  }
+  $('grid').classList.toggle('page', loc.type === 'settings');
+  if (loc.type === 'settings') { // 設定ページ(§8.1): グリッドの場所に描く。検索やチップは効かない
+    items = []; total = 0; drawSelbar(); syncHash();
+    await renderSettings();
     return;
   }
   await reload();
@@ -852,17 +903,17 @@ function renderSide() {
   $('fold_folders_ic').innerHTML = ic(foldersOpen ? 'chevD' : 'chevR', 11);
   $('nav_folders').style.display = foldersOpen ? '' : 'none';
   $('nav_folders').innerHTML = treeHtml(buildTree(albumsCache), (a, d) =>
-    `<div class="nav" data-loc="folder:${esc(a.name)}" data-album="${esc(a.name)}" style="padding-left:${10 + d * 13}px"
-       title="${esc(a.goal || 'スマートフォルダ(条件)')}\n掴んでグループへ=移動 / 他のフォルダへ=合流"
+    `<div class="nav${a.running ? ' running' : ''}" data-loc="folder:${esc(a.name)}" data-album="${esc(a.name)}" style="padding-left:${10 + d * 13}px"
+       title="${a.kind === 'gen' ? '生成: ' : a.goal ? '収集: ' : ''}${esc(a.goal || 'スマートフォルダ(条件)')}${a.running ? '\n● ' + (a.running_kind === 'gen' ? '生成中' : '収集中') : ''}\n掴んでグループへ=移動 / 他のフォルダへ=合流"
        data-dsrc="${esc(a.criteria?.source || (a.goal ? 'crawl:' + a.name : ''))}"
        draggable="true" ondragstart="dragNav(event, 'album', this.dataset.album)" ondragend="dragEnd(event)"
        ondragover="navOver(event, 'album', this.dataset.album)"
        ondragleave="navLeave(event)" ondrop="navDrop(event, 'album', this.dataset.album)"
        oncontextmenu="ctxMenu(event, 'album', this.dataset.album)"
        onclick="openFolder(this.dataset.album)">
-      ${ic(a.goal ? 'bot' : 'smart')}<span class="nm"
+      <span class="kic ${a.kind === 'gen' ? 'gen' : a.goal ? 'crawl' : ''}">${ic(a.kind === 'gen' ? 'wand' : a.goal ? 'globe' : 'smart')}</span><span class="nm"
         ondblclick="startRename(event, 'album', this.closest('.nav').dataset.album)">${esc(a.name)}</span>
-      ${a.running ? `<span class="st">${ic('play', 11)}</span>` : (a.agent?.auto ? `<span class="st">${ic('loop', 11)}</span>` : '')}
+      ${a.running ? `<span class="st live" title="${a.running_kind === 'gen' ? '生成中' : '収集中'}">${ic('play', 11)}</span>` : (a.agent?.auto ? `<span class="st">${ic('loop', 11)}</span>` : '')}
       <span class="n">${(a.agent?.spent_usd || 0) > 0
         ? `${a.count ?? 0} · <span style="color:#e5c07b; cursor:pointer" onclick="cycleCostMode(event)"
              title="このフォルダの累計消費(クリックで トークン/$/¥ 切替)">${fmtCost(a.agent?.spent_tok, a.agent.spent_usd)}</span>`
@@ -1193,6 +1244,7 @@ function ctxItems(row, kind, key) {
       }},
       {icon: 'check', label: inSel ? '選択から外す' : '選択に加える', run: () => { setSel(key, !inSel); drawSelbar(); }},
       {icon: 'search', label: '似た画像のフォルダを作る', run: () => { openLbSha(key); setTimeout(simFolder, 80); }},
+      {icon: 'wand', label: (loc.type === 'folder' && albumsCache.find(x => x.name === loc.key)?.kind === 'gen') ? 'この生成フォルダの参照に足す' : '似た画像を作る(AI生成)', run: () => makeFromImage(key)},
       {icon: 'globe', label: '元ページを開く', run: async () => { try { const m = await j('/api/meta/' + key); const u = m.crawl?.landing || m.crawl?.url; if (u) window.open(u, '_blank', 'noopener'); else toast('取得元の記録がありません(ローカル取込)'); } catch (e) { toast('❌ ' + e.message); } }},
       {icon: 'trash', label: 'ゴミ箱へ(30日は戻せる)', danger: true, run: () => trashShas([key])},
     ];
@@ -1345,10 +1397,337 @@ function renderViewhead() {
   }
   h.style.display = 'none';
 }
-function folderHeadHtml(a, isNew) {
+// 新規フォルダの種別チップ(集める/作る)。名前欄の入力は保って描き替える
+function kindChips() {
+  return `<span style="display:flex; gap:4px; flex:none">
+    <span class="engchip ${newKind === 'crawl' ? 'on' : ''}" onclick="setNewKind('crawl')" title="Web から集める(AI収集)">${ic('globe', 11)} 集める</span>
+    <span class="engchip ${newKind === 'gen' ? 'on' : ''}" onclick="setNewKind('gen')" title="内蔵の画像生成AIで作る(棚の素材)">${ic('wand', 11)} 作る</span></span>`;
+}
+// ================= 設定ページ(docs/gen-design.md §8.1) =================
+// 正本は store/config.json。行ごとに PATCH /api/settings で自動保存(保存ボタン禁止=憲法5条)。キーは末尾4桁だけ表示
+let setCache = null;
+async function renderSettings() {
+  $('grid').innerHTML = `<div class="setpage"><h2>${ic('gear', 16)} 設定</h2><div class="hint">読み込み中…</div></div>`;
+  try { setCache = await j('/api/settings'); } catch (e) { $('grid').innerHTML = `<div class="setpage">❌ ${esc(e.message)}</div>`; return; }
+  const S = setCache, C = S.config, A = S.ai || {};
+  const env = S.env || {};
+  const envNote = k => env[k] ? `<span class="ng" title="環境変数 ${k}=${esc(env[k])} が優先されています(開発用の上書き)">環境変数で上書き中</span>` : '';
+  const row = (label, ctl, note = '') => `<div class="setrow"><span class="lbl">${label}</span>${ctl}${note ? `<span class="note">${note}</span>` : ''}<span class="saved">保存しました</span></div>`;
+  const txt = (path, ph = '', extra = '') => `<input type="text" data-path="${path}" value="${esc(String(getPath(C, path) ?? ''))}" placeholder="${esc(ph)}" onchange="setSetting(this)" ${extra}>`;
+  const num = (path, min, max, step = 1) => `<input type="number" data-path="${path}" value="${esc(String(getPath(C, path) ?? ''))}" min="${min}" max="${max}" step="${step}" style="width:90px" onchange="setSetting(this)">`;
+  const sw = (path) => `<span class="switch ${getPath(C, path) ? 'on' : ''}" onclick="toggleSetting(this, '${path}')"><span class="track"></span></span>`;
+  const keyRow = (name, label, what) => {
+    const k = C.keys?.[name] || {};
+    return `<div class="setrow"><span class="lbl">${label}</span>
+      <input type="password" data-path="keys.${name}" value="" autocomplete="new-password"
+        placeholder="${k.set ? '設定済 …' + esc(k.tail || '') + (k.from === 'legacy' ? '(旧 ml-hub の設定ファイル)' : '') : '未設定 — 貼り付けると保存'}" onchange="setSetting(this)">
+      ${k.set ? `<button class="ghost" onclick="clearSetting('keys.${name}')" title="このキーを消す">${ic('x', 12)}</button>` : ''}
+      <button class="ghost" onclick="testSetting(this, '${what}')">確認</button><span class="note" data-test="${what}"></span><span class="saved">保存しました</span></div>`;
+  };
+  const model = (label, x, kind, mb) => {
+    if (!x) return '';
+    const st = x.present ? `<span class="ok">取得済${x.ready || x.running ? '・稼働中' : ''}</span>` : x.downloading ? `<span class="note">DL ${Math.round(100 * x.got_mb / (x.total_mb || 1))}%</span>` : `<span class="ng">未取得</span>`;
+    return `<div class="setrow"><span class="lbl">${label}</span><span style="flex:1; font-size:11.5px; color:var(--dim)">${esc(x.model || x.file || '')}${x.size_mb ? ` · ${(x.size_mb / 1024).toFixed(1)}GB` : ''}</span>${st}
+      ${!x.present && !x.downloading ? `<button class="ghost" onclick="aiPull('${kind}')">取得 ${mb}</button>` : ''}</div>`;
+  };
+  const G = A.gen || {}, V = A.vlm || {}, L = V.local || {};
+  const jm = C.roles?.judge || '';
+  $('grid').innerHTML = `<div class="setpage">
+    <h2>${ic('gear', 16)} 設定 <span class="note" style="font-weight:400; font-size:11px; color:var(--faint)">行ごとに自動保存 · 正本 ${esc(S.path)}</span></h2>
+
+    <div class="setsec"><h3>AIの役(既定)</h3>
+      <div class="hint">フォルダ側で選んでいない時にここが効きます。無料の役は「内蔵」、外部は有料または別マシン。</div>
+      ${row('計画(プロンプト設計)', `<span>内蔵 Qwen3-4B${aiMark('llm')}</span>`, 'ブーストONのフォルダは Claude')}
+      ${row('目利き(ブースト時)', `<select data-path="roles.judge" onchange="setSetting(this)">${JUDGE_MODELS.map(([id, label]) => `<option value="${id}" ${jm === id ? 'selected' : ''}>${label}</option>`).join('')}</select>`, 'OFFのフォルダは内蔵VLM(無料)')}
+      ${row('属性付け・目利き(内蔵VLM)', `<span>${V.backend === 'llama-server' ? '内蔵 llama-server' : 'ollama'} ${esc(V.model || '')}${aiMark('vlm')}</span>`)}
+      ${row('生成', `<span>${G.external ? '外部 sd-server ' + esc(G.external) : '内蔵 klein 4B'}${aiMark('gen')}</span>`)}
+    </div>
+
+    <div class="setsec"><h3>接続先(別マシンで動かす時だけ)</h3>
+      <div class="hint">空なら内蔵を使います。URL を入れるとそちらを優先(内蔵は起動しません)。rtx4090 の sd-server や farm の llama-server を指せます。</div>
+      ${row('生成 sd-server', txt('gen.base', '例: http://rtx4090:8092 (空=内蔵)') + `<button class="ghost" onclick="testSetting(this, 'gen')">確認</button><span class="note" data-test="gen"></span>`, envNote('FG_GEN_BASE'))}
+      ${row('内蔵 sd-server のポート', num('gen.port', 1024, 65535), '既定 8092')}
+      ${row('VLM(OpenAI互換)', txt('vlm.base', '例: http://farm1:8081/v1 (空=内蔵)') + `<button class="ghost" onclick="testSetting(this, 'vlm')">確認</button><span class="note" data-test="vlm"></span>`, envNote('FG_VLM_BASE'))}
+    </div>
+
+    <div class="setsec"><h3>APIキー</h3>
+      <div class="hint">ブースト(Claude / OpenRouter)、検索元(Pexels / Pixabay)、X(xAI)。貼り付けた時だけ保存し、表示は末尾4桁だけ。書き出しやzipには含めません。</div>
+      ${keyRow('anthropic', 'Anthropic', 'anthropic')}
+      ${keyRow('openrouter', 'OpenRouter', 'openrouter')}
+      ${keyRow('openai', 'OpenAI', 'openai')}
+      ${keyRow('xai', 'xAI (X検索)', 'xai')}
+      ${keyRow('pexels', 'Pexels', 'pexels')}
+      ${keyRow('pixabay', 'Pixabay', 'pixabay')}
+      ${S.legacy_file ? `<div class="hint" style="margin-top:6px">旧 ~/ml-hub/config/settings.json が見つかりました。ここに貼るまではそのキーを読みます。</div>` : ''}
+    </div>
+
+    <div class="setsec"><h3>モデル(内蔵AI)</h3>
+      <div class="hint">置き場: ${esc(S.root)}/engine/models · 取得は初回だけ。生成は 3 ファイルで 7.1GB。</div>
+      ${model('LLM(計画・自然言語検索)', A.llm, 'llm', '2.4GB')}
+      ${model('VLM(属性付け・目利き)', L.bin ? {model: L.model, size_mb: L.size_mb, present: L.present, downloading: L.downloading, got_mb: L.got_mb, total_mb: L.total_mb, running: L.running} : {model: V.model, present: V.present}, 'vlm', '3.3GB')}
+      ${model('CLIP(似た画像・意味検索)', A.clip, 'clip', '350MB')}
+      ${A.faceid?.enabled ? model('顔ID(SCRFD+ArcFace・非商用)', A.faceid, 'faceid', '288MB') : ''}
+      ${(G.models || []).map(m => `<div class="setrow"><span class="lbl">生成 ${esc(m.label.split('(')[0])}</span><span style="flex:1; font-size:11.5px; color:var(--dim)" title="${esc(m.note || '')}">${esc(m.id)} · ${(m.size_mb / 1024).toFixed(1)}GB · ${esc(m.license)}${m.refs ? ' · 参照OK' : ''}</span>${m.present ? '<span class="ok">取得済</span>' : (G.downloading && G.dl_model === m.id) ? `<span class="note">DL ${Math.round(100 * G.got_mb / (G.total_mb || 1))}%</span>` : `<button class="ghost" onclick="aiPull('gen', '${m.id}')">取得 ${(m.size_mb / 1024).toFixed(1)}GB</button>`}</div>`).join('')}
+    </div>
+
+    <div class="setsec"><h3>外部ツール</h3>
+      <div class="hint">自動検出の結果。見つからない時だけパスを入れてください。</div>
+      ${row('sd-server(生成)', txt('tools.sd_server', G.bin ? '検出: ' + G.bin : '見つからない — パスを入力'), envNote('FG_SD_SERVER') || (G.bin ? `<span class="ok">検出 ${esc(G.bin)}</span>` : `<span class="ng">なし</span>`))}
+      ${row('llama-server(VLM)', txt('tools.llama_server', L.bin ? '検出: ' + L.bin : '見つからない — パスを入力'), envNote('FG_LLAMA_SERVER') || (L.bin ? `<span class="ok">検出 ${esc(L.bin)}</span>` : `<span class="ng">なし(brew install llama.cpp)</span>`))}
+      ${row('yt-dlp / ffmpeg(動画・URL取り込み)', `<span>${A.tools?.yt_dlp ? '<span class="ok">yt-dlp ✓</span>' : '<span class="ng">yt-dlp ✗</span>'} · ${A.tools?.ffmpeg ? '<span class="ok">ffmpeg ✓</span>' : '<span class="ng">ffmpeg ✗</span>'}</span>`)}
+    </div>
+
+    <div class="setsec"><h3>自動運転</h3>
+      ${row('♻ 見回りの周期(分)', num('autopilot.interval_min', 1, 1440), '自動収集/自動生成のフォルダを順に補充。次の周期から効きます')}
+      ${row('自動お手入れ', sw('autopilot.groom'), '取り込んだ画像に属性付け・マスクを裏で付ける(3分ごとの見回り)')}
+    </div>
+
+    <div class="setsec"><h3>生成の既定</h3>
+      ${row('モデル', `<select data-path="gen.model" onchange="setSetting(this)">${(G.models || []).map(m => `<option value="${m.id}" ${(C.gen?.model || G.default) === m.id ? 'selected' : ''}>${esc(m.label)}${m.present ? '' : '(未取得)'}</option>`).join('')}</select>`, 'フォルダ側で選んでいない時')}
+      ${row('サイズ', `<select data-path="gen.size" onchange="setSetting(this)">${['1024x1024', '768x768', '1024x768', '768x1024', '1280x768', '768x1280'].map(s => `<option value="${s}" ${(C.gen?.size || '1024x1024') === s ? 'selected' : ''}>${s.replace('x', ' × ')}</option>`).join('')}</select>`)}
+      ${row('ステップ数', num('gen.steps', 0, 50), '0 = モデルの既定(klein 4 / Z-Image 8 / Qwen-Edit 20)')}
+      ${row('途中経過を見る', sw('gen.preview'), 'ローカル生成(sd-cli)で各ステップの途中画像を出す。1枚あたり数秒遅くなる')}
+    </div>
+
+    <div class="setsec"><h3>保存先と容量</h3>
+      ${row('データの置き場', `<span style="font-size:11.5px; color:var(--dim)">${esc(S.root)}</span>`, S.system?.disk ? `空き ${S.system.disk.free_gb.toFixed(0)}GB / ${S.system.disk.total_gb.toFixed(0)}GB` : '')}
+      ${row('キャッシュ上限(MB)', num('storage.cache_mb', 512, 1048576, 512), 'preview/render は再生成できるので上限で自動掃除', )}
+      ${row('ログ', `<span style="font-size:11.5px; color:var(--dim)">${esc(S.log)}</span>`)}
+    </div>
+
+    <div class="setsec"><h3>情報</h3>
+      ${row('バージョン', `<span>${esc(S.version)} · ポート ${S.port} · ${Object.entries(S.features || {}).filter(([, v]) => v).map(([k]) => k).join(' / ') || '-'}</span>`)}
+      ${Object.keys(env).length ? row('環境変数の上書き', `<span class="note">${Object.entries(env).map(([k, v]) => `${esc(k)}=${esc(v)}`).join(' · ')}</span>`, '開発用。設定より優先') : ''}
+    </div>
+  </div>`;
+}
+function getPath(o, p) { return p.split('.').reduce((a, k) => (a == null ? undefined : a[k]), o); }
+async function setSetting(el) {
+  const path = el.dataset.path; let value = el.value;
+  if (el.type === 'number') value = Number(value);
+  try {
+    const r = await j('/api/settings', {method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({path, value})});
+    if (setCache) setCache.config = r.config;
+    const s = el.closest('.setrow')?.querySelector('.saved'); if (s) { s.classList.add('show'); setTimeout(() => s.classList.remove('show'), 1500); }
+    if (path.startsWith('keys.')) { el.value = ''; setTimeout(renderSettings, 400); } // キーは表示を「設定済 …末尾」に切り替える
+  } catch (e) { toast('❌ ' + e.message); }
+}
+async function toggleSetting(el, path) {
+  const on = !el.classList.contains('on');
+  try {
+    const r = await j('/api/settings', {method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({path, value: on})});
+    if (setCache) setCache.config = r.config;
+    el.classList.toggle('on', on);
+    const s = el.closest('.setrow')?.querySelector('.saved'); if (s) { s.classList.add('show'); setTimeout(() => s.classList.remove('show'), 1500); }
+  } catch (e) { toast('❌ ' + e.message); }
+}
+async function clearSetting(path) {
+  try {
+    await j('/api/settings', {method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({path, value: ''})});
+    toast('消しました'); renderSettings();
+  } catch (e) { toast('❌ ' + e.message); }
+}
+async function testSetting(btn, what) {
+  const out = btn.closest('.setrow')?.querySelector(`[data-test="${what}"]`); if (out) { out.textContent = '確認中…'; out.className = 'note'; }
+  try {
+    const r = await j('/api/settings/test', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({what})});
+    if (out) { out.textContent = r.detail; out.className = r.ok ? 'ok' : 'ng'; }
+  } catch (e) { if (out) { out.textContent = e.message; out.className = 'ng'; } }
+}
+
+// 新規フォルダの空状態(憲法2条)。種別で文言とアイコンを変える
+function newEmptyHtml() {
+  const g = newKind === 'gen';
+  return `<div class="empty"><div class="big"><span class="kic ${g ? 'gen' : 'crawl'}">${ic(g ? 'wand' : 'globe', 44)}</span></div>
+      ${g ? '作る物' : '目標'}を書いて「作成」すると、空のフォルダが生まれます。<br>
+      <span class="sub">▶ を押せばAIが${g ? '作り始め' : '集め始め'}、ここに降ってきます</span></div>`;
+}
+function setNewKind(k) {
+  const nm = $('ah_name')?.value, goal = $('ah_goal')?.value;
+  newKind = k; renderViewhead(); if (loc.type === 'new') $('grid').innerHTML = newEmptyHtml();
+  if ($('ah_name')) $('ah_name').value = nm || '';
+  if ($('ah_goal') && goal) $('ah_goal').value = goal;
+  setTimeout(() => $('ah_name')?.focus(), 30);
+}
+// 生成フォルダのルールパネル(docs/gen-design.md §3.1)。収集と同じ骨: 作る物 / まで N 枚 / 1回 / AI配役 / ♻
+function genHeadHtml(a, isNew) {
+  const r = a.recipe || {};
+  const sizes = ['1024x1024', '768x768', '1024x768', '768x1024', '1280x768', '768x1280'];
+  const G = lastAI?.gen || {};
+  const models = G.models || [];
+  const curModel = r.model || G.default || 'flux2-klein-4b';
+  const spec = models.find(m => m.id === curModel) || {};
+  const refs = r.refs || [];
+  const refChip = (x, i) => x.kind === 'image'
+    ? `<span class="refchip" title="参照画像 ${x.sha}"><img src="/thumb/${x.sha}" onerror="this.style.display='none'">${x.sha.slice(0, 6)}${isNew ? '' : `<span class="rm" onclick="genRefRemove(${i})">${ic('x', 11)}</span>`}</span>`
+    : `<span class="refchip" title="毎回ここから ${x.k || 1} 枚を抽選して参照にする">${ic(x.kind === 'dataset' ? 'box' : 'globe', 12)} ${esc(x.kind === 'dataset' ? x.name : x.album)} ×${x.k || 1}${isNew ? '' : `<span class="rm" onclick="genRefRemove(${i})">${ic('x', 11)}</span>`}</span>`;
+  const otherAlbums = albumsCache.filter(x => x.name !== a.name);
   return `
     <div class="row1">
-      ${ic(isNew || a.goal ? 'bot' : 'smart', 17)}
+      ${isNew ? kindChips() : ''}
+      <span class="kic gen">${ic('wand', 17)}</span>
+      ${isNew
+        ? `${newParent ? `<span class="lbl" style="width:auto; color:var(--tx)">${esc(newParent)} /</span>` : ''}
+           <input type="text" id="ah_name" value="" placeholder="${newParent ? '名前だけ入力' : 'フォルダ名 (例: 雨の日の柴犬)'}" style="width:220px">`
+        : `<span class="ttl">${esc(a.name)}</span>${a.folder ? `<span class="lbl">${esc(a.folder)}/</span>` : ''}`}
+      <span class="sp"></span>
+      ${isNew ? `<button class="pri" onclick="createFolder()">${ic('check', 13)} 作成</button>` : `
+      ${a.running
+        ? `<button class="pri" onclick="stopGenHead()" title="この生成を止める(描き上がった分は残ります)">${ic('stop', 12)} 生成を止める</button>`
+        : `<button class="pri" onclick="runGenNow()" ${!a.goal ? 'disabled style="opacity:.5"' : ''}
+        title="その場で1回だけ作る(1回の枚数ぶん)。内蔵エンジンは無料、1024²で約30秒/枚">${ic('play', 12)} 今すぐ1回作る <span style="opacity:.75; font-weight:400">${genTimeEst(a)}</span></button>`}
+      <span class="switch ${a.agent?.auto ? 'on' : ''}" onclick="toggleAutoHead()"
+        title="ONの間は30分ごとに見回り、目標枚数に足りなければ1回ぶん作ります。消して減ってもまた埋めます(夜間の量産向き)">
+        <span class="track"></span>自動生成</span>
+      <span class="lbl" id="ah_cycle" style="width:auto; color:var(--faint)" title="見回りの周期と次回時刻(サーバの実測)">${a.agent?.auto ? '30分ごと' : ''}</span>
+      <button class="ghost" onclick="$('viewhead').classList.toggle('open')" title="設定(作る物/枚数/サイズ/参照)を開閉">${ic('chevD', 14)}</button>`}
+      <button class="ghost" onclick="go({type:'lib', key:'all', criteria:{}})">${ic('x', 13)}</button>
+    </div>
+    ${!isNew && a.running ? `<div class="frow" style="margin-top:8px; align-items:flex-start">
+      <span class="lbl">いま</span>
+      <img id="ah_prev" alt="" onerror="this.style.visibility='hidden'" onload="this.style.visibility='visible'" title="途中経過(各ステップ)">
+      <span class="lbl" id="ah_now" style="width:auto; flex:1; white-space:normal; line-height:1.6"></span></div>` : ''}
+    <div class="details">
+    <div class="frow" style="margin-top:6px">
+      <span class="lbl"></span>
+      <span class="lbl rights-note" style="width:auto; line-height:1.5">生成物は ${esc(spec.label || 'FLUX.2 klein 4B')}(${esc(spec.license || 'Apache-2.0')})による合成画像。origin=synthetic・来歴(プロンプト/seed/参照)をサイドカーに記録します。実在人物・ブランド・著作物は書かないでください。</span>
+    </div>
+    <div class="frow">
+      <span class="lbl">作る物</span>
+      <input type="text" id="ah_goal" class="goal" value="${esc(a.goal || '')}" ${isNew ? '' : 'oninput="headAutoSave()"'}
+        placeholder="${refs.length ? '参照をどう変える? (例: 場面と季節と背景を変えて。被写体はそのまま)' : '何を作る? 日本語でOK (例: 雨の日に走る柴犬の写真。人は写さない) — AIが英語プロンプトに展開します'}">
+      <span class="lbl" style="width:auto">まで</span>
+      <input type="number" id="ah_target" value="${a.agent?.target || 200}" style="width:70px" ${isNew ? '' : 'oninput="headAutoSave()"'}>
+      <span class="lbl" style="width:auto">枚</span>
+      <span class="lbl" style="width:auto; margin-left:14px" title="▶や自動生成の1回で作る枚数">1回</span>
+      <input type="number" id="ah_batch" value="${a.agent?.batch || 30}" min="1" max="500" style="width:60px" ${isNew ? '' : 'oninput="headAutoSave()"'}>
+      <span class="lbl" style="width:auto">枚</span>
+    </div>
+    <div class="frow" style="flex-wrap:wrap">
+      <span class="lbl" title="参照画像: 固定の画像は毎回付ける。フォルダ/データセットは毎回そこから抽選。モデルが参照対応の時だけ効く">参照</span>
+      ${refs.map(refChip).join('')}
+      ${isNew ? `<span class="lbl" style="width:auto">(作成後に、サムネの右クリック「似た画像を作る」やここで足せます)</span>` : `
+      <select id="ah_refpick" onchange="genRefAdd(this)" title="フォルダやデータセットを参照に足す(毎回そこから1枚を抽選)">
+        <option value="">＋ 参照を足す…</option>
+        ${otherAlbums.length ? `<optgroup label="フォルダ(毎回1枚抽選)">${otherAlbums.map(x => `<option value="folder:${esc(x.name)}">${esc(x.name)}</option>`).join('')}</optgroup>` : ''}
+        ${(datasetsCache || []).length ? `<optgroup label="データセット(毎回1枚抽選)">${datasetsCache.map(d => `<option value="dataset:${esc(d.name)}">${esc(d.name)}</option>`).join('')}</optgroup>` : ''}
+      </select>
+      <span class="lbl" style="width:auto">画像はサムネの右クリック →「似た画像を作る」で足せます</span>`}
+      ${refs.length && spec.refs === false ? `<span class="ng" style="font-size:11px">⚠ ${esc(spec.label)} は参照を使えません(文だけで生成)</span>` : ''}
+    </div>
+    <div class="frow">
+      <span class="lbl">モデル</span>
+      <select id="ah_model" ${isNew ? '' : 'onchange="headAutoSave()"'} title="生成に使う画像モデル。未取得なら▶の時に自動DL">
+        ${(models.length ? models : [{id: 'flux2-klein-4b', label: 'FLUX.2 klein 4B', present: true}]).map(m => `<option value="${m.id}" ${curModel === m.id ? 'selected' : ''}>${esc(m.label)}${m.present ? '' : `(未取得 ${(m.size_mb / 1024).toFixed(1)}GB)`}</option>`).join('')}
+      </select>
+      <span class="lbl" style="width:auto; margin-left:14px">サイズ</span>
+      <select id="ah_size" ${isNew ? '' : 'onchange="headAutoSave()"'} title="生成サイズ。小さいほど速い(768²は1024²の約半分)">
+        ${sizes.map(s => `<option value="${s}" ${(r.size || '1024x1024') === s ? 'selected' : ''}>${s.replace('x', ' × ')}</option>`).join('')}
+      </select>
+      <span class="lbl" style="width:auto; margin-left:14px" title="内蔵VLMの目利きが付ける品質(1-10)がこれ未満なら捨てる。VLMが無い時は近重複だけ弾いて収蔵">品質</span>
+      <input type="number" id="ah_minq" value="${a.agent?.min_quality ?? 5}" min="1" max="10" style="width:52px" ${isNew ? '' : 'oninput="headAutoSave()"'}>
+      <span class="lbl" style="width:auto">以上</span>
+      ${isNew ? '' : `<button class="ghost" style="margin-left:14px" onclick="planPreview()" title="内蔵LLMがこの目標からどんな英語プロンプトを作るか下見(生成はしない)">${ic('eye', 12)} プロンプトの下見</button>`}
+    </div>
+    <div class="frow">
+      <span class="lbl">AI配役</span>
+      <span class="lbl" style="width:auto; flex:1; white-space:normal">
+        計画 = 内蔵Qwen3-4B${aiMark('llm')} · 生成 = ${G.external ? '外部 sd-server' : '内蔵 ' + esc((spec.label || 'klein 4B').split('(')[0])}${aiMark('gen')} · 目利き = 内蔵VLM${aiMark('vlm')}<span style="color:var(--faint)">(無ければ近重複だけ)</span>${G.external ? '' : ' · 全部このMacの中・無料'}
+      </span>
+    </div>
+    <div class="frow" id="ah_planrow" style="display:none"><span class="lbl">下見</span><ul id="ah_plan" style="flex:1"></ul></div>
+    </div>`;
+}
+// 参照の追加/削除(レシピを即保存して描き直す)
+async function saveGenRecipe(name, patch) {
+  const a = albumsCache.find(x => x.name === name); if (!a) return;
+  const recipe = {...(a.recipe || {}), ...patch};
+  await j('/api/albums', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({name: a.name, folder: a.folder || '', goal: a.goal || '', agent: a.agent || {}, keywords: a.keywords || [], engines: a.engines || [], criteria: a.criteria, kind: 'gen', recipe})});
+  a.recipe = recipe;
+}
+async function genRefAdd(sel) {
+  const v = sel.value; sel.value = ''; if (!v) return;
+  const a = albumsCache.find(x => x.name === loc.key); if (!a) return;
+  const [kind, key] = [v.slice(0, v.indexOf(':')), v.slice(v.indexOf(':') + 1)];
+  const refs = [...(a.recipe?.refs || []), kind === 'folder' ? {kind, album: key, k: 1} : {kind, name: key, k: 1}];
+  try { await saveGenRecipe(a.name, {refs}); renderViewhead(); toast('参照に足しました — 毎回ここから1枚を抽選して参照にします'); } catch (e) { toast('❌ ' + e.message); }
+}
+async function genRefRemove(i) {
+  const a = albumsCache.find(x => x.name === loc.key); if (!a) return;
+  const refs = [...(a.recipe?.refs || [])]; refs.splice(i, 1);
+  try { await saveGenRecipe(a.name, {refs}); renderViewhead(); } catch (e) { toast('❌ ' + e.message); }
+}
+// 「似た画像を作る」: 生成フォルダを見ていればその参照に足す、そうでなければ参照つきの新しい生成フォルダを作って開く
+async function makeFromImage(sha) {
+  if (!sha) return;
+  const cur = albumsCache.find(x => x.name === loc.key && x.kind === 'gen');
+  try {
+    if (loc.type === 'folder' && cur) {
+      if ((cur.recipe?.refs || []).some(r => r.sha === sha)) return toast('もう参照に入っています');
+      await saveGenRecipe(cur.name, {refs: [...(cur.recipe?.refs || []), {kind: 'image', sha}]});
+      renderViewhead(); toast(`「${cur.name}」の参照に足しました`);
+      return;
+    }
+    const name = '作る_' + sha.slice(0, 6);
+    await j('/api/albums', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({name, folder: '', goal: '', kind: 'gen', recipe: {refs: [{kind: 'image', sha}], size: '1024x1024'},
+        agent: {auto: false, target: 30, batch: 10, min_quality: 5}, keywords: [], engines: [], criteria: {source: 'gen:' + name}})});
+    closeLb?.(); await loadAlbums(); openFolder(name);
+    setTimeout(() => { $('viewhead')?.classList.add('open'); $('ah_goal')?.focus(); }, 150);
+    toast('参照つきの生成フォルダを作りました — 「作る物」に変え方を書いて ▶');
+  } catch (e) { toast('❌ ' + e.message); }
+}
+// データセットや選択を種に生成フォルダを作る(旧 genvar の置き換え)
+async function makeFromRefs(name, refs, goalHint) {
+  try {
+    await j('/api/albums', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({name, folder: '', goal: '', kind: 'gen', recipe: {refs, size: '1024x1024'},
+        agent: {auto: false, target: 100, batch: 30, min_quality: 5}, keywords: [], engines: [], criteria: {source: 'gen:' + name}})});
+    await loadAlbums(); openFolder(name);
+    setTimeout(() => { $('viewhead')?.classList.add('open'); if ($('ah_goal')) { $('ah_goal').placeholder = goalHint; $('ah_goal').focus(); } }, 150);
+    toast('参照つきの生成フォルダを作りました — 「作る物」に変え方を書いて ▶');
+  } catch (e) { toast('❌ ' + e.message); }
+}
+function genTimeEst(a) {
+  const batch = a.agent?.batch || 30;
+  const n = Math.max(1, Math.min(batch, Math.max(batch, (a.agent?.target || 200) - (a.count || 0))));
+  const sec = (lastAI?.gen?.secs_per || 30) * n;
+  return `(${n}枚 · 約${sec < 3600 ? Math.ceil(sec / 60) + '分' : (sec / 3600).toFixed(1) + '時間'})`;
+}
+async function runGenNow() {
+  const a = albumsCache.find(x => x.name === loc.key); if (!a) return;
+  const batch = a.agent?.batch || 30;
+  const n = Math.max(1, Math.min(batch, Math.max(batch, (a.agent?.target || 200) - (a.count || 0))));
+  try {
+    const r = await j('/api/gen', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({album: loc.key, n})});
+    toast(`生成開始(+${n}枚目標) — 初回はモデル取得(7.1GB)とエンジン起動で数分かかります`);
+    await loadAlbums(); renderViewhead();
+  } catch (e) { toast('❌ ' + e.message); }
+}
+async function stopGenHead() {
+  try {
+    await j('/api/gen/stop', {method: 'POST'});
+    toast('止めます — 描きかけの1枚が終わり次第止まります');
+    setTimeout(() => { loadAlbums(); renderViewhead(); }, 1500);
+  } catch (e) { toast('❌ ' + e.message); }
+}
+async function planPreview() {
+  const row = $('ah_planrow'), ul = $('ah_plan'); if (!row || !ul) return;
+  row.style.display = ''; ul.innerHTML = '<li>内蔵LLMが設計中…(初回はモデル取得あり)</li>';
+  try {
+    const r = await j('/api/gen/plan', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({album: loc.key, goal: $('ah_goal')?.value.trim() || '', n: 6})});
+    ul.innerHTML = r.prompts.map(p => `<li>${esc(p)}</li>`).join('') || '<li>作れませんでした</li>';
+  } catch (e) { ul.innerHTML = `<li>❌ ${esc(e.message)}</li>`; }
+}
+function folderHeadHtml(a, isNew) {
+  if ((isNew && newKind === 'gen') || a.kind === 'gen') return genHeadHtml(a, isNew);
+  return `
+    <div class="row1">
+      ${isNew ? kindChips() : ''}
+      <span class="kic ${isNew || a.goal ? 'crawl' : ''}">${ic(isNew || a.goal ? 'globe' : 'smart', 17)}</span>
       ${isNew
         ? `${newParent ? `<span class="lbl" style="width:auto; color:var(--tx)">${esc(newParent)} /</span>` : ''}
            <input type="text" id="ah_name" value="" placeholder="${newParent ? '名前だけ入力' : 'フォルダ名 (例: かわいい猫)'}" style="width:220px">`
@@ -1502,8 +1881,9 @@ function openFolder(name) {
 }
 // 親フォルダは＋を押した場所で決まる(名前欄にパスを書かせない 2026-09-03指示)
 let newParent = '';
-function openFolderNew(parent = '') {
-  newParent = parent;
+let newKind = 'crawl'; // 新規フォルダの種別: crawl=集める(Web) / gen=作る(AI生成)
+function openFolderNew(parent = '', kind = 'crawl') {
+  newParent = parent; newKind = kind;
   go({type: 'new', key: '', criteria: {}});
   setTimeout(() => $('ah_name')?.focus(), 50);
 }
@@ -1514,14 +1894,19 @@ async function createFolder() {
   if (!name) return toast('名前をください');
   const goal = $('ah_goal').value.trim();
   const target = parseInt($('ah_target').value) || 200;
-  const keywords = $('ah_keywords').value.split(/[,、]/).map(s => s.trim()).filter(Boolean);
+  const keywords = ($('ah_keywords')?.value ?? '').split(/[,、]/).map(s => s.trim()).filter(Boolean);
+  const isGen = newKind === 'gen';
   // 新規は必ず「自分のバケツ」で空に生まれる(憲法2条)。目標なしでもライブラリ全体は見せない
   // (criteria空だと全部が映って「他のデータが入ってる」ように見える 2026-09-03報告の修正)
-  const criteria = {source: 'crawl:' + name};
+  const criteria = {source: (isGen ? 'gen:' : 'crawl:') + name};
+  const recipe = isGen ? {size: $('ah_size')?.value || '1024x1024', model: $('ah_model')?.value || ''} : undefined;
+  const batch = Math.max(1, parseInt($('ah_batch')?.value) || 30);
+  const min_quality = Math.min(10, Math.max(1, parseInt($('ah_minq')?.value) || 5));
   try {
     const r = await j('/api/albums', {method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({name, folder, goal, agent: {auto: false, target}, keywords, engines: engPick(), criteria})});
-    toast(goal ? `AIフォルダ「${r.name}」誕生 — ▶で集め始めます` : `フォルダ「${r.name}」作成`);
+      body: JSON.stringify({name, folder, goal, agent: isGen ? {auto: false, target, batch, min_quality} : {auto: false, target},
+                            keywords, engines: isGen ? [] : engPick(), criteria, kind: isGen ? 'gen' : 'crawl', recipe})});
+    toast(isGen ? `生成フォルダ「${r.name}」誕生 — ▶で作り始めます` : goal ? `AIフォルダ「${r.name}」誕生 — ▶で集め始めます` : `フォルダ「${r.name}」作成`);
     await loadAlbums();
     openFolder(r.name);
   } catch (e) { toast('❌ ' + e.message); }
@@ -1538,16 +1923,19 @@ function headAutoSave() {
     const budget_usd = Math.max(0.5, parseFloat($('ah_budget')?.value) || 3);
     const keywords = ($('ah_keywords')?.value ?? '').split(/[,、]/).map(s => s.trim()).filter(Boolean);
     const criteria = {...src.criteria};
-    if (goal && (!criteria.source || criteria.source.startsWith('crawl:'))) criteria.source = 'crawl:' + loc.key;
+    const isGen = src.kind === 'gen';
+    if (goal && !isGen && (!criteria.source || criteria.source.startsWith('crawl:'))) criteria.source = 'crawl:' + loc.key;
+    const recipe = isGen ? {...(src.recipe || {}), size: $('ah_size')?.value || src.recipe?.size || '1024x1024', model: $('ah_model')?.value || src.recipe?.model || ''} : undefined;
+    const min_quality = isGen ? Math.min(10, Math.max(1, parseInt($('ah_minq')?.value) || 5)) : (src.agent?.min_quality);
     try {
-      const engines = engPick();
+      const engines = isGen ? (src.engines || []) : engPick();
       await j('/api/albums', {method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({name: loc.key, folder: src.folder || '', goal,
           agent: {...(src.agent || {}), auto: src.agent?.auto || false, boost: src.agent?.boost || false, target, batch, budget_usd,
-                  judge_model: $('ah_judge')?.value ?? (src.agent?.judge_model || '')},
-          keywords, engines, criteria})});
-      src.goal = goal; src.keywords = keywords;
-      src.agent = {...(src.agent || {}), target, batch, budget_usd,
+                  judge_model: $('ah_judge')?.value ?? (src.agent?.judge_model || ''), ...(min_quality ? {min_quality} : {})},
+          keywords, engines, criteria, kind: src.kind || '', recipe})});
+      src.goal = goal; src.keywords = keywords; if (recipe) src.recipe = recipe;
+      src.agent = {...(src.agent || {}), target, batch, budget_usd, ...(min_quality ? {min_quality} : {}),
                    judge_model: $('ah_judge')?.value ?? (src.agent?.judge_model || '')}; src.engines = engines;
       toast('保存しました');
     } catch (e) { toast('❌ ' + e.message); }
@@ -1624,7 +2012,8 @@ async function toggleAutoHead() {
     await j('/api/albums', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({name: a.name, folder: a.folder || '', goal: a.goal || '',
                             agent, keywords: a.keywords || [], engines: a.engines || [], criteria: a.criteria})});
-    toast(agent.auto ? `自動収集ON — 30分ごとに見回り、目標${agent.target}枚まで1回${agent.batch || 30}枚ずつ集めます` : '自動収集OFF');
+    const verb = a.kind === 'gen' ? ['自動生成', '作ります'] : ['自動収集', '集めます'];
+    toast(agent.auto ? `${verb[0]}ON — 30分ごとに見回り、目標${agent.target}枚まで1回${agent.batch || 30}枚ずつ${verb[1]}` : `${verb[0]}OFF`);
     await loadAlbums(); renderViewhead();
   } catch (e) { toast('❌ ' + e.message); }
 }
@@ -2706,6 +3095,7 @@ $('lbbar').innerHTML = `
   <button class="ghost" onclick="lbGo(-1)" title="←キー / Dキー">${ic('chevL', 14)} 前 <span style="opacity:.5">(D)</span></button>
   <button class="ghost" onclick="lbGo(1)" title="→キー / Fキー">次 <span style="opacity:.5">(F)</span> ${ic('chevR', 14)}</button>
   <button class="ghost" onclick="simFolder()" title="この画像に似たものが集まるフォルダを作る(似ている順・新しく入る画像も自動で加わる)">${ic('search', 13)} 似た画像</button>
+  <button class="ghost" onclick="makeFromImage(items[lbIdx]?.sha1)" title="この画像を参照にして、内蔵の画像生成AIで変種を作る生成フォルダを作る">${ic('wand', 13)} 似た画像を作る</button>
   <button class="ghost" id="lbkeep" onclick="lbKeep()" title="自動間引きから絶対保護 (S)">${ic('star', 13)} お気に入り</button>
   <button class="ghost" id="lbfacebtn" onclick="lbFacePanel()"
     title="この画像の顔を人物として登録。同じフォルダの収集で別人が自動排除されるようになります(無料・確定的)">${ic('bot', 13)} 顔ID</button>
@@ -3792,31 +4182,22 @@ async function delDataset(n) {
 let genShas = null;
 function genVar() {
   if (!sel.size) return toast('参考にする画像を選んでください');
-  genShas = [...sel];
-  $('genpanel').style.display = 'block';
-  $('gen_instruction').focus();
+  const shas = [...sel].slice(0, 8);
+  makeFromRefs('作る_' + shas[0].slice(0, 6), shas.map(sha => ({kind: 'image', sha})), '選んだ画像をどう変える? (例: 季節と背景を変えて。被写体はそのまま)');
 }
 async function expandDataset(name) {
-  try {
-    const s = await j('/api/datasets/' + name + '/shas');
-    genShas = s.shas;
-    $('genpanel').style.display = 'block';
-    $('gen_instruction').focus();
-    toast(`「${name}」の${s.shas.length}枚を種に量産します — 指示をどうぞ`);
-  } catch (e) { toast('❌ ' + e.message); }
+  makeFromRefs('作る_' + name.slice(0, 12), [{kind: 'dataset', name, k: 1}], `「${name}」の画像をどう増やす? (例: 場面・光・角度を変えた写真。被写体はそのまま)`);
 }
-async function genRun() {
-  const instruction = $('gen_instruction').value.trim();
+async function genRun() { // 旧パネル(残置)。API は生成フォルダに吸収済み
+  const instruction = $('gen_instruction')?.value.trim();
   if (!instruction) return toast('どう作り変えるか書いてください');
   if (!genShas?.length) return toast('種の画像がありません');
-  const per = parseInt($('gen_per').value) || 4;
+  const per = parseInt($('gen_per')?.value) || 4;
   try {
     const r = await j('/api/genvar', {method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({shas: genShas, instruction, per_ref: per})});
-    toast(`「${r.name}」${r.n}枚を工房に依頼 (~${r.est_minutes}分)。完成後ここに自動収蔵`);
-    $('genpanel').style.display = 'none';
-    $('gen_instruction').value = '';
-    clearSel();
+    toast(`生成フォルダ「${r.name}」で${r.n}枚を作り始めました`);
+    $('genpanel').style.display = 'none'; clearSel(); await loadAlbums(); openFolder(r.name);
   } catch (e) { toast('❌ ' + e.message); }
 }
 
@@ -3933,6 +4314,44 @@ function crawlRelevant(album) {
     (loc.type === 'folder' && loc.criteria.source === 'crawl:' + album) ||
     (loc.type === 'source' && loc.key === 'crawl:' + album);
 }
+// 生成の実況(収集の crawlbar と対称)。新しい絵は「宙から降ってくる」drop を流用
+function watchGenPart(s) {
+  try {
+    $('genbar').classList.toggle('show', !!s.alive);
+    if (s.alive) {
+      const prog = s.steps > 0 ? ` <span style="color:var(--acc)">${s.step}/${s.steps}</span>` : '';
+      $('gn_prog').innerHTML = `<b style="color:var(--tx)">${esc(s.album)}</b> +${s.ingested}/${s.generated} 生成${prog}` +
+        (s.secs_per > 0 ? ` <span style="color:var(--faint)">${s.secs_per.toFixed(0)}秒/枚</span>` : '') +
+        ` <span style="color:var(--faint)" title="いま動いているAI">${s.provider === 'sdcpp' ? '外部 sd-server' : '内蔵'} ${esc((lastAI?.gen?.models || []).find(m => m.id === s.model)?.label?.split('(')[0] || s.model || '')}</span>`;
+      $('genbar').title = `計画${s.planned} → 生成${s.generated} → 収蔵${s.ingested} / 却下${s.rejected}\n「${s.prompt || ''}」\n${s.last || ''}`;
+      const pv = '/api/gen/preview?t=' + Date.now();
+      $('gn_prev').src = pv;
+      const ap = document.getElementById('ah_prev'); if (ap) ap.src = pv;
+      const an = document.getElementById('ah_now'); if (an) an.innerHTML = `${s.steps > 0 ? `${s.step}/${s.steps} ステップ · ` : ''}${esc(s.prompt || s.last || '')}`;
+      $('gn_strip').innerHTML = (s.recent || []).map(e =>
+        `<img src="${e.ok ? '/thumb/' + e.r : '/crawl/reject/' + e.r}"
+           onmouseenter="hoverPv(this, '${esc(e.why)}')" onmouseleave="hoverPvHide()"
+           style="width:26px; height:26px; object-fit:cover; border-radius:4px; flex:none; cursor:zoom-in;
+                  ${e.ok ? 'outline:1px solid #b48cff77' : 'filter:brightness(.6); outline:1px solid #a33333aa'}"
+           onerror="this.remove()">`).join('');
+      if (s.ingested !== watchGenPart._n) {
+        const add = s.ingested - (watchGenPart._n || 0);
+        watchGenPart._n = s.ingested;
+        if (add > 0) liveDrop(s.album, add + 2, 'gen:');
+        refreshFacets();
+      }
+      if (!watchGenPart._was) { loadAlbums().then(() => { if (loc.type === 'folder') renderViewhead(); }); }
+    } else if (watchGenPart._was) {
+      watchGenPart._n = 0;
+      refreshFacets(); loadAlbums();
+      const rel = (loc.type === 'lib' && loc.key === 'all') || (loc.type === 'folder' && loc.criteria.source === 'gen:' + s.album) || (loc.type === 'source' && loc.key === 'gen:' + s.album);
+      if (rel) reload();
+      if (loc.type === 'folder') renderViewhead();
+      toast('生成おわり: ' + (s.last || ''));
+    }
+    watchGenPart._was = s.alive;
+  } catch (e) {}
+}
 function watchCrawlPart(s) {
   try {
     $('crawlbar').classList.toggle('show', !!s.alive);
@@ -3968,13 +4387,13 @@ function watchCrawlPart(s) {
     watchCrawlPart._was = s.alive;
   } catch (e) {}
 }
-async function liveDrop(album, n) {
+async function liveDrop(album, n, prefix = 'crawl:') {
   const okHere = (loc.type === 'lib' && loc.key === 'all') ||
-    (loc.type === 'folder' && loc.criteria.source === 'crawl:' + album) ||
-    (loc.type === 'source' && loc.key === 'crawl:' + album);
+    (loc.type === 'folder' && loc.criteria.source === prefix + album) ||
+    (loc.type === 'source' && loc.key === prefix + album);
   if (!okHere) return;
   try {
-    const r = await j('/api/images?' + new URLSearchParams({source: 'crawl:' + album, limit: n, offset: 0}));
+    const r = await j('/api/images?' + new URLSearchParams({source: prefix + album, limit: n, offset: 0}));
     const fresh = r.items.filter(it => !items.some(x => x.sha1 === it.sha1));
     if (!fresh.length) return;
     const anchor = captureCellAnchor();
@@ -4025,6 +4444,15 @@ function aiMarkHtml(k) {
       return A.vlm.present ? ok('ollama接続OK') : A.vlm.reachable ? ng('モデル未取得(初回に自動pull)') : ng('llama-server なし・ollama未起動');
     }
     case 'seg': return A.seg.reachable ? ok('ml-hub接続OK') : ng('ml-hub未接続');
+    case 'gen': {
+      const G = A.gen || {};
+      if (G.external) return ok('外部 sd-server: ' + G.external);
+      if (G.downloading) return dl(G, 'gen');
+      if (G.starting) return ` <span style="color:#e0a83c">起動中…</span>`;
+      if (!G.cli && !G.bin) return ng('sd-cli / sd-server なし(engine/bin か .app 同梱)');
+      if (G.running) return ok('内蔵 sd-server 稼働中');
+      return G.present ? ok(G.cli ? '内蔵 sd-cli(途中経過あり・常駐なし)' : '取得済(▶で起動)') : ng('未取得', pull('gen', ((G.size_mb || 6803) / 1024).toFixed(1) + 'GB'));
+    }
     case 'faceid': return !A.faceid?.enabled ? ng('このビルドは顔ID無効') : A.faceid.present ? ok('モデルあり') : A.faceid.downloading ? dl(A.faceid, 'faceid') : ng('未取得', pull('faceid', '288MB'));
     case 'key_anthropic': return A.keys.anthropic ? ok('APIキーあり') : ng('anthropic_api_key未設定');
     case 'key_judge': return (A.keys.openrouter || A.keys.anthropic) ? ok('APIキーあり') : ng('openrouter_api_key未設定');
@@ -4033,10 +4461,11 @@ function aiMarkHtml(k) {
 }
 function aiMark(k) { return `<span class="aimark" data-k="${k}">${aiMarkHtml(k)}</span>`; }
 function aiMarksRefresh() { document.querySelectorAll('.aimark').forEach(el => { el.innerHTML = aiMarkHtml(el.dataset.k); }); }
-async function aiPull(kind) {
+async function aiPull(kind, model) {
   try {
-    await j({llm: '/api/llm/pull', clip: '/api/clip/pull', faceid: '/api/faces/pull', vlm: '/api/vlm/pull'}[kind], {method: 'POST'});
-    toast({llm: '内蔵LLM(2.4GB)の取得を開始しました', clip: 'CLIPモデル(350MB+テキスト側254MB)の取得を開始しました', faceid: '顔IDモデル(288MB・非商用限定)の取得を開始しました', vlm: '内蔵VLM(Qwen3-VL-4B, 3.3GB)の取得と起動を開始しました — 終わると属性付け・AIフォルダが動きます'}[kind]);
+    await j({llm: '/api/llm/pull', clip: '/api/clip/pull', faceid: '/api/faces/pull', vlm: '/api/vlm/pull', gen: '/api/gen/pull'}[kind],
+      kind === 'gen' && model ? {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({model})} : {method: 'POST'});
+    toast({llm: '内蔵LLM(2.4GB)の取得を開始しました', clip: 'CLIPモデル(350MB+テキスト側254MB)の取得を開始しました', faceid: '顔IDモデル(288MB・非商用限定)の取得を開始しました', vlm: '内蔵VLM(Qwen3-VL-4B, 3.3GB)の取得と起動を開始しました — 終わると属性付け・AIフォルダが動きます', gen: '生成エンジン(FLUX.2 klein 4B, 7.1GB)の取得と起動を開始しました — 終わると生成フォルダが動きます'}[kind]);
   } catch (e) { toast('❌ ' + e.message); }
 }
 async function watchActivity() {
@@ -4044,6 +4473,7 @@ async function watchActivity() {
     const a = await j('/api/activity');
     if (a.ai) { lastAI = a.ai; aiMarksRefresh(); }
     watchCrawlPart(a.crawl || {});
+    watchGenPart(a.gen || {});
     { // 属性付け完了→表示を最新化
       const e = a.enrich || {};
       if (!e.alive && watchActivity._enrichWas) { refreshFacets(); reload(); }
@@ -4063,7 +4493,7 @@ async function watchActivity() {
       <span style="flex:none; width:7px; height:7px; border-radius:99px; background:${on ? 'var(--ok)' : '#2a2d38'};${on ? 'box-shadow:0 0 8px #6ee7a077' : ''}"></span>
       <span style="flex:none; display:flex; gap:5px; align-items:center">${ic(icon, 12)} ${name}</span>
       <span style="margin-left:auto; opacity:.85; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:150px" title="${esc(detail)}">${esc(detail)}</span>${extra}</div>`;
-    const c = a.crawl, e = a.enrich, l = a.llm, g = a.ingest, s = a.system || {};
+    const c = a.crawl, e = a.enrich, l = a.llm, g = a.ingest, s = a.system || {}, gn = a.gen || {};
     const bar = (pct, hot) => `<span style="flex:1; height:4px; min-width:34px; border-radius:99px; background:#1c1e26; overflow:hidden">
       <span style="display:block; width:${Math.min(100, pct).toFixed(0)}%; height:100%; border-radius:99px;
         background:${hot ? '#e0a83c' : 'var(--acc)'}; transition:width .6s ease"></span></span>`;
@@ -4073,8 +4503,8 @@ async function watchActivity() {
     const gpu = s.gpu ? `<div style="display:flex; gap:6px; align-items:center; padding:2px 0" title="GPU計算の使用率">
       <span style="flex:none">GPU</span>${bar(s.gpu.util, s.gpu.util > 85)}
       <span style="flex:none; font-variant-numeric:tabular-nums">${s.gpu.util}%</span></div>
-      <div style="display:flex; gap:6px; align-items:center; padding:2px 0" title="VRAM ${(s.gpu.vram_used_mb / 1024).toFixed(1)}/${(s.gpu.vram_total_mb / 1024).toFixed(0)}GB — 空きが無いと内蔵VLMがCPUに追い出されて激重になる">
-      <span style="flex:none">VRAM</span>${bar(100 * s.gpu.vram_used_mb / s.gpu.vram_total_mb, s.gpu.vram_used_mb / s.gpu.vram_total_mb > .85)}
+      <div style="display:flex; gap:6px; align-items:center; padding:2px 0" title="${s.gpu.unified ? 'GPUメモリ(統合メモリのうちGPUが確保している分)' : 'VRAM'} ${(s.gpu.vram_used_mb / 1024).toFixed(1)}/${(s.gpu.vram_total_mb / 1024).toFixed(0)}GB${(s.gpu.procs || []).length ? '\n使っている物: ' + s.gpu.procs.map(x => `${x.name} ${(x.mem_mb / 1024).toFixed(1)}GB`).join(' / ') : ''}${s.gpu.unified ? '' : ' — 空きが無いと内蔵VLMがCPUに追い出されて激重になる'}">
+      <span style="flex:none">${s.gpu.unified ? 'GPU RAM' : 'VRAM'}</span>${bar(100 * s.gpu.vram_used_mb / s.gpu.vram_total_mb, s.gpu.vram_used_mb / s.gpu.vram_total_mb > .85)}
       <span style="flex:none; font-variant-numeric:tabular-nums">${(s.gpu.vram_used_mb / 1024).toFixed(1)}/${(s.gpu.vram_total_mb / 1024).toFixed(0)}G</span></div>` : '';
     const ram = s.ram ? `<div style="display:flex; gap:6px; align-items:center; padding:2px 0" title="RAM ${s.ram.used_gb.toFixed(0)}/${s.ram.total_gb.toFixed(0)}GB">
       <span style="flex:none">RAM</span>${bar(100 * s.ram.used_gb / s.ram.total_gb, s.ram.used_gb / s.ram.total_gb > .85)}
@@ -4096,6 +4526,10 @@ async function watchActivity() {
     $('ai_activity').innerHTML =
       row('globe', '収集', c.alive, (c.alive ? `${c.album} +${c.ingested}枚` : '待機') + (qn ? ` | 待ち${qn}` : '')) +
       (c.alive && c.next_query ? row('search', '先読み', true, `次「${c.next_query}」検索中`) : '') +
+      row('wand', '生成', gn.alive || a.ai?.gen?.downloading || a.ai?.gen?.starting,
+          gn.alive ? `${gn.album} +${gn.ingested}${gn.steps > 0 ? ' · ' + gn.step + '/' + gn.steps : ''}${gn.secs_per > 0 ? ' · ' + gn.secs_per.toFixed(0) + '秒/枚' : ''}`
+          : a.ai?.gen?.downloading ? `DL ${Math.round(100 * a.ai.gen.got_mb / (a.ai.gen.total_mb || 1))}%${eta('gen', a.ai.gen.got_mb, a.ai.gen.total_mb)}`
+          : a.ai?.gen?.starting ? 'エンジン起動中' : a.ai?.gen?.running ? '常駐中' : a.ai?.gen?.present ? '待機' : '未取得') +
       row('eye', 'VLM', e.alive, e.alive ? `属性付け ${e.done}/${e.total}${eta('enrich', e.done, e.total)}` : '待機') +
       row('cpu', 'LLM', l.busy || l.downloading,
           l.downloading ? `DL ${Math.round(100 * l.got_mb / (l.total_mb || 1))}%${eta('llm', l.got_mb, l.total_mb)}`
@@ -4264,6 +4698,7 @@ setInterval(refreshFacets, 30000);
   else if (t === 'source' && k) go({type: 'source', key: k, criteria: {source: k}}, {keepChips: true});
   else if (t === 'search' && h.get('q')) { $('q').value = h.get('q'); prevLoc = {type: 'lib', key: 'all', criteria: {}}; go({type: 'search', key: '', criteria: {}}, {keepChips: true}); }
   else if (t === 'lib' && k && LIB.find(x => x.key === k)) go({type: 'lib', key: k, criteria: LIB.find(x => x.key === k).criteria}, {keepChips: true});
+  else if (t === 'settings') go({type: 'settings', key: '', criteria: {}});
   else go({type: 'lib', key: 'all', criteria: {}}, {keepChips: true});
   const img = h.get('img');
   if (img) setTimeout(() => {

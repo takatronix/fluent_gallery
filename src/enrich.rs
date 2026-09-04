@@ -14,8 +14,8 @@ pub const BUILTIN_MODEL: &str = "qwen2.5vl:7b";
 static LOCAL_VLM_BASE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 pub fn set_local_vlm_base(b: Option<String>) { *LOCAL_VLM_BASE.lock().unwrap() = b; }
 pub fn local_vlm_base() -> Option<String> {
-    if let Ok(b) = std::env::var("FG_VLM_BASE") {
-        if !b.is_empty() { return Some(b.trim_end_matches('/').to_string()); }
+    if let Some(b) = crate::config::env_or("FG_VLM_BASE", "vlm.base") {
+        return Some(b.trim_end_matches('/').to_string());
     }
     LOCAL_VLM_BASE.lock().unwrap().clone()
 }
@@ -136,14 +136,15 @@ impl EnrichState {
     }
 }
 
+/// 設定値の取り出し(名前は旧 ml-hub settings.json の流儀のまま)。正本は store/config.json(config.rs)、無ければ旧ファイル
 pub fn mlhub_key(name: &str) -> Option<String> {
-    let p = dirs_home().join("ml-hub/config/settings.json");
-    let v: Value = serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok()?;
-    v[name].as_str().map(str::to_string)
-}
-
-fn dirs_home() -> std::path::PathBuf {
-    std::env::var("HOME").map(Into::into).unwrap_or_else(|_| "/root".into())
+    if let Some(k) = name.strip_suffix("_api_key") {
+        return crate::config::key(k);
+    }
+    if name == "gallery_judge_model" {
+        return crate::config::get_str("roles.judge").or_else(|| crate::config::legacy(name));
+    }
+    crate::config::legacy(name)
 }
 
 fn parse_json(text: &str) -> Option<Value> {

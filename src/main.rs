@@ -4,7 +4,9 @@
 
 mod crawl;
 mod edits;
+mod config;
 mod enrich;
+mod gen;
 mod llm;
 mod media;
 #[cfg(feature = "faceid")]
@@ -39,6 +41,7 @@ struct App {
     enrich: Arc<enrich::EnrichState>,
     crawl: Arc<crawl::CrawlState>,
     crawl_queue: Mutex<Vec<CrawlIn>>, // 順番待ち(同時1本=VLM直列の現実に合わせ、弾かず並ばせる)
+    gen: Arc<gen::GenState>, // AI生成フォルダ(sd-server 子プロセス+ジョブ状態、docs/gen-design.md)
     llm: Arc<llm::LlmState>,
     vlm: Arc<vlm::VlmState>, // 内蔵VLM(llama-server 子プロセス)
     seg: Arc<seg::SegState>,
@@ -58,6 +61,7 @@ impl App {
         let t = now_secs();
         self.ui_hot.store(t, Relaxed);
         self.crawl.ui_hot.store(t, Relaxed); // 収集の内蔵VLM判定も閲覧中は道を譲る(CPU16コア占有でUI窒息の再発防止)
+        self.gen.ui_hot.store(t, Relaxed); // 生成も閲覧中は次の1枚を待つ(GPU を取り合わない)
         self.enrich.user_priority(10); // 属性付けバックフィルは1件ごとに譲る(既存機構に配線)
     }
     fn ui_recent(&self, secs: u64) -> bool {
@@ -74,7 +78,8 @@ type S = State<&'static App>;
 /// 待受ポート(常駐ワーカーの自己呼び出し用。以前は 8790 固定で PORT を変えると空振りしていた)
 static BIND_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(8790);
 /// ♻自動収集の見回り周期と次回時刻(epoch 秒)。UI に出すために公開する
-const AUTOPILOT_INTERVAL_SECS: u64 = 1800;
+/// ♻見回りの周期(設定 autopilot.interval_min、既定 30 分)。ループが毎回読むので設定変更が次の周期から効く
+fn autopilot_secs() -> u64 { config::get_u64("autopilot.interval_min", 30).clamp(1, 24 * 60) * 60 }
 static AUTOPILOT_NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 // ---------- 読み ----------
@@ -1611,15 +1616,25 @@ struct AlbumIn {
     #[serde(default)] agent: Value, // {auto: bool, target: 枚数} — 置いとくと自動で増える(オートパイロット)
     #[serde(default)] keywords: Vec<String>, // 手動キーワード(LLM生成より優先で検索に使う)
     #[serde(default)] engines: Vec<String>, // 検索元の選択(空=全部)
+    #[serde(default)] kind: String, // ""|"crawl"=収集 / "gen"=AI生成(docs/gen-design.md)。空なら既存を引き継ぐ
+    #[serde(default)] recipe: Value, // 生成レシピ {size, steps, ...}。object 以外なら既存を引き継ぐ
 }
 
 async fn api_album_make(State(app): S, Json(a): Json<AlbumIn>) -> impl IntoResponse {
     let slug = album_slug(&a.name);
-    let rec = json!({"name": slug, "criteria": a.criteria, "folder": folder_norm(&a.folder), "goal": a.goal,
-        "agent": if a.agent.is_object() { a.agent } else { json!({}) },
-        "keywords": a.keywords, "engines": a.engines,
-        "created": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64()});
     let dir = album_dir(&app.root);
+    // 上書き保存なので、UI の部分更新(自動保存・スイッチ)が送ってこない項目は既存から引き継ぐ
+    let prev = std::fs::read_to_string(dir.join(format!("{slug}.json"))).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok());
+    let kind = if !a.kind.is_empty() { a.kind.clone() } else { prev.as_ref().and_then(|p| p["kind"].as_str()).unwrap_or("").to_string() };
+    let recipe = if a.recipe.is_object() { a.recipe.clone() } else { prev.as_ref().map(|p| p["recipe"].clone()).filter(|v| v.is_object()).unwrap_or(json!({})) };
+    let mut rec = json!({"name": slug, "criteria": a.criteria, "folder": folder_norm(&a.folder), "goal": a.goal,
+        "agent": if a.agent.is_object() { a.agent } else { json!({}) },
+        "keywords": a.keywords, "engines": a.engines, "kind": kind, "recipe": recipe,
+        "created": prev.as_ref().and_then(|p| p["created"].as_f64())
+            .unwrap_or_else(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64())});
+    if let Some(lr) = prev.as_ref().map(|p| p["last_run"].clone()).filter(|v| v.is_object()) {
+        rec["last_run"] = lr; // 直近の成績も消さない
+    }
     let _ = std::fs::create_dir_all(&dir);
     if std::fs::write(dir.join(format!("{slug}.json")), serde_json::to_string_pretty(&rec).unwrap()).is_err() {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
@@ -1631,6 +1646,8 @@ async fn api_albums(State(app): S) -> Json<Value> {
     let mut out = vec![];
     let running = app.crawl.alive.load(Relaxed);
     let running_album = app.crawl.album.lock().unwrap().clone();
+    let gen_running = app.gen.alive.load(Relaxed);
+    let gen_album = app.gen.album.lock().unwrap().clone();
     // 件数の高速路: フォルダの大半はsource条件だけなので source→枚数 を1クエリで引く。
     // 従来の「フォルダごとに query_shas で全sha取得→len」は19フォルダで1.2秒＝UIもっさりの主因(2026-09-03)
     let src_counts: std::collections::HashMap<String, i64> = {
@@ -1658,7 +1675,9 @@ async fn api_albums(State(app): S) -> Json<Value> {
         } else if let Ok(q) = serde_json::from_value::<Q>(a["criteria"].clone()) {
             a["count"] = json!(query_shas(app, &q).len());
         }
-        a["running"] = json!(running && a["name"] == json!(running_album.clone()));
+        let gen_on = gen_running && a["name"] == json!(gen_album.clone());
+        a["running"] = json!((running && a["name"] == json!(running_album.clone())) || gen_on);
+        if gen_on { a["running_kind"] = json!("gen"); }
         out.push(a);
     }
     Json(json!(out))
@@ -1696,7 +1715,8 @@ fn ledger_file(root: &std::path::Path, name: &str) -> PathBuf {
 fn album_busy(app: &App, name: &str) -> bool {
     let slug = album_slug(name);
     let running = app.crawl.alive.load(Relaxed) && album_slug(&app.crawl.album.lock().unwrap()) == slug;
-    running || app.crawl_queue.lock().unwrap().iter().any(|c| album_slug(&c.album) == slug)
+    let generating = app.gen.alive.load(Relaxed) && album_slug(&app.gen.album.lock().unwrap()) == slug;
+    running || generating || app.crawl_queue.lock().unwrap().iter().any(|c| album_slug(&c.album) == slug)
 }
 fn err_json(code: StatusCode, msg: &str) -> axum::response::Response {
     (code, Json(json!({"detail": msg}))).into_response()
@@ -1751,8 +1771,9 @@ async fn api_album_rename(State(app): S, AxPath(name): AxPath<String>, Json(p): 
     if album_busy(app, &old) {
         return err_json(StatusCode::CONFLICT, "収集中(または順番待ち)のフォルダは名前を変えられません。止めてからどうぞ");
     }
-    let old_src = format!("crawl:{old}");
-    let new_src = format!("crawl:{new}");
+    let pfx = if rec["kind"].as_str() == Some("gen") { "gen:" } else { "crawl:" }; // 生成フォルダのバケツは gen:<name>
+    let old_src = format!("{pfx}{old}");
+    let new_src = format!("{pfx}{new}");
     // 自分のバケツ(crawl:<自分の名前>)を持つフォルダだけ、中身のsourceも一緒に引っ越す
     let owns = rec["criteria"]["source"].as_str() == Some(old_src.as_str());
     rec["name"] = json!(new);
@@ -1762,6 +1783,7 @@ async fn api_album_rename(State(app): S, AxPath(name): AxPath<String>, Json(p): 
     }
     let _ = std::fs::remove_file(album_path(&app.root, &old));
     let _ = std::fs::rename(ledger_file(&app.root, &old), ledger_file(&app.root, &new)); // 既読台帳も名前について行く
+    let _ = std::fs::rename(app.root.join("store/gen_ledger").join(format!("{old}.json")), app.root.join("store/gen_ledger").join(format!("{new}.json")));
     {
         let db = app.db.lock().unwrap();
         let _ = db.execute("UPDATE faces SET album=?1 WHERE album=?2", rusqlite::params![new, old]);
@@ -2468,8 +2490,50 @@ fn sys_stats() -> Value {
                         "total_gb": get("MemTotal:")? / 1048576.0}))
         })
         .unwrap_or(json!(null));
+    // macOS(Apple Silicon): /proc も nvidia-smi も無いので ioreg / vm_stat / ps から取る(統合メモリなので VRAM=RAM 総量)
+    #[cfg(target_os = "macos")]
+    let (cpu, gpu, ram) = { let _ = (&cpu, &gpu, &ram); mac_stats() };
     *c = (Instant::now(), json!({"cpu": cpu, "gpu": gpu, "ram": ram, "disk": disk}));
     c.1.clone()
+}
+
+/// Apple Silicon の CPU/GPU/RAM。ioreg の PerformanceStatistics(Device Utilization % / In use system memory)、
+/// vm_stat(ページ数)、ps(%cpu 合計)。root 不要、合計 100ms 前後、3 秒 TTL で呼ばれる
+#[cfg(target_os = "macos")]
+fn mac_stats() -> (Value, Value, Value) {
+    fn out(cmd: &str, args: &[&str]) -> String {
+        std::process::Command::new(cmd).args(args).output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default()
+    }
+    fn num_after(s: &str, key: &str) -> Option<f64> {
+        let i = s.find(key)? + key.len();
+        let d: String = s[i..].chars().take_while(|c| c.is_ascii_digit()).collect();
+        d.parse().ok()
+    }
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    let memsize = out("sysctl", &["-n", "hw.memsize"]).trim().parse::<f64>().unwrap_or(0.0);
+    // CPU: 全プロセスの %cpu 合計をコア数で割る(瞬間値。top -l 1 は 1 秒待つので使わない)
+    let cpu_sum: f64 = out("ps", &["-A", "-o", "%cpu="]).lines().filter_map(|l| l.trim().parse::<f64>().ok()).sum();
+    let cpu = json!({"pct": ((cpu_sum / cores as f64).min(100.0) * 10.0).round() / 10.0, "cores": cores});
+    // GPU: IOAccelerator の統計。使っているプロセス(生成/VLM/本体)の常駐メモリも添える
+    let io = out("ioreg", &["-r", "-d", "1", "-c", "IOAccelerator"]);
+    let procs: Vec<Value> = out("ps", &["-A", "-o", "rss=,comm="]).lines().filter_map(|l| {
+        let (rss, comm) = l.trim().split_once(' ')?;
+        let name = comm.trim().rsplit('/').next()?.to_string();
+        if !["sd-server", "llama-server", "fluent_gallery", "ollama"].iter().any(|k| name.starts_with(k)) { return None; }
+        Some(json!({"name": name, "mem_mb": rss.trim().parse::<f64>().ok()? / 1024.0}))
+    }).collect();
+    let gpu = match (num_after(&io, "\"Device Utilization %\"="), num_after(&io, "\"In use system memory\"=")) {
+        (Some(util), used) if memsize > 0.0 => json!({"util": util, "vram_used_mb": used.unwrap_or(0.0) / 1048576.0,
+                                                     "vram_total_mb": memsize / 1048576.0, "unified": true, "procs": procs}),
+        _ => json!(null),
+    };
+    // RAM: vm_stat のページ数(active + wired + compressor 占有)。free/inactive は空きとみなす
+    let vs = out("vm_stat", &[]);
+    let page = num_after(&vs, "page size of ").unwrap_or(16384.0);
+    let pages = |k: &str| vs.lines().find(|l| l.starts_with(k)).and_then(|l| l.split(':').nth(1)).and_then(|v| v.trim().trim_end_matches('.').parse::<f64>().ok()).unwrap_or(0.0);
+    let used = (pages("Pages active") + pages("Pages wired down") + pages("Pages occupied by compressor")) * page;
+    let ram = if memsize > 0.0 { json!({"used_gb": used / 1073741824.0, "total_gb": memsize / 1073741824.0}) } else { json!(null) };
+    (cpu, gpu, ram)
 }
 
 /// AI稼働状況の一枚板 — どのAIが今なにをしてるかを1回で返す(UIサイドバー常設パネル用)
@@ -2506,6 +2570,7 @@ async fn ai_status(app: &'static App) -> Value {
         "vlm": {"backend": if local_vlm { "llama-server" } else { "ollama" }, "model": if local_vlm { vlm::MODEL_FILE } else { enrich::BUILTIN_MODEL },
                 "reachable": vlm_reachable, "present": vlm_present || vlm::models_present(&app.root), "local": vlm::status(&app.root, &app.vlm)},
         "seg": {"backend": "ml-hub", "reachable": seg_ok},
+        "gen": gen::engine_status(&app.root, &app.gen),
         "faceid": faceid_status(),
         "store": cfg!(feature = "store"),
         "tools": {"yt_dlp": tool_present("yt-dlp"), "ffmpeg": tool_present("ffmpeg")},
@@ -2574,6 +2639,7 @@ async fn api_activity(State(app): S) -> Json<Value> {
     Json(json!({
         "ai": ai_status(app).await,
         "crawl": crawl,
+        "gen": app.gen.status(),
         "enrich": app.enrich.status(),
         "llm": app.llm.status(&app.root),
         "seg": app.seg.status(),
@@ -2582,9 +2648,238 @@ async fn api_activity(State(app): S) -> Json<Value> {
             "label": app.ingest_label.lock().unwrap().clone(),
         },
         "workers": Value::Object(app.workers.lock().unwrap().clone()),
-        "autopilot": {"interval_secs": AUTOPILOT_INTERVAL_SECS, "next_at": AUTOPILOT_NEXT.load(Relaxed), "per_run_default": 30, "run_minutes": 15, "min_quality": 5},
+        "autopilot": {"interval_secs": autopilot_secs(), "next_at": AUTOPILOT_NEXT.load(Relaxed), "per_run_default": 30, "run_minutes": 15, "min_quality": 5},
         "system": sys_stats(),
     }))
+}
+
+// ---------- AI生成フォルダ(G1, docs/gen-design.md): 収集の ▶ と対称 ----------
+
+#[derive(Deserialize)]
+struct GenIn {
+    album: String,
+    #[serde(default = "d_gen_n")] n: usize,        // この回で収蔵する枚数
+    #[serde(default = "d_gen_min")] minutes: u64,  // 時間上限(1024² は 27 秒/枚なので収集より長め)
+}
+fn d_gen_n() -> usize { 30 }
+fn d_gen_min() -> u64 { 180 }
+
+fn start_gen(app: &'static App, album: &str, n: usize, minutes: u64) -> Result<String, (StatusCode, String)> {
+    if app.gen.alive.load(Relaxed) {
+        return Err((StatusCode::CONFLICT, "生成は既に実行中です(同時に1本)".into()));
+    }
+    let slug = album_slug(album);
+    let rec = load_albums(&app.root).into_iter().find(|a| a["name"] == json!(slug.clone()));
+    let Some(rec) = rec else {
+        return Err((StatusCode::NOT_FOUND, format!("フォルダ{slug}が見つかりません")));
+    };
+    let goal = rec["goal"].as_str().unwrap_or("").to_string();
+    if goal.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "作りたい物(目標)が空です".into()));
+    }
+    let recipe = &rec["recipe"];
+    let size_s = recipe["size"].as_str().map(String::from).or_else(|| config::get_str("gen.size")).unwrap_or_else(|| "1024x1024".into());
+    let (w, h) = size_s.split_once('x')
+        .and_then(|(a, b)| Some((a.trim().parse::<u32>().ok()?, b.trim().parse::<u32>().ok()?)))
+        .unwrap_or((1024, 1024));
+    let snap = |v: u32| (v.clamp(512, 1536) / 64) * 64; // 潜在空間の都合で 64 の倍数
+    let steps = recipe["steps"].as_u64().filter(|v| *v > 0).unwrap_or_else(|| config::get_u64("gen.steps", 0)).clamp(0, 50) as u32; // 0=モデルの既定
+    let min_quality = rec["agent"]["min_quality"].as_i64().unwrap_or(5).clamp(1, 10);
+    let model = recipe["model"].as_str().filter(|m| gen::MODELS.iter().any(|s| s.id == *m)).map(String::from).unwrap_or_else(gen::default_model_id);
+    // 参照(G2): recipe.refs = [{kind:"image", sha} | {kind:"folder", album, k} | {kind:"dataset", name, k}]
+    let mut refs = gen::RefPool::default();
+    if let Some(arr) = recipe["refs"].as_array() {
+        let albums = load_albums(&app.root);
+        for r in arr {
+            let k = r["k"].as_u64().unwrap_or(1).clamp(1, 3) as usize;
+            let (label, shas): (String, Vec<String>) = match r["kind"].as_str().unwrap_or("") {
+                "image" => {
+                    if let Some(sha) = r["sha"].as_str() {
+                        refs.fixed.push(sha.to_string());
+                        let c = gen::ref_caption(&app.root, sha);
+                        refs.notes.push(if c.is_empty() { "a reference image (keep its subject)".into() } else { c });
+                    }
+                    continue;
+                }
+                "folder" => {
+                    let name = r["album"].as_str().unwrap_or("");
+                    let shas = albums.iter().find(|a| a["name"] == json!(name))
+                        .and_then(|a| serde_json::from_value::<Q>(a["criteria"].clone()).ok())
+                        .map(|q| query_shas(app, &q)).unwrap_or_default();
+                    (format!("folder '{name}'"), shas)
+                }
+                "dataset" => {
+                    let name = r["name"].as_str().unwrap_or("");
+                    let d = app.root.join("store/datasets").join(name);
+                    let shas: Vec<String> = if name.is_empty() || name.contains('/') { vec![] } else {
+                        std::fs::read_dir(d).map(|rd| rd.flatten()
+                            .filter(|e| e.path().extension().and_then(|x| x.to_str()) != Some("json"))
+                            .filter_map(|e| e.path().file_stem().map(|s| s.to_string_lossy().into_owned())).collect()).unwrap_or_default()
+                    };
+                    (format!("dataset '{name}'"), shas)
+                }
+                _ => continue,
+            };
+            if shas.is_empty() { continue; }
+            let mut shas = shas;
+            shas.truncate(400);
+            let sample: Vec<String> = shas.iter().take(3).map(|s| gen::ref_caption(&app.root, s)).filter(|c| !c.is_empty()).collect();
+            refs.notes.push(format!("{k} random image(s) picked each time from {label} ({} images{})", shas.len(),
+                if sample.is_empty() { String::new() } else { format!("; e.g. {}", sample.join(" / ")) }));
+            refs.pools.push((shas, k));
+        }
+        refs.fixed.truncate(4);
+    }
+    let st = app.gen.clone();
+    st.alive.store(true, Relaxed);
+    st.stop.store(false, Relaxed);
+    for a in [&st.planned, &st.generated, &st.rejected, &st.ingested, &st.errors] { a.store(0, Relaxed); }
+    st.started_at.store(now_secs(), Relaxed);
+    st.recent.lock().unwrap().clear();
+    *st.album.lock().unwrap() = slug.clone();
+    *st.last.lock().unwrap() = "起動中…".into();
+    let limits = gen::Limits { max_n: n.clamp(1, 2000), max_secs: minutes.clamp(1, 720) * 60, w: snap(w), h: snap(h), steps, min_quality };
+    tokio::spawn(gen::run(app.root.clone(), app.http.clone(), st, app.llm.clone(), app.enrich.clone(), slug.clone(), goal, model, refs, limits));
+    Ok(slug)
+}
+
+async fn api_gen(State(app): S, Json(g): Json<GenIn>) -> impl IntoResponse {
+    match start_gen(app, &g.album, g.n, g.minutes) {
+        Ok(slug) => Json(json!({"ok": true, "album": slug})).into_response(),
+        Err((code, msg)) => (code, Json(json!({"detail": msg}))).into_response(),
+    }
+}
+async fn api_gen_status(State(app): S) -> Json<Value> {
+    let mut s = app.gen.status();
+    s["engine"] = gen::engine_status(&app.root, &app.gen);
+    Json(s)
+}
+async fn api_gen_stop(State(app): S) -> Json<Value> {
+    app.gen.stop.store(true, Relaxed);
+    Json(json!({"ok": true}))
+}
+async fn api_gen_engine(State(app): S) -> Json<Value> { Json(gen::engine_status(&app.root, &app.gen)) }
+#[derive(Deserialize, Default)]
+struct GenPullIn { #[serde(default)] model: String }
+/// モデル 1 式の取得を裏で開始(既定 klein 4B 7.1GB。model 指定で Z-Image / Qwen-Image-Edit も)。進捗は /api/gen/engine, /api/ai/status
+async fn api_gen_pull(State(app): S, body: Option<Json<GenPullIn>>) -> Json<Value> {
+    let id = body.map(|b| b.model.clone()).filter(|m| !m.is_empty()).unwrap_or_else(gen::default_model_id);
+    let id2 = id.clone();
+    tokio::spawn(async move {
+        let s = gen::spec(&id2);
+        if let Err(e) = gen::ensure_models(&app.root, &app.http, &app.gen, s).await {
+            println!("🪄 生成モデル取得失敗({}): {e}", s.id);
+        } else if gen::cli_bin(&app.root).is_none() && gen::external_base().is_none() {
+            if let Err(e) = gen::start_server(&app.root, &app.http, &app.gen, s).await { println!("🪄 生成エンジン起動失敗: {e}"); }
+        }
+    });
+    Json(json!({"ok": true, "model": id, "note": "進捗は GET /api/gen/engine"}))
+}
+/// 途中経過(sd-cli の --preview が各ステップで書く PNG)。生成中だけ存在する
+async fn api_gen_preview(State(app): S) -> impl IntoResponse {
+    match std::fs::read(gen::preview_path(&app.root)) {
+        Ok(b) if b.len() > 100 => ([(header::CONTENT_TYPE, "image/png"), (header::CACHE_CONTROL, "no-store")], b).into_response(),
+        _ => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+async fn api_gen_engine_stop(State(app): S) -> Json<Value> { gen::stop_engine(&app.gen); Json(json!({"ok": true})) }
+
+#[derive(Deserialize)]
+struct GenPlanIn {
+    #[serde(default)] album: String,
+    #[serde(default)] goal: String,
+    #[serde(default = "d_plan_n")] n: usize,
+}
+fn d_plan_n() -> usize { 8 }
+/// 計画だけ返す(「どんなプロンプトになるか」の下見。台帳の使用済みは避ける)
+async fn api_gen_plan(State(app): S, Json(g): Json<GenPlanIn>) -> impl IntoResponse {
+    let mut goal = g.goal.clone();
+    let mut used: Vec<String> = vec![];
+    if !g.album.is_empty() {
+        let slug = album_slug(&g.album);
+        if let Some(rec) = load_albums(&app.root).into_iter().find(|a| a["name"] == json!(slug.clone())) {
+            if goal.is_empty() { goal = rec["goal"].as_str().unwrap_or("").to_string(); }
+        }
+        used = gen::load_ledger(&app.root, &slug)["prompts"].as_array()
+            .map(|a| a.iter().filter_map(|p| p["text"].as_str().map(String::from)).collect()).unwrap_or_default();
+    }
+    if goal.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"detail": "作りたい物(目標)をください"}))).into_response();
+    }
+    let prompts = gen::plan(&app.root, &app.http, &app.llm, &goal, &used, g.n.clamp(1, 24), &[]).await;
+    Json(json!({"goal": goal, "prompts": prompts})).into_response()
+}
+
+// ---------- 設定画面(docs/gen-design.md §8.1): 正本 store/config.json、行ごとに自動保存 ----------
+
+async fn api_settings_get(State(app): S) -> Json<Value> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    Json(json!({
+        "config": config::masked(), "defaults": config::defaults(),
+        "path": std::fs::canonicalize(config::path()).unwrap_or_else(|_| config::path()).display().to_string(),
+        "root": std::fs::canonicalize(&app.root).unwrap_or(app.root.clone()).display().to_string(),
+        "env": config::env_overrides(),
+        "legacy_file": std::path::Path::new(&home).join("ml-hub/config/settings.json").exists(),
+        "log": app.root.join("fluent_gallery.log").display().to_string(),
+        "version": env!("CARGO_PKG_VERSION"),
+        "features": {"faceid": cfg!(feature = "faceid"), "store": cfg!(feature = "store"), "metal": cfg!(feature = "metal"), "cuda": cfg!(feature = "cuda")},
+        "port": BIND_PORT.load(Relaxed),
+        "ai": ai_status(app).await,
+        "system": sys_stats(),
+    }))
+}
+
+#[derive(Deserialize)]
+struct SettingIn { path: String, value: Value }
+
+async fn api_settings_patch(Json(s): Json<SettingIn>) -> impl IntoResponse {
+    match config::set(&s.path, s.value) {
+        Ok(_) => Json(json!({"ok": true, "config": config::masked()})).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({"detail": e}))).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct SettingTestIn { what: String }
+
+/// 疎通確認(キーは短い一覧取得、接続先はヘルス)。結果は文字列 1 行
+async fn api_settings_test(State(app): S, Json(t): Json<SettingTestIn>) -> Json<Value> {
+    let c = &app.http;
+    let to = std::time::Duration::from_secs(10);
+    async fn probe(r: reqwest::RequestBuilder, to: std::time::Duration) -> Result<String, String> {
+        let resp = r.timeout(to).send().await.map_err(|e| format!("接続できません: {e}"))?;
+        let st = resp.status();
+        if st.is_success() { Ok("OK".into()) } else {
+            let body = resp.text().await.unwrap_or_default();
+            Err(format!("HTTP {} {}", st.as_u16(), body.chars().take(120).collect::<String>()))
+        }
+    }
+    let need = |name: &str| config::key(name).ok_or_else(|| "キー未設定".to_string());
+    let r: Result<String, String> = match t.what.as_str() {
+        "anthropic" => match need("anthropic") { Ok(k) => probe(c.get("https://api.anthropic.com/v1/models").header("x-api-key", k).header("anthropic-version", "2023-06-01"), to).await, Err(e) => Err(e) },
+        "openai" => match need("openai") { Ok(k) => probe(c.get("https://api.openai.com/v1/models").bearer_auth(k), to).await, Err(e) => Err(e) },
+        "openrouter" => match need("openrouter") { Ok(k) => probe(c.get("https://openrouter.ai/api/v1/auth/key").bearer_auth(k), to).await, Err(e) => Err(e) },
+        "xai" => match need("xai") { Ok(k) => probe(c.get("https://api.x.ai/v1/models").bearer_auth(k), to).await, Err(e) => Err(e) },
+        // Pexels は無効キーでも 200 を返す(正誤を判定できない)ので、接続確認だけと明記する
+        "pexels" => match need("pexels") { Ok(k) => probe(c.get("https://api.pexels.com/v1/search?query=cat&per_page=1").header("Authorization", k), to).await.map(|_| "接続OK(Pexels はキーの正誤を返さないため、収集で使って確かめてください)".into()), Err(e) => Err(e) },
+        "pixabay" => match need("pixabay") { Ok(k) => probe(c.get(format!("https://pixabay.com/api/?key={k}&q=cat&per_page=3")), to).await, Err(e) => Err(e) },
+        "gen" => match gen::external_base() {
+            Some(b) => if gen::health(c, &b).await { Ok(format!("外部 sd-server OK ({b})")) } else { Err(format!("外部 sd-server に繋がりません ({b})")) },
+            None => if gen::cli_bin(&app.root).is_some() { Ok(format!("内蔵 sd-cli(途中経過あり・常駐なし){}", if gen::models_present(&app.root) { "" } else { "・モデル未取得" })) }
+                    else if gen::health(c, &gen::base_url()).await { Ok("内蔵 sd-server 稼働中".into()) }
+                    else if gen::server_bin(&app.root).is_some() { Ok(format!("内蔵 sd-server(停止中・▶で起動){}", if gen::models_present(&app.root) { "" } else { "・モデル未取得" })) }
+                    else { Err("sd-cli / sd-server が見つかりません".into()) },
+        },
+        "vlm" => match config::env_or("FG_VLM_BASE", "vlm.base") {
+            Some(b) => if enrich::local_vlm_ok(c).await { Ok(format!("外部 VLM OK ({b})")) } else { Err(format!("外部 VLM に繋がりません ({b})")) },
+            None => if vlm::health(c).await { Ok("内蔵 VLM 稼働中".into()) }
+                    else if enrich::any_vlm_available(c).await { Ok("ollama の VLM が使えます".into()) }
+                    else if vlm::server_bin(&app.root).is_some() { Ok(format!("内蔵(停止中){}", if vlm::models_present(&app.root) { "" } else { "・モデル未取得" })) }
+                    else { Err("llama-server が見つかりません".into()) },
+        },
+        _ => Err(format!("知らない確認対象: {}", t.what)),
+    };
+    Json(json!({"ok": r.is_ok(), "detail": match r { Ok(s) => s, Err(e) => e }}))
 }
 
 // ---------- 自然言語検索(魔法④): 日本語の要望→内蔵LLMが属性フィルタ+英語FTS語に翻訳 ----------
@@ -3282,30 +3577,27 @@ struct GenVarIn {
 fn d_per() -> i64 { 4 }
 
 async fn api_genvar(State(app): S, Json(g): Json<GenVarIn>) -> impl IntoResponse {
+    // 旧 genvar(工房 :8772 へ依頼)は廃止。参照画像つきの生成フォルダを作って内蔵エンジンで始める(docs/gen-design.md G2)
     if g.shas.is_empty() {
         return (StatusCode::BAD_REQUEST, Json(json!({"detail": "参考画像を選んでください"}))).into_response();
     }
-    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-    let root = app.root.clone();
-    let shas = g.shas.clone();
-    let refs = tokio::task::spawn_blocking(move || store::materialize(&root, &format!("_refs_{ts}"), &shas, ""))
-        .await
-        .unwrap();
-    let r = app
-        .http
-        .post("http://127.0.0.1:8772/api/genvar")
-        .json(&json!({"refs_path": refs["dir"], "instruction": g.instruction,
-                      "per_ref": g.per_ref, "name": g.name}))
-        .timeout(std::time::Duration::from_secs(90))
-        .send()
-        .await;
-    match r {
-        Ok(resp) => {
-            let code = resp.status();
-            let v: Value = resp.json().await.unwrap_or(json!({"detail": "応答壊れ"}));
-            (StatusCode::from_u16(code.as_u16()).unwrap(), Json(v)).into_response()
-        }
-        Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({"detail": format!("工房(:8772)に繋がりません: {e}")}))).into_response(),
+    if g.instruction.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"detail": "どう作り変えるか書いてください"}))).into_response();
+    }
+    let base = if g.name.trim().is_empty() { format!("変種_{}", &g.shas[0][..6.min(g.shas[0].len())]) } else { g.name.trim().to_string() };
+    let slug = album_slug(&base);
+    let refs: Vec<Value> = g.shas.iter().take(8).map(|s| json!({"kind": "image", "sha": s})).collect();
+    let n = (g.shas.len().min(8) * g.per_ref.clamp(1, 32) as usize).clamp(1, 500);
+    let rec = json!({"name": slug, "criteria": {"source": format!("gen:{slug}")}, "folder": "", "goal": g.instruction.trim(),
+                     "kind": "gen", "recipe": {"refs": refs}, "agent": {"auto": false, "target": n, "batch": n},
+                     "keywords": [], "engines": [],
+                     "created": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64()});
+    if !save_album(&app.root, &rec) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": "フォルダを作れませんでした"}))).into_response();
+    }
+    match start_gen(app, &slug, n, 240) {
+        Ok(_) => Json(json!({"ok": true, "name": slug, "n": n, "est_minutes": (n as f64 * 0.5).ceil(), "note": "生成フォルダを作って始めました"})).into_response(),
+        Err((code, msg)) => (code, Json(json!({"detail": msg, "name": slug}))).into_response(),
     }
 }
 
@@ -3323,7 +3615,7 @@ async fn api_rebuild(State(app): S) -> Json<Value> {
 }
 
 fn cache_cap_mb() -> u64 {
-    std::env::var("FG_CACHE_MB").ok().and_then(|v| v.parse().ok()).unwrap_or(20 * 1024) // 既定20GB
+    std::env::var("FG_CACHE_MB").ok().and_then(|v| v.parse().ok()).unwrap_or_else(|| config::get_u64("storage.cache_mb", 20 * 1024)) // 既定20GB
 }
 
 /// ストアがあるFSの空きバイト(dfで取る — 外部クレート不要)
@@ -3402,6 +3694,7 @@ async fn main() {
         .ok()
         .and_then(|p| p.ancestors().find(|a| a.join("store").exists()).map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("."));
+    config::init(&root); // 設定の正本(store/config.json)を読む。以後 config::get_* で参照
     let db = Connection::open(root.join("store/index.sqlite")).expect("index.sqlite");
     store::ensure_schema(&db);
     let app: &'static App = Box::leak(Box::new(App {
@@ -3412,6 +3705,7 @@ async fn main() {
         enrich: Arc::new(enrich::EnrichState::default()),
         crawl: Arc::new(crawl::CrawlState::default()),
         crawl_queue: Mutex::new(Vec::new()),
+        gen: Arc::new(gen::GenState::default()),
         llm: Arc::new(llm::LlmState::default()),
         vlm: Arc::new(vlm::VlmState::default()),
         seg: Arc::new(seg::SegState::default()),
@@ -3455,6 +3749,16 @@ async fn main() {
         .route("/api/crawl/status", get(api_crawl_status))
         .route("/api/crawl/stop", post(api_crawl_stop))
         .route("/api/crawl/ledger/clear", post(api_ledger_clear))
+        .route("/api/gen", post(api_gen))
+        .route("/api/gen/status", get(api_gen_status))
+        .route("/api/gen/stop", post(api_gen_stop))
+        .route("/api/gen/plan", post(api_gen_plan))
+        .route("/api/gen/engine", get(api_gen_engine))
+        .route("/api/gen/engine/stop", post(api_gen_engine_stop))
+        .route("/api/gen/pull", post(api_gen_pull))
+        .route("/api/gen/preview", get(api_gen_preview))
+        .route("/api/settings", get(api_settings_get).patch(api_settings_patch))
+        .route("/api/settings/test", post(api_settings_test))
         .route("/crawl/reject/{uk}", get(crawl_reject_thumb))
         .route("/api/activity", get(api_activity))
         .route("/api/nlq", post(api_nlq))
@@ -3609,6 +3913,10 @@ async fn main() {
         tokio::time::sleep(std::time::Duration::from_secs(90)).await;
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(180)).await;
+            if !config::get_bool("autopilot.groom", true) {
+                app.set_worker("groom", false, "OFF(設定)".into());
+                continue;
+            }
             if app.crawl.alive.load(Relaxed) || app.enrich.alive.load(Relaxed) || app.seg.alive.load(Relaxed) {
                 continue;
             }
@@ -3669,9 +3977,34 @@ async fn main() {
     tokio::spawn(async move {
         loop {
             // 次回の見回り時刻を黒板に出す(UI の「自動収集: 30分ごと・次回 N 分後」用)
-            let next = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + AUTOPILOT_INTERVAL_SECS;
+            let secs = autopilot_secs();
+            let next = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + secs;
             AUTOPILOT_NEXT.store(next, Relaxed);
-            tokio::time::sleep(std::time::Duration::from_secs(AUTOPILOT_INTERVAL_SECS)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+            // 生成フォルダ(kind=gen)の補充: 収集とは別の資源(sd-server)なので独立に 1 本。VLM が無くても走る
+            if !app.gen.alive.load(Relaxed) && (gen::models_present(&app.root) && (gen::cli_bin(&app.root).is_some() || gen::server_bin(&app.root).is_some()) || gen::external_base().is_some()) {
+                for a in load_albums(&app.root) {
+                    if a["kind"].as_str() != Some("gen") || !a["agent"]["auto"].as_bool().unwrap_or(false) {
+                        continue;
+                    }
+                    let name = a["name"].as_str().unwrap_or("").to_string();
+                    if name.is_empty() || a["goal"].as_str().unwrap_or("").is_empty() {
+                        continue;
+                    }
+                    let target = a["agent"]["target"].as_i64().unwrap_or(200).max(1) as usize;
+                    let count = serde_json::from_value::<Q>(a["criteria"].clone()).map(|q| query_shas(app, &q).len()).unwrap_or(0);
+                    if count >= target {
+                        continue;
+                    }
+                    let per_run = a["agent"]["batch"].as_i64().unwrap_or(30).clamp(1, 500) as usize;
+                    let batch = (target - count).min(per_run);
+                    if let Ok(slug) = start_gen(app, &name, batch, 180) {
+                        println!("♻ autopilot: {slug} を補充生成({count}/{target} → +{batch}目標)");
+                        app.set_worker("autopilot", true, format!("{slug} 生成+{batch}"));
+                        break;
+                    }
+                }
+            }
             if app.crawl.alive.load(Relaxed) {
                 continue;
             }

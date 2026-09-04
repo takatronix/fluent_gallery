@@ -45,7 +45,7 @@ pub fn base_url() -> String { format!("http://127.0.0.1:{}/v1", port()) }
 /// llama-server の在り処(優先順): FG_LLAMA_SERVER → root/engine/bin/ → 実行ファイルの隣(Tauri サイドカー)
 /// → .app の Resources/llama/ → /opt/homebrew/bin → PATH
 pub fn server_bin(root: &Path) -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("FG_LLAMA_SERVER") {
+    if let Some(p) = crate::config::env_or("FG_LLAMA_SERVER", "tools.llama_server") {
         let p = PathBuf::from(p);
         if p.exists() { return Some(p); }
     }
@@ -78,7 +78,7 @@ pub fn status(root: &Path, st: &VlmState) -> Value {
         "present": models_present(root), "bin": server_bin(root).map(|p| p.display().to_string()),
         "downloading": st.downloading.load(Relaxed), "got_mb": st.got_mb.load(Relaxed), "total_mb": st.total_mb.load(Relaxed),
         "starting": st.starting.load(Relaxed), "running": running, "port": port(), "base": base_url(),
-        "external": std::env::var("FG_VLM_BASE").ok().filter(|s| !s.is_empty()),
+        "external": crate::config::env_or("FG_VLM_BASE", "vlm.base"),
         "last_error": st.last_error.lock().unwrap().clone(),
     })
 }
@@ -157,8 +157,8 @@ pub async fn start(root: &Path, client: &reqwest::Client, st: &VlmState) -> Resu
 
 /// 属性付け/目利きが使う内蔵VLMの OpenAI 互換 base を返す。外部指定(FG_VLM_BASE)が最優先、次に同梱の子プロセス
 pub async fn ensure(root: &Path, client: &reqwest::Client, st: &VlmState) -> Result<String, String> {
-    if let Ok(b) = std::env::var("FG_VLM_BASE") {
-        if !b.is_empty() { return Ok(b.trim_end_matches('/').to_string()); }
+    if let Some(b) = crate::config::env_or("FG_VLM_BASE", "vlm.base") {
+        return Ok(b.trim_end_matches('/').to_string());
     }
     if health(client).await { return Ok(base_url()); }
     server_bin(root).ok_or_else(|| "llama-server 無し".to_string())?;

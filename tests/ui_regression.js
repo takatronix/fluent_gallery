@@ -15,8 +15,8 @@ const check = (name, ok, detail = '') => {
 (async () => {
   // テストデータ収蔵
   // 前回が途中で落ちていると掃除が走っていないので、まず残骸を消す(次の実行を巻き添えにしない)
-  for (const al of ['_uitest', '_uitest2', '_uitest_b']) await fetch(BASE + '/api/albums/' + al, {method: 'DELETE'});
-  for (const src of ['crawl:_uitest', 'crawl:_uitest2', 'crawl:_uitest_b']) { // 前回の画像が残っていると枚数の検算が狂う
+  for (const al of ['_uitest', '_uitest2', '_uitest_b', '_uitest_g']) await fetch(BASE + '/api/albums/' + al, {method: 'DELETE'});
+  for (const src of ['crawl:_uitest', 'crawl:_uitest2', 'crawl:_uitest_b', 'gen:_uitest_g']) { // 前回の画像が残っていると枚数の検算が狂う
     await fetch(BASE + '/api/source/trash', {method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({source: src})});
   }
@@ -266,8 +266,10 @@ const check = (name, ok, detail = '') => {
       document.body.classList.remove('selmode');
       document.body.appendChild(cell);
       const pseudo = getComputedStyle(cell, '::after');
+      // 権利クリーン(✓)は 2026-09-05 から ::before の緑丸に移した($/○ は ::after のまま)。記号列として連結して検査する
+      const pre = getComputedStyle(cell, '::before');
       const out = {mask: [...cell.classList].find(name => /^m[1-7]$/.test(name)) || '',
-        marker: unquote(pseudo.content), frame: pseudo.boxShadow,
+        marker: [unquote(pre.content), unquote(pseudo.content)].filter(Boolean).join(' '), frame: pseudo.boxShadow,
         legacy: cell.querySelectorAll('.costb,.rclean,.safeb,.attrs').length,
         textOverlays: cell.querySelectorAll('.cap,.newb').length,
         text: cell.textContent.trim(), children: cell.childElementCount, svgs: cell.querySelectorAll('svg').length};
@@ -507,6 +509,32 @@ const check = (name, ok, detail = '') => {
     return {start, end: items.length};
   });
   check('連続削除(5連打)', del.start - del.end === 5, `${del.start}→${del.end}`);
+
+  // 9b) 生成フォルダ(docs/gen-design.md G1): 種別チップで「作る」を選ぶと生成用のパネルになり、行のアイコンが杖(紫)になる
+  const gen = await p.evaluate(async () => {
+    openFolderNew('', 'crawl');
+    await until(() => document.getElementById('ah_name'), 5000);
+    const crawlHead = !!document.getElementById('ah_keywords') && !document.getElementById('ah_size');
+    setNewKind('gen');
+    await until(() => document.getElementById('ah_size'), 5000);
+    const genHead = !!document.getElementById('ah_size') && !!document.getElementById('ah_minq') && !document.getElementById('ah_keywords');
+    document.getElementById('ah_name').value = '_uitest_g';
+    document.getElementById('ah_goal').value = 'テスト用の柴犬の写真';
+    await createFolder();
+    await until(() => albumsCache.some(a => a.name === '_uitest_g' && a.kind === 'gen'), 15000);
+    const a = albumsCache.find(x => x.name === '_uitest_g');
+    const row = document.querySelector('.nav[data-album="_uitest_g"]');
+    const wand = !!row?.querySelector('.kic.gen svg');
+    openFolder('_uitest_g');
+    await until(() => loc.type === 'folder' && loc.key === '_uitest_g' && document.querySelector('#viewhead .row1'), 5000);
+    const head = document.getElementById('viewhead').textContent;
+    const runBtn = head.includes('今すぐ1回作る') && head.includes('自動生成');
+    const eng = await (await fetch('/api/gen/engine')).json();
+    await fetch('/api/albums/_uitest_g', {method: 'DELETE'});
+    return {crawlHead, genHead, wand, runBtn, source: a?.criteria?.source, recipe: a?.recipe?.size, engineOk: typeof eng.present === 'boolean'};
+  });
+  check('生成フォルダ(種別チップ/杖アイコン/生成パネル)', gen.crawlHead && gen.genHead && gen.wand && gen.runBtn &&
+    gen.source === 'gen:_uitest_g' && gen.recipe === '1024x1024' && gen.engineOk, `source=${gen.source} recipe=${gen.recipe}`);
 
   // 10) フォルダ改名: 名前を変えると中身(画像のsource)も一緒に引っ越す
   const ren = await p.evaluate(async () => {

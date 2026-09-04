@@ -1056,7 +1056,7 @@ fn url_key(u: &str) -> String {
 }
 
 /// 途中経過ストリップ: 却下画像の小サムネを保存(最大40枚・古い物から捨てる)。「なぜ落ちたか」を目で見える化
-fn save_reject_thumb(root: &Path, uk: &str, img: &image::DynamicImage) {
+pub(crate) fn save_reject_thumb(root: &Path, uk: &str, img: &image::DynamicImage) {
     let dir = root.join("store/crawl/rejects");
     let _ = std::fs::create_dir_all(&dir);
     let th = img.thumbnail(320, 320).into_rgb8();
@@ -1081,7 +1081,7 @@ fn push_recent(st: &CrawlState, ok: bool, r: &str, why: &str) {
     v.truncate(14);
 }
 
-fn hamming(a: &str, b: &str) -> u32 {
+pub(crate) fn hamming(a: &str, b: &str) -> u32 {
     match (u64::from_str_radix(a, 16), u64::from_str_radix(b, 16)) {
         (Ok(x), Ok(y)) => (x ^ y).count_ones(),
         _ => 64,
