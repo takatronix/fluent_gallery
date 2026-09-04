@@ -12,7 +12,7 @@ static CFG: Mutex<Option<Value>> = Mutex::new(None);
 /// 既定値(UI はここに無いキーを出さない=未実装の設定を見せない)
 pub fn defaults() -> Value {
     json!({
-        "keys": {"anthropic": "", "openai": "", "openrouter": "", "xai": "", "pexels": "", "pixabay": ""},
+        "keys": {"anthropic": "", "openai": "", "openrouter": "", "xai": "", "pexels": "", "pixabay": "", "civitai": ""},
         "roles": {"judge": ""},                       // 目利きの既定モデル(空=claude-sonnet-5)。フォルダ設定が優先
         "gen": {"base": "", "port": 8092, "size": "1024x1024", "steps": 0, "model": "flux2-klein-4b", "preview": true}, // base=別マシンの sd-server(空=内蔵)。steps 0=モデルの既定。preview=途中経過(sd-cli)
         "vlm": {"base": ""},                          // 別マシンの llama-server / OpenAI 互換 VLM(空=内蔵)

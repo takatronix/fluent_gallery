@@ -300,19 +300,6 @@ pub async fn start_server(root: &Path, client: &reqwest::Client, st: &GenState, 
     r
 }
 
-/// 既定モデルの準備(AI 配役の「取得」)。外部指定なら疎通だけ、ローカルはモデル DL(sd-cli があれば起動は不要)
-pub async fn ensure(root: &Path, client: &reqwest::Client, st: &GenState) -> Result<String, String> {
-    if let Some(b) = external_base() {
-        if health(client, &b).await { return Ok(b); }
-        return Err(format!("外部の生成エンジン({b})に繋がりません"));
-    }
-    let s = spec(&default_model_id());
-    if cli_bin(root).is_none() && server_bin(root).is_none() { return Err("sd-cli / sd-server 無し".into()); }
-    ensure_models(root, client, st, s).await?;
-    if cli_bin(root).is_some() { return Ok("cli".into()); }
-    start_server(root, client, st, s).await
-}
-
 pub fn stop_engine(st: &GenState) {
     if let Some(mut c) = st.child.lock().unwrap().take() {
         let _ = c.kill();
@@ -360,6 +347,12 @@ pub struct GenJob {
     pub h: u32,
     pub steps: u32,
     pub seed: u64,
+    pub lora: Vec<(String, f32)>, // (store/lora の stem, 強さ)
+}
+/// sd-cli 用: プロンプト末尾に `<lora:stem:scale>` を付ける(--lora-model-dir が store/lora)
+fn prompt_with_lora(job: &GenJob) -> String {
+    let tags: String = job.lora.iter().map(|(f, s)| format!(" <lora:{f}:{s}>")).collect();
+    format!("{}{}", job.prompt, tags)
 }
 
 fn parse_progress(s: &str) -> Option<(usize, usize)> {
@@ -392,7 +385,7 @@ async fn generate_cli(root: &Path, cli: &Path, s: &ModelSpec, job: &GenJob, refs
         .arg("--llm").arg(role_path(root, s, "llm").unwrap());
     if let Some(mm) = role_path(root, s, "mmproj") { c.arg("--llm_vision").arg(mm); }
     c.arg("--lora-model-dir").arg(lora_dir(root))
-        .arg("-p").arg(&job.prompt).arg("-W").arg(job.w.to_string()).arg("-H").arg(job.h.to_string())
+        .arg("-p").arg(prompt_with_lora(job)).arg("-W").arg(job.w.to_string()).arg("-H").arg(job.h.to_string())
         .arg("--steps").arg(job.steps.to_string()).arg("--cfg-scale").arg(s.cfg.to_string())
         .arg("--sampling-method").arg("euler").arg("--diffusion-fa").arg("-s").arg(job.seed.to_string())
         .arg("-o").arg(&out);
@@ -468,6 +461,8 @@ pub async fn generate_server(client: &reqwest::Client, base: &str, s: &ModelSpec
     let mut body = json!({"prompt": job.prompt, "width": job.w, "height": job.h, "seed": job.seed,
                           "sample_params": sample_params(client, base, s, job.steps).await});
     if !ref_b64.is_empty() { body["ref_images"] = json!(ref_b64); }
+    // sd-server はプロンプト埋め込みの <lora:> を受けない(api.md)。lora 配列で渡す(path はサーバ側の --lora-model-dir 相対)
+    if !job.lora.is_empty() { body["lora"] = json!(job.lora.iter().map(|(f, s)| json!({"path": format!("{f}.safetensors"), "multiplier": s})).collect::<Vec<_>>()); }
     let sub: Value = client.post(format!("{base}/sdcpp/v1/img_gen")).json(&body)
         .timeout(std::time::Duration::from_secs(60)).send().await.map_err(|e| format!("生成依頼失敗: {e}"))?
         .error_for_status().map_err(|e| format!("生成依頼が拒否: {e}"))?
@@ -496,6 +491,20 @@ pub async fn generate_server(client: &reqwest::Client, base: &str, s: &ModelSpec
     Err("生成がタイムアウト(30分)".into())
 }
 
+/// 1 枚だけ描く(LoRA の試し描き / 将来の「1 枚だけ」ボタン)。プロバイダ選択は run() と同じ
+pub async fn generate_one(root: &Path, client: &reqwest::Client, st: &GenState, s: &ModelSpec, job: &GenJob, refs: &[PathBuf]) -> Result<Vec<u8>, String> {
+    if let Some(b) = external_base() {
+        if !health(client, &b).await { return Err(format!("外部の生成エンジン({b})に繋がりません")); }
+        return generate_server(client, &b, s, job, refs, &st.stop).await.map(|(p, _)| p);
+    }
+    ensure_models(root, client, st, s).await?;
+    if let Some(cli) = cli_bin(root) {
+        return generate_cli(root, &cli, s, job, refs, &st.stop, st).await.map(|(p, _)| p);
+    }
+    let b = start_server(root, client, st, s).await?;
+    generate_server(client, &b, s, job, refs, &st.stop).await.map(|(p, _)| p)
+}
+
 // ---------- 計画(目標文 → 英語プロンプト N 本) ----------
 fn parse_prompts(text: &str) -> Vec<String> {
     let (Some(a), Some(b)) = (text.find('['), text.rfind(']')) else { return vec![] };
@@ -505,8 +514,13 @@ fn parse_prompts(text: &str) -> Vec<String> {
 }
 
 /// 内蔵 LLM が多様なプロンプトを設計(atelier genraw の 24 本方式)。参照があれば「編集指示」の形で。失敗時は決定的テンプレ
-pub async fn plan(root: &Path, client: &reqwest::Client, llm_st: &llm::LlmState, goal: &str, used: &[String], n: usize, ref_notes: &[String]) -> Vec<String> {
+pub async fn plan(root: &Path, client: &reqwest::Client, llm_st: &llm::LlmState, goal: &str, used: &[String], n: usize, ref_notes: &[String], triggers: &[String]) -> Vec<String> {
     let avoid: Vec<&String> = used.iter().rev().take(12).collect();
+    let trig = triggers.iter().take(4).cloned().collect::<Vec<_>>().join(", ");
+    let lora_block = if trig.is_empty() { String::new() } else {
+        format!("A LoRA (style/subject adapter) is attached. Its trigger words are: \"{trig}\". Start EVERY prompt with these trigger words verbatim, \
+                 and let the LoRA decide the style: do not add 'photorealistic photograph' or other style words that fight it unless the goal asks.\n")
+    };
     let ref_block = if ref_notes.is_empty() { String::new() } else {
         format!("REFERENCE IMAGES will be attached to the image model for every generation:\n{}\n\
                  Therefore write EDIT INSTRUCTIONS, not scene descriptions: each prompt must keep the main subject of the reference \
@@ -517,14 +531,15 @@ pub async fn plan(root: &Path, client: &reqwest::Client, llm_st: &llm::LlmState,
     };
     let user = format!(
         "GOAL (may be Japanese): 「{goal}」\n{ref_block}\
+         {lora_block}\
          Write {n} English text-to-image prompts for building an image DATASET for this goal.\n\
          Rules:\n\
          - Write entirely in English: translate every Japanese word in the goal (e.g. 柴犬 → shiba inu, 病斑 → disease lesion). No Japanese characters in the output.\n\
          - Each prompt is ONE sentence, concrete and visual. Vary them strongly: individual/variant of the subject, \
            composition (close-up to wide), viewpoint (eye level / top-down / low angle), lighting (day, night, backlight, artificial), \
            background/place, season/weather, action.\n\
-         - If the goal wants photos (or does not say), use 'photorealistic photograph' wording and end with 'sharp focus, natural colors'. \
-           If the goal explicitly wants illustration/anime/painting, use that style wording instead.\n\
+         - If the goal wants photos (or does not say) and no LoRA is attached, use 'photorealistic photograph' wording and end with 'sharp focus, natural colors'. \
+           If the goal explicitly wants illustration/anime/painting/sprite sheet/pixel art etc., use exactly that wording instead.\n\
          - Never name real people, brands, or copyrighted characters. People are unspecified people.\n\
          - Keep every constraint written in the goal (e.g. 'no people', 'must show the whole body').\n\
          {}\
@@ -543,7 +558,9 @@ pub async fn plan(root: &Path, client: &reqwest::Client, llm_st: &llm::LlmState,
                     "indoors, soft window light", "on a rainy day", "at night with artificial lights", "top-down view",
                     "low angle view", "in winter", "in summer", "backlit by the sun"];
         out = vars.iter().filter(|v| !used.iter().any(|u| u.contains(*v)))
-            .take(n).map(|v| if ref_notes.is_empty() {
+            .take(n).map(|v| if !trig.is_empty() {
+                format!("{trig}, {subj}, {v}")
+            } else if ref_notes.is_empty() {
                 format!("photorealistic photograph of {subj}, {v}, sharp focus, natural colors")
             } else {
                 format!("Keep the same subject from the reference image and show it {v}, {subj}, photorealistic, sharp focus")
@@ -631,6 +648,7 @@ pub async fn run(
     goal: String,
     model_id: String,
     refs: RefPool,
+    lora: Vec<(String, f32)>,
     limits: Limits,
 ) {
     let started = std::time::Instant::now();
@@ -678,6 +696,10 @@ pub async fn run(
         set_last("目利き無し(内蔵VLM 未稼働): 近重複だけ弾いて収蔵します".into());
     }
     let ref_notes = if s.refs { refs.notes.clone() } else { vec![] };
+    // LoRA のトリガー語(棚の json)。計画 LLM に「必ず先頭に置け」と渡す
+    let triggers: Vec<String> = lora.iter().flat_map(|(f, _)| {
+        crate::lora::load_meta(&root, f)["triggers"].as_array().map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect::<Vec<_>>()).unwrap_or_default()
+    }).collect();
     let mut pool: Vec<String> = vec![];
     let mut consec_err = 0usize;
     let mut seed: u64 = now_secs() ^ 0x9E37_79B9_7F4A_7C15 ^ ((std::process::id() as u64) << 32);
@@ -693,7 +715,7 @@ pub async fn run(
         }
         if pool.is_empty() {
             set_last("プロンプトを設計中…(内蔵LLM)".into());
-            pool = plan(&root, &client, &llm_st, &goal, &used, per_plan, &ref_notes).await;
+            pool = plan(&root, &client, &llm_st, &goal, &used, per_plan, &ref_notes, &triggers).await;
             st.planned.fetch_add(pool.len(), Relaxed);
             for p in &pool {
                 ledger["prompts"].as_array_mut().unwrap().push(json!({"text": p, "ok": 0, "ng": 0, "ts": now_secs()}));
@@ -732,7 +754,7 @@ pub async fn run(
             let ref_paths: Vec<PathBuf> = ref_shas.iter().filter_map(|sha| ref_file(&root, sha)).collect();
             *st.prompt.lock().unwrap() = prompt.clone();
             set_last(format!("生成中: {}", prompt.chars().take(80).collect::<String>()));
-            let job = GenJob { prompt: prompt.clone(), w: limits.w, h: limits.h, steps, seed: xorshift(&mut seed) % 4_000_000_000 };
+            let job = GenJob { prompt: prompt.clone(), w: limits.w, h: limits.h, steps, seed: xorshift(&mut seed) % 4_000_000_000, lora: lora.clone() };
             let r = match (&base, &cli) {
                 (Some(b), _) => generate_server(&client, b, s, &job, &ref_paths, &st.stop).await,
                 (None, Some(c)) => generate_cli(&root, c, s, &job, &ref_paths, &st.stop, &st).await,
@@ -787,7 +809,8 @@ pub async fn run(
                 "rights": format!("generated:{}", s.license),
                 "gen": {"provider": provider, "model": s.id, "file": role_path(&root, s, "diff").and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())),
                         "prompt": prompt, "seed": job.seed, "steps": job.steps, "cfg": s.cfg, "w": job.w, "h": job.h,
-                        "refs": ref_shas, "lora": [], "secs": (secs * 10.0).round() / 10.0, "gate": gate, "quality": quality, "album": album},
+                        "refs": ref_shas, "lora": lora.iter().map(|(f, s)| json!({"file": f, "scale": s})).collect::<Vec<_>>(),
+                        "secs": (secs * 10.0).round() / 10.0, "gate": gate, "quality": quality, "album": album},
                 "cost": {"usd": 0.0, "by": provider},
                 "quality": if quality > 0 { json!(quality) } else { Value::Null },
             });

@@ -536,6 +536,21 @@ const check = (name, ok, detail = '') => {
   check('生成フォルダ(種別チップ/杖アイコン/生成パネル)', gen.crawlHead && gen.genHead && gen.wand && gen.runBtn &&
     gen.source === 'gen:_uitest_g' && gen.recipe === '1024x1024' && gen.engineOk, `source=${gen.source} recipe=${gen.recipe}`);
 
+  // 9c) 設定ページと LoRA 棚: グリッドの場所に文書として描かれ、ハッシュで復元できる
+  const pages = await p.evaluate(async () => {
+    await go({type: 'settings', key: '', criteria: {}});
+    await until(() => document.querySelector('.setsec'), 8000);
+    const settings = {secs: document.querySelectorAll('.setsec').length, page: document.getElementById('grid').classList.contains('page'), hash: location.hash};
+    await go({type: 'lora', key: '', criteria: {}});
+    await until(() => document.querySelector('.limport'), 8000);
+    const lora = {import: !!document.getElementById('lora_url'), page: document.getElementById('grid').classList.contains('page'), hash: location.hash};
+    await go({type: 'lib', key: 'all', criteria: {}});
+    await until(() => document.querySelector('.cell'), 8000);
+    return {settings, lora, back: !document.getElementById('grid').classList.contains('page')};
+  });
+  check('設定ページ/LoRA棚(文書モード・ハッシュ)', pages.settings.secs >= 6 && pages.settings.page && pages.settings.hash.includes('t=settings') &&
+    pages.lora.import && pages.lora.page && pages.lora.hash.includes('t=lora') && pages.back, `secs=${pages.settings.secs}`);
+
   // 10) フォルダ改名: 名前を変えると中身(画像のsource)も一緒に引っ越す
   const ren = await p.evaluate(async () => {
     const mk = (name, folder) => fetch('/api/albums', {method: 'POST', headers: {'Content-Type': 'application/json'},

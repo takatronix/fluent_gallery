@@ -7,6 +7,7 @@ mod edits;
 mod config;
 mod enrich;
 mod gen;
+mod lora;
 mod llm;
 mod media;
 #[cfg(feature = "faceid")]
@@ -42,6 +43,7 @@ struct App {
     crawl: Arc<crawl::CrawlState>,
     crawl_queue: Mutex<Vec<CrawlIn>>, // 順番待ち(同時1本=VLM直列の現実に合わせ、弾かず並ばせる)
     gen: Arc<gen::GenState>, // AI生成フォルダ(sd-server 子プロセス+ジョブ状態、docs/gen-design.md)
+    lora: Arc<lora::LoraState>, // LoRA 棚の取り込み/試し描きの進捗
     llm: Arc<llm::LlmState>,
     vlm: Arc<vlm::VlmState>, // 内蔵VLM(llama-server 子プロセス)
     seg: Arc<seg::SegState>,
@@ -2640,6 +2642,7 @@ async fn api_activity(State(app): S) -> Json<Value> {
         "ai": ai_status(app).await,
         "crawl": crawl,
         "gen": app.gen.status(),
+        "lora": app.lora.status(),
         "enrich": app.enrich.status(),
         "llm": app.llm.status(&app.root),
         "seg": app.seg.status(),
@@ -2730,6 +2733,11 @@ fn start_gen(app: &'static App, album: &str, n: usize, minutes: u64) -> Result<S
         }
         refs.fixed.truncate(4);
     }
+    // LoRA(G4): recipe.lora = [{file(stem), scale}]。棚に実在する物だけ
+    let lora_list: Vec<(String, f32)> = recipe["lora"].as_array().map(|a| a.iter().filter_map(|x| {
+        let f = lora::safe_stem(x["file"].as_str()?);
+        lora::file_path(&app.root, &f).exists().then(|| (f, x["scale"].as_f64().unwrap_or(1.0).clamp(0.05, 2.0) as f32))
+    }).take(4).collect()).unwrap_or_default();
     let st = app.gen.clone();
     st.alive.store(true, Relaxed);
     st.stop.store(false, Relaxed);
@@ -2739,7 +2747,7 @@ fn start_gen(app: &'static App, album: &str, n: usize, minutes: u64) -> Result<S
     *st.album.lock().unwrap() = slug.clone();
     *st.last.lock().unwrap() = "起動中…".into();
     let limits = gen::Limits { max_n: n.clamp(1, 2000), max_secs: minutes.clamp(1, 720) * 60, w: snap(w), h: snap(h), steps, min_quality };
-    tokio::spawn(gen::run(app.root.clone(), app.http.clone(), st, app.llm.clone(), app.enrich.clone(), slug.clone(), goal, model, refs, limits));
+    tokio::spawn(gen::run(app.root.clone(), app.http.clone(), st, app.llm.clone(), app.enrich.clone(), slug.clone(), goal, model, refs, lora_list, limits));
     Ok(slug)
 }
 
@@ -2806,8 +2814,112 @@ async fn api_gen_plan(State(app): S, Json(g): Json<GenPlanIn>) -> impl IntoRespo
     if goal.trim().is_empty() {
         return (StatusCode::BAD_REQUEST, Json(json!({"detail": "作りたい物(目標)をください"}))).into_response();
     }
-    let prompts = gen::plan(&app.root, &app.http, &app.llm, &goal, &used, g.n.clamp(1, 24), &[]).await;
+    let prompts = gen::plan(&app.root, &app.http, &app.llm, &goal, &used, g.n.clamp(1, 24), &[], &[]).await;
     Json(json!({"goal": goal, "prompts": prompts})).into_response()
+}
+
+// ---------- LoRA 棚(G4, docs/gen-design.md §5) ----------
+
+async fn api_lora_list(State(app): S) -> Json<Value> {
+    let albums = load_albums(&app.root);
+    Json(json!({"items": lora::list(&app.root, &albums), "state": app.lora.status(),
+                "models": gen::MODELS.iter().map(|m| json!({"id": m.id, "label": m.label, "present": gen::model_present(&app.root, m)})).collect::<Vec<_>>()}))
+}
+
+#[derive(Deserialize)]
+struct LoraImportIn { url: String }
+/// URL(Hugging Face / Civitai / 直リンク)から取り込む。裏で走り、進捗は /api/lora の state
+async fn api_lora_import(State(app): S, Json(i): Json<LoraImportIn>) -> impl IntoResponse {
+    if !i.url.trim().starts_with("http") {
+        return (StatusCode::BAD_REQUEST, Json(json!({"detail": "URL をください"}))).into_response();
+    }
+    if app.lora.importing.load(Relaxed) {
+        return (StatusCode::CONFLICT, Json(json!({"detail": "別の LoRA を取り込み中です"}))).into_response();
+    }
+    // 先に URL を解釈して親モデル検問(即答)。DL 自体は裏で
+    let key = config::key("civitai");
+    let res = match lora::resolve(&app.http, &i.url, key.as_deref()).await {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"detail": e}))).into_response(),
+    };
+    if lora::model_for_base(&res.base).is_none() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"detail": format!("親モデル「{}」は内蔵の生成モデルに載りません(対応: FLUX.2 klein 4B / Z-Image / Qwen-Image)", res.base)}))).into_response();
+    }
+    let url = i.url.clone();
+    tokio::spawn(async move {
+        match lora::import_url(&app.root, &app.http, &app.lora, &url).await {
+            Ok(stem) => println!("🧬 LoRA 取り込み: {stem}"),
+            Err(e) => println!("🧬 LoRA 取り込み失敗: {e}"),
+        }
+    });
+    Json(json!({"ok": true, "name": res.name, "base": res.base, "file": res.file_name, "triggers": res.triggers, "note": "裏で取得中(進捗は /api/lora の state)"})).into_response()
+}
+
+/// .safetensors のアップロード(棚へのドラッグ&ドロップ)
+async fn api_lora_upload(State(app): S, mut mp: axum::extract::Multipart) -> impl IntoResponse {
+    let mut done = vec![];
+    let mut errs = vec![];
+    while let Ok(Some(field)) = mp.next_field().await {
+        let fname = field.file_name().unwrap_or("lora.safetensors").to_string();
+        if !fname.to_lowercase().ends_with(".safetensors") { errs.push(format!("{fname}: .safetensors だけ")); continue; }
+        let Ok(data) = field.bytes().await else { errs.push(format!("{fname}: 読めない")); continue };
+        match lora::import_bytes(&app.root, &fname, &data) { Ok(s) => done.push(s), Err(e) => errs.push(format!("{fname}: {e}")) }
+    }
+    Json(json!({"ok": errs.is_empty(), "added": done, "errors": errs}))
+}
+
+async fn api_lora_delete(State(app): S, AxPath(name): AxPath<String>) -> impl IntoResponse {
+    let stem = lora::safe_stem(&name);
+    if lora::delete(&app.root, &stem) { Json(json!({"ok": true})).into_response() } else { StatusCode::NOT_FOUND.into_response() }
+}
+
+/// 試し描き: 内蔵エンジンで 2 題描いてカードの顔にする(生成中は 409)
+async fn api_lora_probe(State(app): S, AxPath(name): AxPath<String>) -> impl IntoResponse {
+    let stem = lora::safe_stem(&name);
+    if !lora::file_path(&app.root, &stem).exists() { return StatusCode::NOT_FOUND.into_response(); }
+    if app.gen.alive.swap(true, Relaxed) {
+        return (StatusCode::CONFLICT, Json(json!({"detail": "生成中です(終わってから試し描きしてください)"}))).into_response();
+    }
+    let m = lora::load_meta(&app.root, &stem);
+    let base = m["base"].as_str().map(String::from).unwrap_or_else(|| lora::base_from_text(&stem).to_string());
+    let Some(model_id) = lora::model_for_base(&base) else {
+        app.gen.alive.store(false, Relaxed);
+        return (StatusCode::BAD_REQUEST, Json(json!({"detail": format!("親モデル「{base}」は内蔵モデルに載りません")}))).into_response();
+    };
+    let triggers: Vec<String> = m["triggers"].as_array().map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect()).unwrap_or_default();
+    app.gen.stop.store(false, Relaxed);
+    *app.gen.album.lock().unwrap() = format!("lora_probe:{stem}");
+    *app.gen.last.lock().unwrap() = format!("LoRA 試し描き: {stem}");
+    *app.lora.probing.lock().unwrap() = stem.clone();
+    let stem2 = stem.clone();
+    tokio::spawn(async move {
+        let s = gen::spec(model_id);
+        for (i, p) in lora::probe_prompts(&triggers).iter().enumerate() {
+            if app.gen.stop.load(Relaxed) { break; }
+            *app.gen.prompt.lock().unwrap() = p.clone();
+            let job = gen::GenJob { prompt: p.clone(), w: 768, h: 768, steps: 0, seed: 7 + i as u64, lora: vec![(stem2.clone(), 1.0)] };
+            let job = gen::GenJob { steps: s.steps, ..job };
+            match gen::generate_one(&app.root, &app.http, &app.gen, s, &job, &[]).await {
+                Ok(png) => lora::save_preview(&app.root, &stem2, i, &png),
+                Err(e) => { *app.gen.last.lock().unwrap() = format!("試し描き失敗: {e}"); break; }
+            }
+        }
+        *app.lora.probing.lock().unwrap() = String::new();
+        *app.gen.prompt.lock().unwrap() = String::new();
+        let _ = std::fs::remove_file(gen::preview_path(&app.root));
+        app.gen.alive.store(false, Relaxed);
+        println!("🧬 LoRA 試し描き完了: {stem2}");
+    });
+    Json(json!({"ok": true, "note": "2 枚描きます(1024²換算で約1分)。進捗は /api/gen/status"})).into_response()
+}
+
+async fn lora_preview_img(State(app): S, AxPath((name, i)): AxPath<(String, String)>) -> impl IntoResponse {
+    let stem = lora::safe_stem(&name);
+    let i = if i == "art" { "art".to_string() } else { i.chars().filter(|c| c.is_ascii_digit()).take(1).collect() };
+    match std::fs::read(lora::previews_dir(&app.root).join(format!("{stem}_{i}.jpg"))) {
+        Ok(b) => ([(header::CONTENT_TYPE, "image/jpeg"), (header::CACHE_CONTROL, "no-cache")], b).into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 // ---------- 設定画面(docs/gen-design.md §8.1): 正本 store/config.json、行ごとに自動保存 ----------
@@ -2862,6 +2974,7 @@ async fn api_settings_test(State(app): S, Json(t): Json<SettingTestIn>) -> Json<
         "xai" => match need("xai") { Ok(k) => probe(c.get("https://api.x.ai/v1/models").bearer_auth(k), to).await, Err(e) => Err(e) },
         // Pexels は無効キーでも 200 を返す(正誤を判定できない)ので、接続確認だけと明記する
         "pexels" => match need("pexels") { Ok(k) => probe(c.get("https://api.pexels.com/v1/search?query=cat&per_page=1").header("Authorization", k), to).await.map(|_| "接続OK(Pexels はキーの正誤を返さないため、収集で使って確かめてください)".into()), Err(e) => Err(e) },
+        "civitai" => match need("civitai") { Ok(k) => probe(c.get("https://civitai.com/api/v1/models?limit=1").bearer_auth(k), to).await, Err(e) => Err(e) },
         "pixabay" => match need("pixabay") { Ok(k) => probe(c.get(format!("https://pixabay.com/api/?key={k}&q=cat&per_page=3")), to).await, Err(e) => Err(e) },
         "gen" => match gen::external_base() {
             Some(b) => if gen::health(c, &b).await { Ok(format!("外部 sd-server OK ({b})")) } else { Err(format!("外部 sd-server に繋がりません ({b})")) },
@@ -3706,6 +3819,7 @@ async fn main() {
         crawl: Arc::new(crawl::CrawlState::default()),
         crawl_queue: Mutex::new(Vec::new()),
         gen: Arc::new(gen::GenState::default()),
+        lora: Arc::new(lora::LoraState::default()),
         llm: Arc::new(llm::LlmState::default()),
         vlm: Arc::new(vlm::VlmState::default()),
         seg: Arc::new(seg::SegState::default()),
@@ -3757,6 +3871,12 @@ async fn main() {
         .route("/api/gen/engine/stop", post(api_gen_engine_stop))
         .route("/api/gen/pull", post(api_gen_pull))
         .route("/api/gen/preview", get(api_gen_preview))
+        .route("/api/lora", get(api_lora_list))
+        .route("/api/lora/import", post(api_lora_import))
+        .route("/api/lora/upload", post(api_lora_upload).layer(axum::extract::DefaultBodyLimit::max(3 << 30)))
+        .route("/api/lora/{name}", delete(api_lora_delete))
+        .route("/api/lora/{name}/probe", post(api_lora_probe))
+        .route("/lora/preview/{name}/{i}", get(lora_preview_img))
         .route("/api/settings", get(api_settings_get).patch(api_settings_patch))
         .route("/api/settings/test", post(api_settings_test))
         .route("/crawl/reject/{uk}", get(crawl_reject_thumb))
