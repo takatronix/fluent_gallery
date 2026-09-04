@@ -10,7 +10,7 @@
     --acc:#4d9fff; --acc-soft:#4d9fff22; --ok:#6ee7a0;
   }
   * { box-sizing:border-box; margin:0; }
-  html, body { height:100%; }
+  html, body { height:100%; height:100dvh; }
   body { background:var(--bg); color:var(--tx); overflow:hidden;
          font:13px/1.55 -apple-system,"SF Pro Text","Hiragino Sans",system-ui,sans-serif;
          display:grid; grid-template-columns:var(--sidew, 218px) 1fr; }
@@ -96,6 +96,7 @@
   #viewhead .ttl { font-size:14px; font-weight:700; display:flex; gap:8px; align-items:center; }
   #viewhead .frow { display:flex; gap:8px; align-items:center; margin-top:8px; }
   #viewhead .frow .lbl { width:76px; text-align:right; flex:none; font-size:11px; color:var(--faint); }
+  #viewhead .frow .rights-note { flex:1 1 220px; min-width:0; overflow-wrap:anywhere; white-space:normal; }
   #viewhead .goal { flex:1; min-width:220px; }
   #viewhead .lbl { font-size:11px; color:var(--faint); }
   #viewhead .last { font-size:11px; color:var(--faint); margin-top:9px; display:flex; align-items:center; gap:4px; flex-wrap:wrap; }
@@ -143,8 +144,9 @@
   @keyframes pulse { 50% { opacity:.3; transform:scale(.7); } }
 
   /* ---- グリッド: クリック=開く / ◯=選択 ---- */
-  .gridwrap { flex:1; overflow-y:auto; padding:10px 16px 90px; }
-  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(var(--cell,168px),1fr)); gap:6px; }
+  .gridwrap { flex:1; overflow-y:auto; overflow-anchor:none; padding:10px 16px 90px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(var(--cell,168px),1fr)); gap:6px;
+          align-content:start; }
   .grid.fit img { object-fit:contain; }
   .cell { position:relative; aspect-ratio:1; border-radius:6px; overflow:hidden; cursor:pointer;
     /* 画面外セルはレイアウト/描画/ラスタメモリごとスキップ(数千枚でも軽い)。サイズはヒントで確保 */
@@ -153,19 +155,23 @@
           transition:opacity .45s ease, transform .5s cubic-bezier(.2,.9,.3,1); }
   .cell.in { opacity:1; transform:none; }
   .cell img { width:100%; height:100%; object-fit:cover; display:block; }
-  .cell::after { content:''; position:absolute; inset:0; box-shadow:inset 0 0 0 1px #ffffff0d;
-                 border-radius:6px; pointer-events:none; }
+  /* 最小表示は200枚を1 JPEGへ束ねる。各imgは同じatlas surfaceの担当タイルだけを切り出す。 */
+  .cell img.atlas { position:absolute; max-width:none; max-height:none; object-fit:fill !important;
+                    width:var(--atlas-w); height:var(--atlas-h); left:var(--atlas-l); top:var(--atlas-t); }
+  /* 高速scroll中のsrc退避imgはChromeが欠損画像の白枠を描くため、hydrateまで親背景だけ見せる */
+  .cell img:not([src]), .cell img[data-src] { visibility:hidden; }
+  .cell::after { content:''; position:absolute; inset:0; border-radius:6px; pointer-events:none; }
   .cell .ck { position:absolute; top:6px; left:6px; width:22px; height:22px; border-radius:99px;
-              border:1.5px solid #ffffffb0; background:#00000038; cursor:pointer; opacity:0;
+              border:1.5px solid #4d9fff99; background:#00000038; cursor:pointer; opacity:0;
               transition:opacity .12s, background .12s, border-color .12s; z-index:2;
               display:flex; align-items:center; justify-content:center; color:transparent; }
   @media (hover:hover) { .cell:hover .ck { opacity:1; } }
   body.selmode .ck { opacity:1; }
   .cell.sel .ck { opacity:1; background:var(--acc); border-color:var(--acc); color:#fff; }
   .cell.sel { outline:2px solid var(--acc); outline-offset:-2px; }
-  .cell.cur { outline:2px solid #ffffffd8; outline-offset:-2px; } /* キーボードカーソル(Finder流) */
-  .cell.sel.cur { outline:2px solid var(--acc); box-shadow:inset 0 0 0 2px #ffffff90; }
-  .cell.sel img { transform:scale(.94); border-radius:4px; transition:transform .15s ease; }
+  .cell.cur { outline:2px solid var(--acc); outline-offset:-2px; } /* キーボードカーソル(Finder流) */
+  .cell.sel.cur { outline:2px solid var(--acc); }
+  /* 選択時も画像を縮めて周囲のガターを出さず、青いチェック/outlineだけで示す */
   .cell .badge { position:absolute; top:7px; right:7px; z-index:2; color:#aeb4c2; opacity:0;
                  cursor:pointer; filter:drop-shadow(0 1px 3px #000c);
                  transition:opacity .12s, color .12s, transform .12s; }
@@ -177,11 +183,17 @@
   .facebox:hover { border-color:var(--acc); }
   .facebox.on { border-color:#f2c14e; box-shadow:0 0 14px #f2c14e66; }
   .tag.ptag { color:#f2c14e; border-color:#f2c14e55; } /* 顔ID(本人確認済み)タグは金色 */
-  .cell .costb { position:absolute; top:5px; left:5px; z-index:1; font-size:8px; font-weight:600;
-                 background:#1a160abb; color:#e5c07b88; border-radius:99px; padding:0 5px; }
-  .cell .rclean { position:absolute; bottom:6px; right:6px; z-index:1; width:17px; height:17px;
-                  border-radius:50%; background:#123524d9; color:#6ee7a0; display:flex;
-                  align-items:center; justify-content:center; box-shadow:0 1px 3px #000a; }
+  /* 属性は既存の枠線用疑似要素へ固定記号だけ描く。追加DOM/SVG/data属性/金額整形はゼロ。 */
+  .cell:is(.m1,.m2,.m3,.m4,.m5,.m6,.m7)::after { box-sizing:border-box; padding:0 6px 5px;
+    display:flex; align-items:flex-end; justify-content:flex-end; color:#e8ecf2c7;
+    font-size:10px; font-weight:750; line-height:1; letter-spacing:2px; text-shadow:0 1px 3px #000; }
+  .cell.m1::after { content:'✓'; }
+  .cell.m2::after { content:'$'; }
+  .cell.m3::after { content:'✓ $'; }
+  .cell.m4::after { content:'○'; }
+  .cell.m5::after { content:'✓ ○'; }
+  .cell.m6::after { content:'$ ○'; }
+  .cell.m7::after { content:'✓ $ ○'; }
   .cell .newb { position:absolute; bottom:6px; left:6px; z-index:1; font-size:9px; font-weight:700;
                 letter-spacing:.05em; color:#fff; background:var(--acc); border-radius:5px;
                 padding:1px 6px; box-shadow:0 1px 5px #0009; }
@@ -257,18 +269,83 @@
            transition:all .25s ease; pointer-events:none; }
   #toast.show { transform:translate(-50%, 0); opacity:1; }
 
-  @media (max-width: 780px) {
-    body { grid-template-columns:1fr; grid-template-rows:auto 1fr; }
+  /* iPhone縦横/iPad縦: 左ペインを上の1段ナビにし、画像領域を必ず残す。 */
+  @media (max-width: 900px), (max-height: 520px) and (pointer: coarse) {
+    body { grid-template-columns:minmax(0,1fr);
+           grid-template-rows:calc(50px + env(safe-area-inset-top)) minmax(0,1fr); }
     #sideresize { display:none; }
-    aside { flex-direction:row; gap:2px; overflow-x:auto; border-right:none; padding:8px 10px;
-            border-bottom:1px solid var(--hair); align-items:center; }
-    .brand, .sec, #ai_activity { display:none; }
+    aside { min-width:0; min-height:0; height:auto; flex-flow:row nowrap; gap:4px;
+            overflow-x:auto; overflow-y:hidden; overscroll-behavior-x:contain;
+            border-right:none; border-bottom:1px solid var(--hair);
+            padding:calc(5px + env(safe-area-inset-top)) max(8px,env(safe-area-inset-right)) 5px max(8px,env(safe-area-inset-left));
+            align-items:center; scrollbar-width:none; }
+    aside::-webkit-scrollbar, .top::-webkit-scrollbar, #viewhead .row1::-webkit-scrollbar,
+    #lbbar::-webkit-scrollbar, #selbar::-webkit-scrollbar { display:none; }
+    .brand, aside > .sec, #ai_activity, #storagebox, #side_spacer { display:none; }
+    #nav_lib, #nav_folders, #nav_sources_sec, #nav_datasets {
+      display:flex; flex:none; gap:4px; align-items:center; min-width:max-content; }
+    #folders_head, #ai_head, #nav_sources_sec > .sec { display:flex; flex:none; height:40px; padding:7px 10px; }
+    aside .nav { flex:none; height:40px; padding:7px 10px !important; }
+    aside .nav .nm { min-width:0; }
+    aside .nav .n, aside .nav .del { display:none !important; }
+    main { min-width:0; min-height:0; }
+    .top { flex:none; flex-wrap:nowrap; gap:6px; min-height:52px; overflow-x:auto; overflow-y:hidden;
+           overscroll-behavior-x:contain; padding:6px max(8px,env(safe-area-inset-right)) 6px max(8px,env(safe-area-inset-left));
+           scrollbar-width:none; }
+    .top > * { flex:none; }
+    .top > .sp { display:none; }
+    .top .search { flex:0 0 min(260px,calc(100vw - 92px)); min-width:0; height:40px; }
+    .top > button { min-height:40px; }
     #fsbtn { display:none; } /* 全画面はスマホには出さない(ブラウザUIが元々薄い・指示2026-09-03) */
-    .nav { flex:none; }
-    .nav .n { display:none; }
-    .grid { grid-template-columns:repeat(auto-fill,minmax(110px,1fr)); gap:4px; }
-    #selbar, #genpanel { left:10px; right:10px; }
+    #viewhead { margin:6px max(8px,env(safe-area-inset-right)) 0 max(8px,env(safe-area-inset-left));
+                padding:8px 10px; min-height:0; }
+    #viewhead .row1 { flex-wrap:nowrap; overflow-x:auto; overscroll-behavior-x:contain; scrollbar-width:none; }
+    #viewhead .row1 > * { flex:none; }
+    #viewhead .row1 > .sp { display:none; }
+    #viewhead.open { max-height:min(55dvh,420px); overflow-x:hidden; overflow-y:auto; overscroll-behavior:contain; }
+    #viewhead .details .frow { flex-wrap:wrap; align-items:flex-start; }
+    #viewhead .details .frow > .lbl:first-child { width:68px; text-align:left; }
+    #viewhead .details input[type=text] { min-width:0; max-width:100%; }
+    .gridwrap { padding:6px max(6px,env(safe-area-inset-right))
+                calc(84px + env(safe-area-inset-bottom)) max(6px,env(safe-area-inset-left)); }
+    .grid { gap:4px; }
+
+    #selbar { left:max(8px,env(safe-area-inset-left)); right:max(8px,env(safe-area-inset-right));
+              bottom:calc(8px + env(safe-area-inset-bottom)); flex-wrap:nowrap; overflow-x:auto;
+              overscroll-behavior-x:contain; padding:7px 9px; scrollbar-width:none; }
+    #selbar > * { flex:none; }
+    #selbar > .sp { display:none; }
+    #selbar button, #selbar input { min-height:44px; }
+    #genpanel { left:max(8px,env(safe-area-inset-left)); right:max(8px,env(safe-area-inset-right));
+                bottom:calc(64px + env(safe-area-inset-bottom)); max-height:calc(100dvh - 80px);
+                overflow:auto; }
+
+    #lb { justify-content:flex-start; overflow-y:auto; overscroll-behavior:contain;
+          padding:calc(8px + env(safe-area-inset-top)) max(8px,env(safe-area-inset-right))
+                  calc(12px + env(safe-area-inset-bottom)) max(8px,env(safe-area-inset-left)); }
+    #lb img#lbimg { flex:none; max-width:100%; max-height:55svh; }
+    #lbbar { flex:none; width:100%; flex-wrap:nowrap; justify-content:flex-start;
+             overflow-x:auto; overscroll-behavior-x:contain; scrollbar-width:none; }
+    #lbbar button, #segfix button { min-height:44px; flex:none; }
+    #lbmeta { flex:none; max-width:100%; }
+    #lbinfo { top:calc(8px + env(safe-area-inset-top)); left:max(8px,env(safe-area-inset-left));
+              right:max(8px,env(safe-area-inset-right)); max-width:none; max-height:28svh; overflow:auto; }
+    #editpanel { flex:none; width:100%; max-height:65svh; overflow-y:auto; }
+    #segfix { flex:none; width:100%; overflow-x:auto; }
+
+    #crawlbar { margin-inline:max(8px,env(safe-area-inset-left)) max(8px,env(safe-area-inset-right)); }
+    #ingestpanel { width:calc(100vw - 20px - env(safe-area-inset-left) - env(safe-area-inset-right));
+                   max-height:calc(100dvh - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+                   overflow-y:auto; overscroll-behavior:contain; }
+    #ingestpanel input { min-width:0 !important; max-width:100%; }
+    #facesovl > div { margin:calc(8px + env(safe-area-inset-top)) max(8px,env(safe-area-inset-right))
+                            calc(8px + env(safe-area-inset-bottom)) max(8px,env(safe-area-inset-left)) !important;
+                      max-height:calc(100dvh - 16px - env(safe-area-inset-top) - env(safe-area-inset-bottom)) !important; }
+    #facesovl > div > div:first-child { flex-wrap:nowrap; }
+    #facesovl > div > div:first-child > span:not(.sp) { display:none; }
+    #facesovl button { flex:none; min-height:44px; }
   }
+
   /* iOS風スクロールバー: 細い丸棒・トラック透明(2026-09-03指示) */
   * { scrollbar-width: thin; scrollbar-color: #ffffff2e transparent; }
   ::-webkit-scrollbar { width: 8px; height: 8px; }
@@ -289,10 +366,46 @@
                 transition: transform .22s cubic-bezier(.2,1.25,.3,1) .06s, box-shadow .22s ease .06s; }
   /* 選択作業中(1枚でも選択がある間)はホバー拡大を止め、チェックを正確に押せるようにする */
   body.selmode .cell:hover { transform: none; box-shadow: none; }
-  /* 高密度モード(セル≤110px): 数百セルの個別アニメは主スレッドを殺すので演出を軽量化 */
-  body.dense .cell { transition: none; }
+  /* 高密度モード(セル≤110px): 画像だけにして、文字・バッジ・個別アニメを描かない */
+  /* DOM自体を約1500セル以下へ仮想化済み。tinyでcontent-visibilityも重ねると高速scroll時の
+     可視判定/LayerTree commitが二重に走るため、明示containだけにする。 */
+  body.dense .cell { transition:none; content-visibility:visible; contain:layout paint style; }
   body.dense .cell:hover { transform: none; box-shadow: none; }
   body.dense .cell img { transition: none; }
+  body.dense .cell > :not(img) { display:none; }
+  body.dense .cell:is(.m1,.m2,.m3,.m4,.m5,.m6,.m7)::after { content:''; }
+  /* 確定後は見えないcaption/SVG群をDOMにも作らず、選択UIだけ疑似要素で保つ */
+  .cell.lite::before { content:''; position:absolute; top:3px; left:3px; width:12px; height:12px;
+    box-sizing:border-box; border:1px solid transparent; border-radius:50%; background:transparent;
+    opacity:0; z-index:2; pointer-events:none; color:#fff; font-size:9px; line-height:11px; text-align:center; }
+  body.selmode .cell.lite::before { opacity:1; border-color:#4d9fff99; background:#0005; }
+  .cell.lite.sel::before { opacity:1; }
+  .cell.lite.sel::before { content:'✓'; border-color:var(--acc); background:var(--acc); }
+  .cell.lite::after { content:'★'; inset:2px 2px auto auto; box-shadow:none; border-radius:0;
+    color:#aeb4c2; opacity:0; font-size:10px; line-height:1; pointer-events:none; }
+  @media (hover:hover) { .cell.lite:hover::after { opacity:.9; } }
+  .cell.lite.keep::after { color:#f2c14e; opacity:1; }
+  .cell.lite.trash-lite::after { display:none; }
+  /* タッチ端末はsticky hoverを作らず、通常サイズの選択/お気に入りだけ指で押せる広さにする。 */
+  @media (hover: none), (pointer: coarse) {
+    .cell:hover, body.selmode .cell:hover { transform:none; box-shadow:none; transition:none; }
+    .cell img { -webkit-user-drag:none; user-select:none; }
+    .cell:not(.lite) .ck { width:36px; height:36px; top:5px; left:5px; opacity:.78; }
+    .cell:not(.lite) .badge { width:36px; height:36px; top:5px; right:5px; opacity:.78;
+                              display:flex; align-items:center; justify-content:center; }
+    .cell.lite::before { width:22px; height:22px; line-height:21px; font-size:12px; }
+    .cell.lite::after { font-size:15px; inset:5px 5px auto auto; }
+    #viewhead .row1 { flex-wrap:nowrap; overflow-x:auto; overscroll-behavior-x:contain; scrollbar-width:none; }
+    #viewhead .row1 > * { flex:none; }
+    #viewhead .row1 > .sp { display:none; }
+    #viewhead .details .frow { flex-wrap:wrap; align-items:flex-start; }
+    #viewhead .details input[type=text] { min-width:0; max-width:100%; }
+    button { touch-action:manipulation; }
+    .top button { min-height:40px; }
+    aside .nav { min-height:40px; }
+    #viewhead.open { max-height:min(55dvh,420px); overflow-x:hidden; overflow-y:auto; overscroll-behavior:contain; }
+    #lbbar button, #segfix button, #selbar button, #facesovl button { min-height:44px; }
+  }
   /* D&D: 落とせる場所のハイライト */
   .nav.dropon { outline:1px dashed #7aa2f7; background:#7aa2f722; }
   /* 合流(フォルダ→フォルダ)は移動と別色。落とすと確認ポップアップが出る */
@@ -330,7 +443,7 @@
   <div id="sideresize" title="ドラッグで幅を変える(ダブルクリックで既定に戻す)"></div>
   <div class="brand">fluent_gallery</div>
   <div id="nav_lib"></div>
-  <div class="sec" style="cursor:pointer" onclick="toggleFold('/folders')"
+  <div class="sec" id="folders_head" style="cursor:pointer" onclick="toggleFold('/folders')"
        title="ここへ落とすと一番上の階層へ移動します"
        ondragover="navOver(event, 'root', '')" ondragleave="navLeave(event)" ondrop="navDrop(event, 'root', '')">フォルダ <span id="fold_folders_ic"></span><span class="add" id="addfolder" title="新規フォルダ(空で生まれます)"></span></div>
   <div id="nav_folders"></div>
@@ -338,11 +451,11 @@
   <div class="sec" title="ここへ落とすと一番上の階層へ移動します"
        ondragover="navOver(event, 'dsroot', '')" ondragleave="navLeave(event)" ondrop="navDrop(event, 'dsroot', '')">出荷 — データセット</div>
   <div id="nav_datasets"></div>
-  <div class="sec" style="display:flex; align-items:center">AI稼働状況
+  <div class="sec" id="ai_head" style="display:flex; align-items:center">AI稼働状況
     <span id="facesbtn" style="margin-left:auto; cursor:pointer; opacity:.7; display:flex; align-items:center; gap:3px"
       onclick="facesOpen()" title="顔ID台帳 — 登録済みの人物と参照顔の一覧/管理"></span></div>
   <div id="ai_activity" style="padding:0 10px 6px; font-size:11px; color:var(--faint)"></div>
-  <div style="flex:1"></div>
+  <div id="side_spacer" style="flex:1"></div>
   <div class="sec">ストレージ</div>
   <div id="storagebox" style="padding:0 10px 4px; font-size:11px; color:var(--faint)"></div>
 </aside>
@@ -792,14 +905,24 @@ $('addfolder').onclick = (e) => { e.stopPropagation(); openFolderNew(); };
   const h = $('sideresize');
   h.onpointerdown = (e) => {
     e.preventDefault(); h.classList.add('on'); h.setPointerCapture(e.pointerId);
+    const anchor = captureCellAnchor();
     h.onpointermove = (ev) => {
       const w = Math.max(160, Math.min(480, ev.clientX));
       document.documentElement.style.setProperty('--sidew', w + 'px');
       localStorage.setItem('fg_sidew', w);
     };
-    h.onpointerup = () => { h.classList.remove('on'); h.onpointermove = h.onpointerup = null; };
+    h.onpointerup = () => {
+      h.classList.remove('on'); h.onpointermove = h.onpointerup = null;
+      applyCellLayout(currentCellPx());
+      if (anchor) restoreCellAnchor(anchor, true); else updateWindow(true, true);
+    };
   };
-  h.ondblclick = () => { document.documentElement.style.removeProperty('--sidew'); localStorage.removeItem('fg_sidew'); };
+  h.ondblclick = () => {
+    const anchor = captureCellAnchor();
+    document.documentElement.style.removeProperty('--sidew'); localStorage.removeItem('fg_sidew');
+    applyCellLayout(currentCellPx());
+    if (anchor) restoreCellAnchor(anchor, true); else updateWindow(true, true);
+  };
 }
 
 // カーソルが乗っているセルを追跡(Xキー選択用)
@@ -1040,13 +1163,23 @@ function ctxItems(row, kind, key) {
   if (kind === 'image') { // サムネ/拡大画像の右クリック(ブラウザの「画像を保存」の代わり+よく使う操作)
     const it = items.find(x => x.sha1 === key) || {sha1: key};
     const inSel = sel.has(key);
-    const dl = () => startDownload(`/dl/${key}/${encodeURIComponent(key.slice(0, 12) + '.' + (it.ext || 'jpg'))}`);
+    // grid APIは13万件へextまで配らない。保存を実行した1枚だけ詳細を取得して拡張子を正しく付ける。
+    const dl = async () => {
+      try {
+        const ext = it.ext || (lbMeta?.sha1 === key ? lbMeta.ext : '') || (await j('/api/meta/' + key)).ext || 'jpg';
+        startDownload(`/dl/${key}/${encodeURIComponent(key.slice(0, 12) + '.' + ext)}`);
+      } catch (e) { toast('❌ ' + e.message); }
+    };
     return [
       {icon: 'img', label: '開く', run: () => openLbSha(key)},
       {icon: 'upload', label: '原本を保存', run: dl},
       {icon: 'box', label: sel.size > 1 && inSel ? `選択${sel.size}枚をzipで保存` : 'この1枚をzipで保存(サイドカー付き)',
        run: () => exportZip(sel.size > 1 && inSel ? [...sel] : [key], sel.size > 1 && inSel ? `選択${sel.size}枚` : key.slice(0, 12))},
-      {icon: 'star', label: it.keep ? 'お気に入りを外す' : 'お気に入り', run: () => { const b = document.querySelector(`#c_${key} .badge`); if (b) cellKeep(key, b); else setKeep([key], !it.keep).then(() => { it.keep = it.keep ? 0 : 1; }); }},
+      {icon: 'star', label: it.keep ? 'お気に入りを外す' : 'お気に入り', run: async () => {
+        const cell = document.getElementById('c_' + key);
+        await cellKeep(key, cell?.querySelector('.badge') || cell);
+        if (items[lbIdx]?.sha1 === key) lbKeepBtn();
+      }},
       {icon: 'check', label: inSel ? '選択から外す' : '選択に加える', run: () => { setSel(key, !inSel); drawSelbar(); }},
       {icon: 'search', label: '似た画像のフォルダを作る', run: () => { openLbSha(key); setTimeout(simFolder, 80); }},
       {icon: 'globe', label: '元ページを開く', run: async () => { try { const m = await j('/api/meta/' + key); const u = m.crawl?.landing || m.crawl?.url; if (u) window.open(u, '_blank', 'noopener'); else toast('取得元の記録がありません(ローカル取込)'); } catch (e) { toast('❌ ' + e.message); } }},
@@ -1242,7 +1375,7 @@ function folderHeadHtml(a, isNew) {
     <div class="details">
     <div class="frow" style="margin-top:6px">
       <span class="lbl"></span>
-      <span class="lbl" style="width:auto; line-height:1.5">${a.agent?.rights_clean
+      <span class="lbl rights-note" style="width:auto; line-height:1.5">${a.agent?.rights_clean
         ? '🟢 権利クリーンモード: CC/公式API由来のみ収集。ライセンス情報を各画像に記録します(商用利用は各ライセンス条件に従ってください)。'
         : '⚠️ 研究・学習用モード: 収集画像の権利は元権利者に帰属します。機械学習・情報解析目的(著作権法30条の4)での利用に限り、収集物の再配布・販売はできません。'}</span>
     </div>
@@ -1545,9 +1678,8 @@ async function loadAlbums() {
 }
 
 // ================= データ読み込み+グリッド =================
-// 「見てない間に来た分」= 前回このフォルダを開いた時刻より新しい収蔵にNEW
+// 前回このフォルダを開いた時刻を、サイドバーの新着件数に使う
 let seenMap = JSON.parse(localStorage.getItem('fg_seen') || '{}');
-let prevSeen = 0;
 function seenKey(a) { return a ? 'src:' + (a.criteria?.source || a.name) : 'src:' + (loc.criteria?.source || loc.key || ''); }
 // ================= ライトボックス表示の単一責任者(状態機械 2026-09-03全面整理) =================
 // img#lbimg の src と表示サイズを書けるのはこのモジュールだけ。他は絶対に触らない(触ると今日の退行祭りが再演される)。
@@ -1608,10 +1740,10 @@ const lbView = {
     if (this._probe) { this._probe.onload = this._probe.onerror = null; this._probe.src = ''; }
     if (this._full) { this._full.onload = null; this._full.src = ''; }
     // サムネは常に即表示(30KB・グリッドでキャッシュ済み)=押しっぱなしでもパラパラ流れる
-    this.apply(gen, '/thumb/' + it.sha1, 'thumb', it.w, it.h);
+    this.apply(gen, tierUrl(it, 'thumb'), 'thumb', it.w, it.h);
     const start = () => {
       if (gen !== this.gen) return; // もう次へ行った=重い読み込みはしない
-      const pvUrl = '/preview/' + it.sha1 + (bust ? '?t=' + Date.now() : '');
+      const pvUrl = tierUrl(it, 'preview', bust);
       const probe = this._probe = new Image();
       probe.src = pvUrl;
       if (probe.complete) this.apply(gen, pvUrl, 'pv');
@@ -1640,33 +1772,156 @@ async function reload(flip) {
   }
   if (loc.type === 'folder' || loc.type === 'source') {
     const k = seenKey();
-    prevSeen = seenMap[k] || 0;
     seenMap[k] = Date.now() / 1000;
     localStorage.setItem('fg_seen', JSON.stringify(seenMap));
     renderSide(); // +Nバッジを既読化
-  } else prevSeen = 0;
-  const r = await j('/api/images?' + params({limit: 200, offset: 0}));
+  }
+  const r = prepareGridPage(await j('/api/images?' + params({limit: 200, offset: 0, view: 'grid'})));
   if (g !== rgen) return; // 追い越された(すでに別の場所へ移動済み)
   items = r.items; total = r.total;
+  loadMore._offset = r.items.length; // live追加で重複しても、APIの生offsetは別に進める
+  loadMore._exhausted = false;
   flip ? flipRender() : render(true);
   syncHash();
 }
 async function loadMore() {
-  if (loadMore._busy || !items.length || items.length >= total || loc.type === 'new') return;
+  if (loadMore._busy || loadMore._exhausted || !items.length || items.length >= total || loc.type === 'new') return;
   loadMore._busy = true;
   const g = rgen;
   try {
-    const r = await j('/api/images?' + params({limit: 200, offset: items.length}));
+    const offset = loadMore._offset ?? items.length;
+    const r = prepareGridPage(await j('/api/images?' + params({limit: 200, offset, view: 'grid'})));
     if (g !== rgen) return; // 場所が変わった後に届いた追加分は捨てる
-    items = items.concat(r.items);
-    updateWindow(true);
+    loadMore._offset = offset + r.items.length;
+    loadMore._exhausted = !r.items.length;
+    total = r.total;
+    // 収集中に先頭へ新着が入るとOFFSET境界がずれ、同じSHAが次ページにも現れる。
+    // DOM id重複・ライトボックスindexずれを起こさないよう一意化する。
+    const known = new Set(items.map(it => it.sha1));
+    items = items.concat(r.items.filter(it => !known.has(it.sha1)));
+    // items追加だけなら既存窓を捨てない。forceだけの呼出しは全innerHTML再構築になり、
+    // dense時に200件読むたび数千セルを作り直していた。
+    updateWindow(true, true);
     drawSelbar();
   } finally { loadMore._busy = false; }
 }
 // (旧DOM_WIN/trimTop/restoreTop方式は真のrow virtualizationへ置換済み 2026-09-03)
-function gridCols() {
-  return setCell._n || Math.max(1, Math.round(($('gridwrap').clientWidth - 32) / (+localStorage.getItem('fg_cell') || 168)));
+const MOBILE_WIDTH = 900, LITE_CELL = 110, ATLAS_CELL = 48;
+// bit 1=権利クリーン / 2=有料 / 4=セーフ。属性名や金額値は描かず、順序固定の記号だけにする。
+function itemAttrMask(it) {
+  return Number.isInteger(it.attrs) ? it.attrs :
+    ((it.rights && it.rights !== 'unknown' ? 1 : 0) | (it.cost > 0 ? 2 : 0) | (it.nsfw === 0 ? 4 : 0));
 }
+function itemRightsClean(it) { return !!(itemAttrMask(it) & 1); }
+// SHA URLはブラウザが1年immutable cache。編集済みだけrevをキーに加え、全tierで共通化する。
+function tierUrl(it, tier, bust = false) {
+  const version = it.erev ? '?v=' + encodeURIComponent(it.erev) : bust ? '?t=' + Date.now() : '';
+  return `/${tier}/${it.sha1}${version}`;
+}
+// 最小表示はAPI 1ページ(最大200枚)を1枚のJPEG atlasとして共有する。
+// 13万個のHTTP cache entryではなく約650枚になり、同じ範囲の再訪は1 request/pageで済む。
+const atlasWarming = new Map(), atlasHot = new Map(), failedAtlases = new Set(), atlasFallbackWarming = new Map();
+let atlasWanted = new Set();
+function atlasUrl(it, fit = $('grid').classList.contains('fit')) {
+  return `/atlas/${it._atlas}${fit ? '?fit=1' : ''}`;
+}
+function atlasStyle(it) {
+  const cols = it._atlasCols, rows = it._atlasRows, slot = it._atlasSlot;
+  return `--atlas-w:${cols * 100}%;--atlas-h:${rows * 100}%;` +
+    `--atlas-l:-${(slot % cols) * 100}%;--atlas-t:-${Math.floor(slot / cols) * 100}%;background:var(--panel)`;
+}
+function useAtlas(it, cellPx = actualCellPx()) {
+  return cellPx <= ATLAS_CELL && !!it._atlas && !failedAtlases.has(it._atlas) && !it._trash && !fchips.seg;
+}
+function applyAtlasImage(im, it, url = atlasUrl(it)) {
+  im.classList.add('atlas');
+  im.style.cssText = atlasStyle(it);
+  im.style.visibility = '';
+  im.dataset.tier = 'atlas';
+  im.removeAttribute('data-src');
+  im.src = url;
+}
+function clearAtlasImage(im) {
+  im.classList.remove('atlas');
+  im.style.cssText = 'background:var(--panel)';
+  im.style.visibility = '';
+}
+function keepAtlasHot(key, im) {
+  atlasHot.delete(key);
+  atlasHot.set(key, im);
+  // 2400x1200 RGBAは約11MB。全650枚でなく、可視+進行方向だけをpinする。
+  // 4Kの36px表示では可視sheetだけで12枚を超えるため、wanted数までは確保する。
+  const limit = Math.max(mobileLayout() ? 4 : 12, atlasWanted.size + 2);
+  while (atlasHot.size > limit) atlasHot.delete(atlasHot.keys().next().value);
+}
+function warmAtlasPage(a, priority = 'low') {
+  if (!a?.id || failedAtlases.has(a.id)) return;
+  const key = a.id + ':' + $('grid').classList.contains('fit');
+  if (atlasHot.has(key)) { keepAtlasHot(key, atlasHot.get(key)); return; }
+  if (atlasWarming.has(key)) return;
+  const im = new Image();
+  atlasWarming.set(key, im); // load完了まで強参照し、GCによる先読みrequest取消を防ぐ
+  im.decoding = 'async';
+  im.fetchPriority = priority;
+  im.onload = () => {
+    if (atlasWarming.get(key) === im) atlasWarming.delete(key);
+    // 高速移動中に追い越したsheetを後着順でLRUへ戻さない。
+    if (atlasWanted.has(key)) keepAtlasHot(key, im);
+  };
+  im.onerror = () => {
+    if (atlasWarming.get(key) === im) atlasWarming.delete(key);
+    if (atlasWanted.has(key)) fallbackAtlasPage(a.id);
+  };
+  im.src = `/atlas/${a.id}${$('grid').classList.contains('fit') ? '?fit=1' : ''}`;
+}
+function warmAtlasRange(from, to) {
+  if (actualCellPx() > ATLAS_CELL || fchips.seg) return;
+  const fit = $('grid').classList.contains('fit'), ids = [], seen = new Set();
+  for (let i = Math.max(0, from); i < Math.min(items.length, to); i++) {
+    const id = items[i]._atlas;
+    if (id && !seen.has(id)) { seen.add(id); ids.push(id); }
+  }
+  // 上方向では小さいindex(進行方向)を最後にtouchし、LRUの手前から落ちないようにする。
+  if (gridScrollDir < 0) ids.reverse();
+  atlasWanted = new Set(ids.map(id => id + ':' + fit));
+  // 通過済みの先読みをdecodeし続けると、可視sheetのpaintと競合するため中止する。
+  for (const [key, im] of atlasWarming) {
+    if (atlasWanted.has(key)) continue;
+    im.onload = im.onerror = null;
+    im.removeAttribute('src');
+    atlasWarming.delete(key);
+  }
+  ids.forEach(id => warmAtlasPage({id}, 'high'));
+}
+function prepareGridPage(r) {
+  const a = r?.atlas;
+  if (!a?.id) return r;
+  r.items.forEach((it, slot) => {
+    it._atlas = a.id; it._atlasSlot = slot; it._atlasCols = a.cols; it._atlasRows = a.rows;
+  });
+  return r;
+}
+function mobileLayout() { return innerWidth <= MOBILE_WIDTH || (innerHeight <= 520 && matchMedia('(pointer:coarse)').matches); }
+function gridGap() { return mobileLayout() ? 4 : 6; }
+function gridPadTop() { return mobileLayout() ? 6 : 10; }
+function gridWidth() { return Math.max(1, $('grid').clientWidth); } // iPhone横のsafe-areaもCSS確定後の実幅から計算
+function currentCellPx() { return setCell._applied || setCell._t || +localStorage.getItem('fg_cell') || 168; }
+function colsForCell(px) {
+  const w = gridWidth();
+  const gap = gridGap();
+  // gapも列幅に含める。旧式のround(w/px)は36px指定を実寸30pxまで潰し、表示枚数を約2割増やしていた。
+  return Math.max(1, Math.round((w + gap) / (px + gap)));
+}
+function gridCols() {
+  return setCell._n || colsForCell(currentCellPx());
+}
+function renderedCellPx(n = gridCols()) {
+  const w = gridWidth();
+  const gap = gridGap();
+  return (w + gap) / n - gap;
+}
+function actualCellPx() { return setCell._actual ?? renderedCellPx(); }
+function liteCells() { return actualCellPx() <= LITE_CELL; }
 function flipRender() {
   if (document.body.classList.contains('dense')) { render(true, 0, true); return; } // 高密度は即時切替
   const old = {};
@@ -1683,8 +1938,13 @@ function flipRender() {
     });
   });
 }
-function cellHtml(it) {
+function cellHtml(it, cellPx = actualCellPx()) {
   if (it._trash) { // ゴミ箱: クリック=選択(戻す対象を選ぶ)。残り日数を出す
+    if (cellPx <= LITE_CELL) return `<div class="cell lite trash-lite ${sel.has(it.sha1) ? 'sel in' : ''} ${it.sha1 === curSha ? 'cur' : ''}" id="c_${it.sha1}"
+        onclick="ckSelSha('${it.sha1}', event)" style="cursor:pointer">
+      <img loading="lazy" decoding="async" ${gridScrolling ? `data-src="/trash/img/${it.sha1}"` : `src="/trash/img/${it.sha1}"`}
+        style="background:var(--panel); filter:saturate(.5) brightness(.8)">
+    </div>`;
     return `<div class="cell ${sel.has(it.sha1) ? 'sel in' : ''} ${it.sha1 === curSha ? 'cur' : ''}" id="c_${it.sha1}"
         onclick="ckSelSha('${it.sha1}', event)" style="cursor:pointer">
       <img loading="lazy" src="/trash/img/${it.sha1}" style="background:var(--panel); filter:saturate(.5) brightness(.8)">
@@ -1693,87 +1953,324 @@ function cellHtml(it) {
       <div class="cap">${esc(it.source || '')}</div>
     </div>`;
   }
-  const cellPx = +localStorage.getItem('fg_cell') || 168;
   const big = cellPx > 300; // 大表示はpreview段(1080)でボケさせない
-  const ver = it.erev ? '?v=' + it.erev : ''; // 編集済みはサムネも焼き直されている(キャッシュバスタ)
   // 段の選択: 俯瞰(≤110px)=micro120(デコード費1/10) / 標準=thumb360 / 大=preview1080
-  const tier = cellPx <= 110 ? '/micro/' : big ? '/preview/' : '/thumb/';
+  const tierName = cellPx <= 110 ? 'micro' : big ? 'preview' : 'thumb';
   // マスク済みチップON中はサムネもライトボックスと同じ「背景を沈めた」描画で
+  const renderWidth = cellPx <= 110 ? 120 : big ? 1080 : 360;
   const src = fchips.seg
-    ? `/render/${it.sha1}?w=${big ? 1080 : 360}&seg=1&v=${it.erev || 0}`
-    : `${tier}${it.sha1}${ver}`;
-  return `<div class="cell ${sel.has(it.sha1) ? 'sel in' : ''} ${it.sha1 === curSha ? 'cur' : ''}" id="c_${it.sha1}" onclick="openLbSha('${it.sha1}')"
+    ? `/render/${it.sha1}?w=${renderWidth}&seg=1&v=${it.erev || 0}`
+    : tierUrl(it, tierName);
+  const atlas = useAtlas(it, cellPx);
+  // 高密度では、普段は透明なcaption/check/rightsと各SVGの方が画像より重い。
+  // 開く・D&D・選択(左上)・お気に入り(右上)は保ったまま画像1子要素へ落とす。
+  if (cellPx <= LITE_CELL) return `<div class="cell lite ${sel.has(it.sha1) ? 'sel in' : ''} ${it.sha1 === curSha ? 'cur' : ''} ${it.keep ? 'keep' : ''}" id="c_${it.sha1}"
+      onclick="liteCellClick('${it.sha1}', event)" draggable="true" ondragstart="dragShas(event, '${it.sha1}')"
+      oncontextmenu="ctxMenu(event, 'image', '${it.sha1}')">
+    ${atlas
+      ? `<img class="atlas" loading="eager" fetchpriority="high" decoding="async" data-tier="atlas" src="${atlasUrl(it)}" style="${atlasStyle(it)}">`
+      : `<img loading="lazy" decoding="async" data-tier="${fchips.seg ? 'render' : tierName}" ${gridScrolling && cellPx > ATLAS_CELL ? `data-src="${src}"` : `src="${src}"`} style="background:var(--panel)">`}
+  </div>`;
+  const attrMask = itemAttrMask(it);
+  return `<div class="cell ${attrMask ? `m${attrMask} ` : ''}${sel.has(it.sha1) ? 'sel in' : ''} ${it.sha1 === curSha ? 'cur' : ''}" id="c_${it.sha1}" onclick="openLbSha('${it.sha1}')"
       draggable="true" ondragstart="dragShas(event, '${it.sha1}')" oncontextmenu="ctxMenu(event, 'image', '${it.sha1}')">
-    <img loading="lazy" decoding="async" src="${src}" style="background:var(--panel)">
+    <img loading="lazy" decoding="async" data-tier="${fchips.seg ? 'render' : tierName}" src="${src}" style="background:var(--panel)">
     <span class="ck" onclick="event.stopPropagation(); ckSelSha('${it.sha1}', event)">${ic('check', 12)}</span>
     <span class="badge ${it.keep ? 'on' : ''}" title="お気に入り(自動間引きから保護)"
       onclick="event.stopPropagation(); cellKeep('${it.sha1}', this)">${ic('star', 13)}</span>
-    ${it.cost > 0 ? `<span class="costb" title="この1枚の取得費(実測)">$${it.cost < 0.01 ? it.cost.toFixed(3) : it.cost.toFixed(2)}</span>` : ''}
-    ${it.rights === 'clean' ? `<span class="rclean" title="権利クリーン — CC/公式API由来で商用利用しやすい">${ic('check', 10)}</span>` : ''}
-    ${prevSeen && it.ingested > prevSeen ? '<span class="newb">NEW</span>' : ''}
-    <div class="cap">${esc(it.caption || it.source || '')}</div>
   </div>`;
 }
+// 俯瞰(画像1子)と標準(選択/お気に入り子あり)を跨ぐ時も、読み込み済みのimg自体は残す。
+// セルをinnerHTMLで総交換すると、ブラウザキャッシュ済みでも新しいimgのdecodeまで一瞬消える。
+function morphWindowCellMode(lite) {
+  const g = $('grid'), cells = [...g.children];
+  if (cells.length !== vEnd - vStart || cells.some((cell, i) => !items[vStart + i] || cell.firstElementChild?.tagName !== 'IMG')) return false;
+  cells.forEach((cell, i) => {
+    const it = items[vStart + i];
+    const classes = ['cell'];
+    if (lite) classes.push('lite');
+    if (it._trash && lite) classes.push('trash-lite');
+    if (!it._trash && !lite) {
+      const mask = itemAttrMask(it);
+      if (mask) classes.push('m' + mask);
+    }
+    if (sel.has(it.sha1)) classes.push('sel', 'in');
+    if (it.sha1 === curSha) classes.push('cur');
+    if (!it._trash && lite && it.keep) classes.push('keep');
+    if (cell.classList.contains('in')) classes.push('in');
+    if (cell.classList.contains('drop')) classes.push('drop');
+    cell.className = [...new Set(classes)].join(' ');
+    while (cell.children.length > 1) cell.lastElementChild.remove(); // imgは同じDOM/decoded surfaceのまま
+    if (it._trash) {
+      cell.setAttribute('onclick', `ckSelSha('${it.sha1}', event)`);
+      cell.removeAttribute('draggable');
+      cell.removeAttribute('ondragstart');
+      if (!lite) cell.insertAdjacentHTML('beforeend',
+        `<span class="ck">${ic('check', 12)}</span><span class="newb" style="background:#3a3d4a">あと${it.days_left}日</span><div class="cap">${esc(it.source || '')}</div>`);
+    } else {
+      cell.setAttribute('onclick', lite ? `liteCellClick('${it.sha1}', event)` : `openLbSha('${it.sha1}')`);
+      cell.setAttribute('draggable', 'true');
+      cell.setAttribute('ondragstart', `dragShas(event, '${it.sha1}')`);
+      if (!lite) cell.insertAdjacentHTML('beforeend',
+        `<span class="ck" onclick="event.stopPropagation(); ckSelSha('${it.sha1}', event)">${ic('check', 12)}</span>
+         <span class="badge ${it.keep ? 'on' : ''}" title="お気に入り(自動間引きから保護)"
+           onclick="event.stopPropagation(); cellKeep('${it.sha1}', this)">${ic('star', 13)}</span>`);
+    }
+  });
+  vLite = lite;
+  return true;
+}
 // ==== 真のrow virtualization(作業単位2 2026-09-03) ====
-// DOMには「可視範囲+上下1画面」だけを置き、外側は高さだけのスペーサーで支える。
+// DOMには「可視範囲+小さな先読み領域」だけを置き、外側は高さだけのスペーサーで支える。
 // 旧方式(全件innerHTML+履歴2400枚のtrimTop/restoreTop)は撤去。
-let vStart = 0, vEnd = 0;
-function cellPitch() { // 1行の高さ(セルは正方形: 幅=カラム幅、gap6)
-  const c = $('grid').children[0];
-  if (c && c.classList.contains('cell')) return c.getBoundingClientRect().height + 6;
-  return ($('gridwrap').clientWidth - 32) / gridCols() + 6;
+let vStart = 0, vEnd = 0, vLite = false;
+let gridScrolling = false, gridScrollDir = 0;
+function cellPitch() { // 1行の高さ(セルは正方形: 幅=カラム幅、gap込み)
+  // 子セルの矩形を読むと、サイズ確定直後の数千セルすべてを同期layoutしてしまう。
+  // 明示列数と既知のgapから同じ値を算出できるのでgeometry readは不要。
+  return (gridWidth() + gridGap()) / gridCols();
 }
 function contentTop() { // スクロール座標系でのスペーサー上端位置
-  const gw = $('gridwrap');
-  return $('gridspacer').getBoundingClientRect().top - gw.getBoundingClientRect().top + gw.scrollTop;
+  return gridPadTop(); // .gridwrap の padding-top
 }
-function updateWindow(force, reflow) {
+function updateWindow(force, reflow, focusIndex, rowOverride) {
   const gw = $('gridwrap'), g = $('grid');
   if (!items.length) return;
   const n = gridCols(), ch = cellPitch(), H = gw.clientHeight;
+  const cellPx = ch - gridGap();
+  setCell._actual = cellPx;
+  const renderCell = it => cellHtml(it, cellPx);
   const rel = Math.max(0, gw.scrollTop - contentTop());
+  const row = rowOverride == null ? Math.floor(rel / ch) :
+    Math.max(0, Math.min(Math.max(0, Math.ceil(items.length / n) - 1), rowOverride));
   const visRows = Math.max(1, Math.ceil(H / ch));
-  const buf = visRows; // 上下1画面分のバッファ
-  const ns = Math.min(items.length, Math.max(0, Math.floor(rel / ch) - buf) * n);
-  const ne = Math.min(items.length, (Math.floor(rel / ch) + visRows + buf) * n);
+  // 先読みはピクセル量で決める。36pxで「上下各1画面」は可視約900枚に加えて
+  // さらに約1800枚をDOMへ置くため過剰。240pxあればrAF更新には十分な余裕がある。
+  const buf = Math.max(2, Math.ceil(Math.min(240, H * .3) / ch));
+  const ns = Math.min(items.length, Math.max(0, row - buf) * n);
+  const ne = Math.min(items.length, (row + visRows + buf) * n);
+  const visibleStart = Math.min(items.length, row * n);
+  const visibleEnd = Math.min(items.length, (row + visRows) * n);
+  if (cellPx <= ATLAS_CELL && !fchips.seg) {
+    if (visibleStart === 0) gridScrollDir = 1;
+    else if (visibleEnd >= items.length) gridScrollDir = -1;
+    // DOM bufferとは別に、進行方向へ半画面ぶんのsheetをdecode済みにする。
+    // disk cacheだけでは新しいimg要素が1frame空くため、少数のImage参照でsurfaceをpinする。
+    const lead = Math.max(8, Math.ceil(visRows * .55)) * n;
+    warmAtlasRange(gridScrollDir < 0 ? visibleStart - lead : visibleStart,
+      gridScrollDir > 0 ? visibleEnd + lead : visibleEnd);
+  } else {
+    atlasWanted.clear();
+    atlasHot.clear(); // 表示中の旧atlas img自体はretier完了までsurfaceを保持する。
+    for (const [key, im] of atlasWarming) {
+      im.onload = im.onerror = null;
+      im.removeAttribute('src');
+      atlasWarming.delete(key);
+    }
+  }
+  const lite = cellPx <= LITE_CELL;
+  const consistent = g.children.length === vEnd - vStart;
+  const modeChanged = consistent && vEnd > vStart && vLite !== lite;
   // ヒステリシス: 半バッファ動くまで再構築しない(スクロール毎のinnerHTML再生成防止)
-  if (!force && Math.abs(ns - vStart) < (buf * n) / 2 && Math.abs(ne - vEnd) < (buf * n) / 2) return;
+  if (!force && consistent && vLite === lite && vStart <= visibleStart && vEnd >= visibleEnd &&
+      Math.abs(ns - vStart) < (buf * n) / 2 && Math.abs(ne - vEnd) < (buf * n) / 2) {
+    $('gridspacerB').style.height = Math.ceil((items.length - vEnd) / n) * ch + 'px';
+    return;
+  }
+  const gen = (updateWindow._gen = (updateWindow._gen || 0) + 1); // 実際に窓を変える時だけ古い構築を停止
   // 差分更新: 窓が重なっていれば増減した分だけ足し引き(denseで窓全体を作り直すと固まる 2026-09-03)。
   // reflow=itemsは同じでサイズだけ変わった時(俯瞰⇄標準)。生き残るセルはDOMごと残す=
   // 全再構築でデコード待ちのtint背景が全面に見える「切替フラッシュ」の根治(2026-09-03指摘)
-  const overlap = (reflow || !force) && vEnd > vStart && ns < vEnd && ne > vStart;
+  const overlap = consistent && (vLite === lite || modeChanged) && (reflow || !force) &&
+    vEnd > vStart && ns < vEnd && ne > vStart;
   if (overlap) {
-    if (ns > vStart) { for (let k = vStart; k < ns; k++) g.firstElementChild?.remove(); }
-    else if (ns < vStart) { g.insertAdjacentHTML('afterbegin', items.slice(ns, vStart).map(cellHtml).join('')); }
-    if (ne < vEnd) { for (let k = ne; k < vEnd; k++) g.lastElementChild?.remove(); }
-    else if (ne > vEnd) { g.insertAdjacentHTML('beforeend', items.slice(vEnd, ne).map(cellHtml).join('')); }
-    for (const el of g.children) if (!el.classList.contains('in')) el.classList.add('in');
-  } else {
-    // 全再構築は分割で: 可視分を即描画し、残りは1フレーム400セルずつ追記
-    // (dense突入時に千数百セルを一気に作ると3秒級のLong Taskになる 2026-09-03)
-    const gen = (updateWindow._gen = (updateWindow._gen || 0) + 1);
-    const CHUNK = 400;
-    const first = Math.min(ne, ns + Math.max(visRows * n, CHUNK));
-    g.innerHTML = items.slice(ns, first).map(cellHtml).join('');
-    for (const el of g.children) el.classList.add('in');
-    let done = first;
-    (function more() {
-      if (gen !== updateWindow._gen || done >= ne) return;
-      const nx = Math.min(ne, done + CHUNK);
+    // 列数変更後もgridの先頭/末尾を新しい行境界に揃える。旧列数の端をそのまま
+    // 残すと、次のchunkまで1〜数frameだけ第1セルの列位置とspacer高さがずれる。
+    if (ns <= vStart && vStart % n) {
+      const nx = Math.max(ns, Math.floor(vStart / n) * n);
+      const added = vStart - nx;
+      g.insertAdjacentHTML('afterbegin', items.slice(nx, vStart).map(renderCell).join(''));
+      for (let i = 0; i < added; i++) g.children[i]?.classList.add('in');
+      vStart = nx;
+    }
+    if (ne >= vEnd && vEnd < items.length && vEnd % n) {
+      const nx = Math.min(ne, Math.ceil(vEnd / n) * n);
       const before = g.children.length;
-      g.insertAdjacentHTML('beforeend', items.slice(done, nx).map(cellHtml).join(''));
+      g.insertAdjacentHTML('beforeend', items.slice(vEnd, nx).map(renderCell).join(''));
       for (let i = before; i < g.children.length; i++) g.children[i].classList.add('in');
-      done = nx;
-      requestAnimationFrame(more);
+      vEnd = nx;
+    }
+    if (ns > vStart) {
+      for (let k = vStart; k < ns; k++) g.firstElementChild?.remove();
+      vStart = ns;
+    }
+    if (ne < vEnd) {
+      for (let k = ne; k < vEnd; k++) g.lastElementChild?.remove();
+      vEnd = ne;
+    }
+    // 36px→標準のような大差では、先に不要範囲をtrimしてから残存セルだけを変換する。
+    if (modeChanged) morphWindowCellMode(lite);
+  } else {
+    g.innerHTML = '';
+    // 大ジャンプ時はviewport先頭から描く。上バッファを先に作って画面が空くのを避ける。
+    const seed = focusIndex == null ? visibleStart : Math.floor(focusIndex / n) * n;
+    vStart = vEnd = Math.max(ns, Math.min(seed, ne));
+    vLite = lite;
+  }
+  g.style.minHeight = '';
+
+  const chunk = Math.max(n, (lite ? 4 : Math.ceil(400 / n)) * n); // 必ず行単位
+  const activate = from => {
+    for (let i = from; i < g.children.length; i++) g.children[i].classList.add('in');
+  };
+  const syncSpacers = () => {
+    $('gridspacer').style.height = Math.ceil(vStart / n) * ch + 'px';
+    $('gridspacerB').style.height = Math.ceil((items.length - vEnd) / n) * ch + 'px';
+  };
+  const appendTo = limit => {
+    if (vEnd >= limit) return false;
+    const nx = Math.min(limit, vEnd + chunk);
+    const before = g.children.length;
+    g.insertAdjacentHTML('beforeend', items.slice(vEnd, nx).map(renderCell).join(''));
+    activate(before); vEnd = nx;
+    return true;
+  };
+  const prependTo = limit => {
+    if (vStart <= limit) return false;
+    const nx = Math.max(limit, vStart - chunk);
+    const added = vStart - nx;
+    g.insertAdjacentHTML('afterbegin', items.slice(nx, vStart).map(renderCell).join(''));
+    for (let i = 0; i < added; i++) g.children[i]?.classList.add('in');
+    vStart = nx;
+    return true;
+  };
+  // 1 chunkは同期で置くので、初回表示とキーボード移動でも最低4行は即座に見える。
+  // 残りは1 frame 1 chunk。vStart/vEndは「実際に存在する範囲」だけを表すため、
+  // 途中のscroll/resizeで世代を止めても重複・欠落しない。
+  (function grow() {
+    if (gen !== updateWindow._gen) return;
+    let changed = false;
+    if (vEnd < visibleEnd) changed = appendTo(visibleEnd);
+    else if (vStart > visibleStart) changed = prependTo(visibleStart);
+    else if (vEnd < ne) changed = appendTo(ne);
+    else if (vStart > ns) changed = prependTo(ns);
+    syncSpacers();
+    if (changed && (vStart > ns || vEnd < ne)) requestAnimationFrame(grow);
+  })();
+}
+function hydrateGridImages() {
+  const gen = (hydrateGridImages._gen = (hydrateGridImages._gen || 0) + 1);
+  const gw = $('gridwrap'), g = $('grid');
+  const n = gridCols(), ch = cellPitch();
+  const row = Math.floor(Math.max(0, gw.scrollTop - contentTop()) / ch);
+  const visibleStart = Math.min(items.length, row * n);
+  const visibleEnd = Math.min(items.length, (row + Math.max(1, Math.ceil(gw.clientHeight / ch))) * n);
+  const cells = [...g.children];
+  const a = Math.max(0, Math.min(cells.length, visibleStart - vStart));
+  const b = Math.max(a, Math.min(cells.length, visibleEnd - vStart));
+  // DOM順だと上側overscanへ帯域を先に使い、停止後も画面が空きやすい。
+  // index計算だけで可視セル→overscanの順にし、geometry readは増やさない。
+  const imgs = cells.slice(a, b).concat(cells.slice(0, a), cells.slice(b))
+    .map(cell => cell.firstElementChild).filter(im => im?.dataset.src);
+  // 36px級は1画面に約1000枚ある。80枚同時decodeは停止直後に50ms塑を作るため、
+  // 最初の画像はすぐ出しつつ1frameの量だけ細分化する。
+  const batch = actualCellPx() <= 48 ? 32 : actualCellPx() <= LITE_CELL ? 48 : 80;
+  let i = 0;
+  (function step() {
+    if (gen !== hydrateGridImages._gen) return;
+    for (const im of imgs.slice(i, i + batch)) {
+      if (!document.contains(im)) continue;
+      const src = im.dataset.src;
+      im.dataset.src = ''; // load完了まで属性を残し、Chromeの欠損画像枠をpaintさせない
+      im.src = src;
+      if (im.complete && im.naturalWidth) { // memory cacheはloadが同期完了することがある
+        im.style.visibility = '';
+        im.removeAttribute('data-src');
+      }
+    }
+    i += batch;
+    if (i < imgs.length) requestAnimationFrame(step);
+  })();
+}
+// 1枚でも原本が壊れてatlas全体を安全に生成できない時は、そのページだけ従来microへ戻す。
+// 失敗URLを仮想scrollのたび再要求せず、他ページのatlas高速化は維持する。
+function fallbackAtlasPage(id) {
+  if (!id) return;
+  const firstFailure = !failedAtlases.has(id);
+  failedAtlases.add(id);
+  const bySha = new Map(items.map(it => [it.sha1, it]));
+  // 壊れた原本などでsheet化できないページだけ、200個のmicroを先にbrowser cacheへ入れる。
+  // そのページへ到達してから一斉requestするのを避け、正常ページの1 URL方式には影響させない。
+  if (firstFailure && !atlasFallbackWarming.has(id)) {
+    const members = items.filter(it => it._atlas === id);
+    const pending = new Set();
+    atlasFallbackWarming.set(id, pending);
+    let i = 0;
+    (function warmBatch() {
+      for (const it of members.slice(i, i + 32)) {
+        const pre = new Image();
+        pending.add(pre);
+        pre.onload = pre.onerror = () => {
+          pending.delete(pre);
+          if (!pending.size && i >= members.length) atlasFallbackWarming.delete(id);
+        };
+        pre.src = tierUrl(it, 'micro');
+      }
+      i += 32;
+      if (i < members.length) requestAnimationFrame(warmBatch);
+      else if (!pending.size) atlasFallbackWarming.delete(id);
     })();
   }
-  vStart = ns; vEnd = ne;
-  $('gridspacer').style.height = Math.ceil(vStart / n) * ch + 'px';
-  $('gridspacerB').style.height = Math.ceil((items.length - vEnd) / n) * ch + 'px';
+  for (const im of document.querySelectorAll('.cell img[data-tier="atlas"]')) {
+    const it = bySha.get(im.parentElement?.id?.slice(2));
+    if (!it || it._atlas !== id) continue;
+    clearAtlasImage(im);
+    im.dataset.tier = 'micro';
+    im.removeAttribute('data-src');
+    im.style.visibility = 'hidden';
+    im.src = tierUrl(it, 'micro');
+    if (im.complete && im.naturalWidth) im.style.visibility = '';
+  }
 }
-{ // スクロールでrAF更新(1フレーム1回)
-  let raf = 0;
-  $('gridwrap').addEventListener('scroll', () => {
+// load/errorはbubbleしないためcaptureで1組だけ委譲。画像ごとのhandler/DOMは増やさない。
+$('grid').addEventListener('load', e => {
+  const im = e.target;
+  if (im.tagName !== 'IMG') return;
+  im.style.visibility = '';
+  im.removeAttribute('data-src');
+}, true);
+$('grid').addEventListener('error', e => {
+  const im = e.target;
+  if (im.tagName !== 'IMG') return;
+  if (im.dataset.tier === 'atlas') {
+    const it = items.find(x => x.sha1 === im.parentElement?.id?.slice(2));
+    fallbackAtlasPage(it?._atlas);
+  } else im.style.visibility = 'hidden';
+}, true);
+{ // スクロールでrAF更新(1フレーム1回)。高速移動中の新規画像decodeは停止後にまとめる。
+  let raf = 0, settleRaf = 0, scrollEpoch = 0;
+  const gw = $('gridwrap');
+  let lastTop = gw.scrollTop;
+  const finishScroll = () => {
+    if (!gridScrolling) return;
+    gridScrolling = false;
+    hydrateGridImages();
+  };
+  const waitForQuietFrames = (epoch, frames = 0) => {
+    settleRaf = requestAnimationFrame(() => {
+      if (epoch !== scrollEpoch) return;
+      if (frames >= 1) finishScroll(); // 60Hzで約33ms、120Hzで約17ms。固定120ms待ちは廃止。
+      else waitForQuietFrames(epoch, frames + 1);
+    });
+  };
+  gw.addEventListener('scroll', () => {
+    if (gw.scrollTop !== lastTop) gridScrollDir = gw.scrollTop > lastTop ? 1 : -1;
+    lastTop = gw.scrollTop;
+    gridScrolling = true;
+    hydrateGridImages._gen = (hydrateGridImages._gen || 0) + 1; // 直前のidle hydrateを中断
+    const epoch = ++scrollEpoch;
+    cancelAnimationFrame(settleRaf);
+    waitForQuietFrames(epoch);
     if (!raf) raf = requestAnimationFrame(() => { raf = 0; updateWindow(false); });
   }, {passive: true});
 }
@@ -1811,6 +2308,14 @@ async function fillViewport() {
 }
 function openLbSha(sha) { const i = items.findIndex(x => x.sha1 === sha); if (i >= 0) openLb(i); }
 function ckSelSha(sha, e) { const i = items.findIndex(x => x.sha1 === sha); if (i >= 0) ckSel(i, e); }
+function liteCellClick(sha, e) {
+  // 110px以下でも左上=選択、右上=お気に入り、残り=通常どおり開く。
+  const r = e.currentTarget.getBoundingClientRect();
+  const corner = Math.min(r.width / 2, matchMedia('(pointer:coarse)').matches ? 40 : 18);
+  if (e.clientX - r.left <= corner && e.clientY - r.top <= corner) ckSelSha(sha, e);
+  else if (r.right - e.clientX <= corner && e.clientY - r.top <= corner) cellKeep(sha, e.currentTarget);
+  else openLbSha(sha);
+}
 function ckSel(i, e) {
   if (e.shiftKey && lastCk >= 0) {
     const [a, b] = [Math.min(lastCk, i), Math.max(lastCk, i)];
@@ -1864,7 +2369,46 @@ $('enrich_chip').innerHTML = ic('eye', 11) + ' 未属性にまとめて属性付
 // +最大1402本のアニメ→ドラッグ1.2秒の処理に実測95秒)。新実装:
 //  - ドラッグ中: rAFで1フレーム1回だけCSS列数を書く。矩形読取り/FLIP/保存は一切しない
 //  - 確定時(350ms静止 or changeイベント): 保存 + 可視セルの画像tier切替(micro/thumb/preview)
+function applyCellLayout(v) {
+  const val = +v;
+  setCell._applied = val;
+  document.documentElement.style.setProperty('--cell', val + 'px');
+  const n = colsForCell(val);
+  if (setCell._n !== n) {
+    setCell._n = n;
+    $('grid').style.gridTemplateColumns = `repeat(${n}, 1fr)`;
+  }
+  setCell._actual = renderedCellPx(n);
+  document.body.classList.toggle('dense', actualCellPx() <= LITE_CELL); // 実セル幅で画像専用モードを決める
+}
+function captureCellAnchor() {
+  if (!items.length || !$('grid').children.length) return null;
+  const gw = $('gridwrap'), n = gridCols(), ch = cellPitch();
+  const rel = Math.max(0, gw.scrollTop - contentTop());
+  const row = Math.floor(rel / ch);
+  return {
+    index: Math.min(items.length - 1, row * n),
+    fraction: (rel - row * ch) / ch,
+    atTop: gw.scrollTop <= contentTop(),
+    gen: rgen,
+  };
+}
+function restoreCellAnchor(anchor, reflow) {
+  // サイズ操作中に別フォルダへ移動した場合、旧ビューのindexを新ビューへ持ち込まない。
+  if (anchor.gen !== rgen || !items.length) {
+    updateWindow(true, reflow);
+    return;
+  }
+  anchor.index = Math.max(0, Math.min(items.length - 1, anchor.index));
+  const n = gridCols(), ch = cellPitch();
+  const row = Math.floor(anchor.index / n);
+  // 先にanchor基準で窓/spacerを作る。旧scrollHeightに先に代入すると拡大時にclampされる。
+  updateWindow(true, reflow, anchor.index, row);
+  $('gridwrap').scrollTop = anchor.atTop ? 0 : contentTop() + (row + anchor.fraction) * ch;
+}
 function setCell(v) {
+  // ドラッグ開始時の左上画像を覚え、列数が変わっても確定後に同じ場所へ戻す。
+  if (setCell._anchor === undefined) setCell._anchor = captureCellAnchor();
   setCell._t = +v;
   if (!setCell._raf) {
     setCell._raf = requestAnimationFrame(() => {
@@ -1878,15 +2422,7 @@ function setCell(v) {
         return;
       }
       setCell._lastApply = now;
-      const val = setCell._t;
-      document.documentElement.style.setProperty('--cell', val + 'px');
-      const w = $('gridwrap').clientWidth - 32;
-      const n = Math.max(1, Math.round(w / val));
-      if (setCell._n !== n) {
-        setCell._n = n;
-        $('grid').style.gridTemplateColumns = `repeat(${n}, 1fr)`;
-      }
-      document.body.classList.toggle('dense', val <= 110); // 高密度モード: 重い演出を止める
+      applyCellLayout(setCell._t);
     });
   }
   clearTimeout(setCell._commit);
@@ -1895,40 +2431,101 @@ function setCell(v) {
 function commitCell() {
   clearTimeout(setCell._commit);
   const v = setCell._t || +localStorage.getItem('fg_cell') || 168;
+  const anchor = setCell._anchor;
+  delete setCell._anchor;
+  // changeは最後のinputと同じtaskで来ることがある。保留rAFより先に仮想窓を計算すると
+  // 古い列数で窓を作るため、確定値をここで同期適用する。
+  if (setCell._raf) { cancelAnimationFrame(setCell._raf); setCell._raf = 0; }
+  clearTimeout(setCell._defer);
+  applyCellLayout(v);
   localStorage.setItem('fg_cell', v);
-  updateWindow(true, true); // 列数/行高が変わったので窓の端だけ差し引き(中身のセルは残す=フラッシュ防止)
-  retierVisible(v);
+  if (anchor) {
+    restoreCellAnchor(anchor, true);
+  } else {
+    updateWindow(true, true); // 列数/行高が変わったので窓の端だけ差し引く
+  }
+  retierVisible();
   fillViewport();
 }
-// 可視+前後1画面のセルだけ、サイズに合った画像tierへ差し替える(デコード完了後にswap=ちらつき無し)。
+// 仮想窓内のセルだけ、サイズに合った画像tierへ差し替える(デコード完了後にswap=ちらつき無し)。
 // 縮小後も360px surfaceを掴み続けるRGBA浪費(P0-2)と、拡大後のボケの両方を解消
-function retierVisible(v) {
-  const tier = v <= 110 ? 'micro' : v > 300 ? 'preview' : 'thumb';
-  const vh = innerHeight;
-  const imgs = [...document.querySelectorAll('.cell img')].filter(im => {
-    const r = im.getBoundingClientRect();
-    return r.bottom > -vh && r.top < vh * 2;
-  });
+function retierVisible() {
+  const cellPx = actualCellPx();
+  const tier = cellPx <= 110 ? 'micro' : cellPx > 300 ? 'preview' : 'thumb';
+  const gen = (retierVisible._gen = (retierVisible._gen || 0) + 1);
+  const bySha = new Map(items.map(it => [it.sha1, it]));
+  const atlasGroups = new Map(), individual = [];
+  // 仮想窓内だけがDOMにいるので座標filterは不要。全セルのgetBoundingClientRect()は
+  // 縮小直後に数千セルを強制layoutし、実測3.7秒の停止を起こしていた。
+  for (const im of document.querySelectorAll('.cell img')) {
+    const it = bySha.get(im.parentElement?.id?.slice(2));
+    if (!it || it._trash) continue;
+    const current = im.dataset.tier || im.src.match(/\/(micro|thumb|preview|atlas)\//)?.[1];
+    if (!current || current === 'render') continue;
+    if (useAtlas(it, cellPx)) {
+      const url = atlasUrl(it);
+      const absolute = new URL(url, location.href).href;
+      if (current === 'atlas' && im.src === absolute) continue;
+      if (!atlasGroups.has(url)) atlasGroups.set(url, []);
+      atlasGroups.get(url).push({im, it});
+    } else {
+      const url = tierUrl(it, tier);
+      if (current === tier && !im.classList.contains('atlas')) continue;
+      // 高速scroll中の未ロード画像はURLだけ直し、idle時に初めて読む。
+      if (im.dataset.src && current !== 'atlas') {
+        im.dataset.src = url;
+        im.dataset.tier = tier;
+      } else individual.push({im, it, url});
+    }
+  }
+  const alive = (im, it) => gen === retierVisible._gen && document.contains(im) &&
+    im.parentElement?.id === 'c_' + it.sha1;
+
+  // 200セルが同じURLを使うので、atlasごとに一度だけ先読み/デコードする。
+  // 読込み中は従来のmicro/thumbを残し、完了した瞬間に全セルを同時に切り替える。
+  for (const [url, targets] of atlasGroups) {
+    const pre = new Image();
+    pre.decoding = 'async';
+    pre.fetchPriority = 'high';
+    const swap = () => targets.forEach(({im, it}) => { if (alive(im, it)) applyAtlasImage(im, it, url); });
+    pre.onload = () => pre.decode ? pre.decode().then(swap, swap) : swap();
+    pre.onerror = () => fallbackAtlasPage(targets[0]?.it._atlas);
+    pre.src = url;
+  }
+
+  // atlasから通常段へ戻す時も、atlasを消してからロードするのではなく旧画像を保持する。
+  // 個別画像の同時decodeを避けるため1frame 24枚ずつ開始する。
   let i = 0;
   (function step() {
-    for (const im of imgs.slice(i, i + 24)) {
-      const m = im.src.match(/\/(micro|thumb|preview)\//);
-      if (!m || m[1] === tier) continue;
-      const url = im.src.replace(`/${m[1]}/`, `/${tier}/`);
+    if (gen !== retierVisible._gen) return;
+    for (const {im, it, url} of individual.slice(i, i + 24)) {
       const pre = new Image();
-      pre.onload = () => { if (document.contains(im)) im.src = url; };
+      pre.decoding = 'async';
+      pre.onload = () => {
+        if (alive(im, it)) {
+          clearAtlasImage(im);
+          im.dataset.tier = tier;
+          im.removeAttribute('data-src');
+          im.src = url;
+        }
+      };
       pre.src = url;
     }
     i += 24;
-    if (i < imgs.length) requestAnimationFrame(step);
+    if (i < individual.length) requestAnimationFrame(step);
   })();
 }
+// iOSはorientationchange(旧幅)→resize(新幅)の順。resize後にanchorを取ると「旧列数×新幅」で
+// 現在行を誤算するので、回転開始時の左上画像を先に保存する。
+addEventListener('orientationchange', () => {
+  if (setCell._anchor === undefined) setCell._anchor = captureCellAnchor();
+}, {passive: true});
 addEventListener('resize', () => setCell(localStorage.getItem('fg_cell') || 168));
 // Ctrl/⌘+ホイールでサムネサイズ(2026-09-03指示)。ブラウザのページズームは抑止
 $('gridwrap').addEventListener('wheel', e => {
   if (!(e.ctrlKey || e.metaKey)) return;
   e.preventDefault();
-  const cur = +localStorage.getItem('fg_cell') || 168;
+  const cur = currentCellPx();
   const v = Math.min(1600, Math.max(36, Math.round(cur * (e.deltaY < 0 ? 1.12 : 0.89))));
   $('cellsize').value = v;
   setCell(v);
@@ -1945,6 +2542,7 @@ function applyPattern(i) {
   $('vpbtn').innerHTML = ic(p.key, 14) + ' ' + p.label;
   $('cellsize').value = p.cell;
   setCell(p.cell);
+  commitCell(); // 離散ボタンはドラッグ用350ms確定待ちをせず、その場でDOM保持reflow/tier準備
 }
 function cyclePattern() { applyPattern((+localStorage.getItem('fg_vp') || 0) + 1); }
 function setFit(on) {
@@ -1953,10 +2551,12 @@ function setFit(on) {
 }
 // ±で1列ずつ(スライダーは大雑把・こっちは丁寧)
 function colStep(d) {
-  const w = $('gridwrap').clientWidth - 32;
-  const cur = setCell._n || Math.max(1, Math.round(w / (+localStorage.getItem('fg_cell') || 168)));
-  const n = Math.max(1, cur + d);
-  const v = Math.max(36, Math.min(1600, Math.floor(w / n)));
+  const w = gridWidth();
+  const gap = gridGap();
+  const n = Math.max(1, gridCols() + d);
+  // n列のセル実幅=(利用幅-(n-1)*gap)/n。gapを引かない旧式では、
+  // 「1列増やす」が逆に数列減ることがあった。
+  const v = Math.max(36, Math.min(1600, Math.round((w + gap) / n - gap)));
   $('cellsize').value = v;
   setCell(v);
 }
@@ -1964,6 +2564,13 @@ function toggleFit() {
   const on = $('grid').classList.toggle('fit');
   $('fitbtn').classList.toggle('on', on);
   localStorage.setItem('fg_fit', on ? '1' : '');
+  // CSS transition:noneではWeb Animationは止まらない。高密度時に数百〜千本を
+  // 起動すると切替だけでLong Taskになるため、機能は即反映して演出だけ省く。
+  if (document.body.classList.contains('dense')) {
+    // atlasはcover/contain別の不変URL。旧atlasを表示したまま新しい方をdecodeしてswapする。
+    if (actualCellPx() <= ATLAS_CELL) retierVisible();
+    return;
+  }
   document.querySelectorAll('.cell img').forEach((im, i) => {
     im.animate([{transform: 'scale(.9)', opacity: .5}, {transform: 'none', opacity: 1}],
                {duration: 280, delay: (i % 30) * 6, easing: 'cubic-bezier(.2,.9,.3,1)'});
@@ -2345,7 +2952,7 @@ async function lbShow(i, dir) {
   $('lbsrcbtn').style.display = 'none';
   lbView.show(items[lbIdx], dir); // 表示はここに全部任せる(src/サイズを他で触らない)
   [1, -1].forEach(d => { const n = items[(lbIdx + d + items.length) % items.length];
-    if (n) new Image().src = '/preview/' + n.sha1; });
+    if (n) new Image().src = tierUrl(n, 'preview'); });
   $('lbmeta').innerHTML = `${lbIdx + 1} / ${items.length}`;
   try {
     const m = await j('/api/meta/' + sha);
@@ -2617,10 +3224,21 @@ async function edMutate(body) {
     const it = items.find(x => x.sha1 === sha);
     if (it) {
       it.erev = r.edits.length ? r.rev : null;
+      // 現在のatlasは編集前画像を束ねた不変物。次の一覧reloadまではこの1枚だけmicroへ退避する。
+      it._atlas = null;
       const im = document.querySelector('#c_' + sha + ' img');
       if (im) setTimeout(() => {
-        const big = (+localStorage.getItem('fg_cell') || 168) > 300;
-        im.src = (big ? '/preview/' : '/thumb/') + sha + (it.erev ? '?v=' + it.erev : '?t=' + Date.now());
+        const px = actualCellPx();
+        const tier = px <= LITE_CELL ? 'micro' : px > 300 ? 'preview' : 'thumb';
+        const url = tierUrl(it, tier, !it.erev);
+        const pre = new Image();
+        pre.onload = () => {
+          if (!document.contains(im) || im.parentElement?.id !== 'c_' + sha) return;
+          clearAtlasImage(im);
+          im.dataset.tier = tier;
+          im.src = url;
+        };
+        pre.src = url;
       }, 800);
     }
   } catch (e) { toast('❌ ' + e.message); }
@@ -2890,9 +3508,11 @@ async function lbFaceEnroll() {
 async function cellKeep(sha, el) {
   const it = items.find(x => x.sha1 === sha);
   const to = !(it?.keep);
-  el.classList.toggle('on', to); // 楽観更新
+  const cell = el?.classList.contains('cell') ? el : el?.closest('.cell');
+  const paint = on => cell?.classList.contains('lite') ? cell.classList.toggle('keep', on) : el?.classList.toggle('on', on);
+  paint(to); // 楽観更新
   try { await setKeep([sha], to); }
-  catch (e) { el.classList.toggle('on', !to); toast('❌ ' + e.message); }
+  catch (e) { paint(!to); toast('❌ ' + e.message); }
 }
 async function setKeep(shas, keep) {
   await j('/api/keep', {method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -3038,7 +3658,7 @@ async function makeDataset() {
   if (!sel.size) return toast('画像を選んでください');
   const {folder, name} = splitPath(input);
   // 権利不明の画像が混ざる出荷は明示確認(研究・学習用途限定の注意 2026-09-03)
-  const dirty = items.filter(it => sel.has(it.sha1) && (!it.rights || it.rights === 'unknown')).length;
+  const dirty = items.filter(it => sel.has(it.sha1) && !itemRightsClean(it)).length;
   if (dirty > 0 && !confirm(`選択${sel.size}枚のうち ${dirty}枚は権利未確認です。\nこのデータセットは機械学習・情報解析目的(著作権法30条の4)での利用に限られ、再配布・販売はできません。\n続けますか？`)) return;
   try {
     const r = await j('/api/datasets', {method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -3269,9 +3889,13 @@ async function liveDrop(album, n) {
     const r = await j('/api/images?' + new URLSearchParams({source: 'crawl:' + album, limit: n, offset: 0}));
     const fresh = r.items.filter(it => !items.some(x => x.sha1 === it.sha1));
     if (!fresh.length) return;
+    const anchor = captureCellAnchor();
     items = fresh.concat(items); total += fresh.length;
     if ($('lb').classList.contains('show')) lbIdx += fresh.length; // 開いてる画像の位置がズレないように
-    updateWindow(true);
+    if (anchor && !anchor.atTop) {
+      anchor.index += fresh.length;
+      restoreCellAnchor(anchor, false);
+    } else updateWindow(true);
     if (vStart === 0) { // 先頭が見えている時だけ「ぽとっ」と落ちる演出
       [...$('grid').children].slice(0, fresh.length).forEach((el, k) => {
         el.classList.add('drop');
@@ -3424,7 +4048,7 @@ function setCur(i, opts = {}) {
     // 仮想窓の外→その行へスクロールして描かせる
     const n = gridCols(), ch = cellPitch();
     $('gridwrap').scrollTop = Math.max(0, contentTop() + Math.floor(i / n) * ch - $('gridwrap').clientHeight / 2);
-    updateWindow(true);
+    updateWindow(true, false, i);
     el = document.getElementById('c_' + curSha);
   }
   if (el) {
@@ -3526,7 +4150,10 @@ setInterval(watchActivity, 2000); // AI実況はこれ1本(稼働状況/収集/�
 setInterval(refreshFacets, 30000);
 
 (async function boot() {
-  await Promise.all([refreshFacets(), loadAlbums()]);
+  // navの受け皿を先に作る。並列だと高速なfacetsが先着し、n_all参照で中断して
+  // タグボタン/属性チップが空のままになる。
+  await loadAlbums();
+  await refreshFacets();
   loadDatasets(); loadPresets(); watchActivity();
   const h = new URLSearchParams(location.hash.slice(1));
   for (const k of ['origin']) if (h.get('f_' + k)) fchips[k] = h.get('f_' + k);

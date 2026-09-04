@@ -117,13 +117,15 @@ fluent_gallery (Rust, axum, 単一バイナリ, :8790)
 
 ## 開発ルール
 
-**デプロイは `bash deploy.sh` 一択。** ビルド → 再起動 → `tests/ui_regression.js` の11項目が全部通って初めて完了する。UIだけの変更でも回帰テストを流してから「直った」と言うこと。
+**デプロイは `bash deploy.sh` 一択。** ビルド → 再起動 → `tests/ui_regression.js` の全項目が通って初めて完了する。UIだけの変更でも回帰テストを流してから「直った」と言うこと。
 
 ```bash
 node tests/ui_regression.js   # 単体実行(サーバ稼働中に)
+node tests/thumbnail_perf.js  # 1920x1080・DPR1で縮小 + 1万件往復scrollの性能予算
+PERF_DPR=2 node tests/thumbnail_perf.js  # Retina相当
 ```
 
-検査項目: フォルダ切替の追い越し / ライトボックス表示 / 送りのサイズ一貫性 / クロップ / ⭐トグル / 顔IDパネル / 押しっぱなし送り / キーボード操作 / 連続削除 / JSエラー。テスト画像は `tests/fixtures/` を `_uitest` ソースへ収蔵し、最後に自動で掃除する(実データには触らない)。
+検査項目: フォルダ切替の追い越し / ライトボックス表示 / 送りのサイズ一貫性 / クロップ / ⭐トグル / サムネ属性記号 / 超小型サムネ / iPhone縦横+iPad縦横 / モバイルの選択・ライトボックス・取込パネル / 顔IDパネル / 押しっぱなし送り / キーボード操作 / 連続削除 / JSエラー。テスト画像は `tests/fixtures/` を `_uitest` ソースへ収蔵し、最後に自動で掃除する(実データには触らない)。
 
 新しいUI操作を足したら、回帰テストに検査を1本足してからコミットする。
 
@@ -133,6 +135,8 @@ node tests/ui_regression.js   # 単体実行(サーバ稼働中に)
 
 ```
 GET  /api/images?limit&offset&source&q&tag&origin&...   一覧/検索(qはキャプションFTS+タグ)
+     `view=grid` を付けるとUI用の軽量形(ID/寸法/状態bitのみ。詳細は `/api/meta/{sha1}`)
+     最小表示では返却200件を `/atlas/{content-key}?fit=0|1` の1 JPEGへ束ねてimmutable cache
 GET  /api/facets                                        絞り込み候補と件数
 POST /api/ingest {path,source,move}                     収蔵(ジョブ)
 GET  /api/samples / POST /api/samples/{id}?n=1000        権利クリアなサンプル取得(CC0/PD/CC BY: Commons, Met, CMA, ARTIC, NASA, Wellcome, SMK, COCO(CC BY系のみ), Open Images 顔/実写)

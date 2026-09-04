@@ -4,7 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node ui_regression.js",
+    "perf:thumb": "node thumbnail_perf.js"
   },
   "keywords": [],
   "author": "",

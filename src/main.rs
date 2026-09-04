@@ -23,9 +23,10 @@ use axum::{
     Json, Router,
 };
 use rusqlite::Connection;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use sha1::{Digest, Sha1};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Arc, Mutex};
 
@@ -42,6 +43,7 @@ struct App {
     http: reqwest::Client,
     ui_hot: std::sync::atomic::AtomicU64, // 最後にUIが画像/一覧を要求したunix秒(backfillの遠慮判断)
     micro_inflight: Mutex<std::collections::HashSet<String>>, // /micro miss生成のsingle-flight
+    atlas_inflight: Mutex<std::collections::HashSet<String>>, // /atlas miss生成のsingle-flight(key+fit)
     workers: Mutex<serde_json::Map<String, Value>>, // 裏方常駐の自己申告黒板(AI稼働ボードに出す)
 }
 
@@ -96,12 +98,19 @@ struct Q {
     #[serde(default)] sort: String,
     #[serde(default)] min_quality: i64,
     #[serde(default)] similar: String, // sha1 — この画像にCLIPで似ている順(似た画像フォルダの芯)
+    #[serde(default)] view: String, // "grid"=UI一覧に必要な最小フィールドだけ
     #[serde(default = "d_limit")] limit: i64,
     #[serde(default)] offset: i64,
 }
 fn d_limit() -> i64 { 200 }
 
 const COLS: &str = "sha1, ext, w, h, bytes, phash, source, origin, ingested, tint, vlm_model, caption, quality, nsfw, scene, subject, lighting, style, keep, cost, rights, gender, people_count, age_group, framing, watermark, animal, erev";
+// 画像バイトはsha1 URLで別配信。一覧は初期箱/セル/選択に要る値と属性3bitだけにする。
+// attrs: 1=権利クリーン / 2=有料 / 4=セーフ。詳細は開いた時の/api/metaが正本。
+const GRID_COLS: &str = "sha1, w, h, source, keep, erev, \
+    (CASE WHEN rights IS NOT NULL AND rights NOT IN ('unknown','') THEN 1 ELSE 0 END) + \
+    (CASE WHEN cost > 0 THEN 2 ELSE 0 END) + \
+    (CASE WHEN nsfw = 0 THEN 4 ELSE 0 END) AS attrs";
 
 fn row_to_json(r: &rusqlite::Row) -> rusqlite::Result<Value> {
     let g = |i: usize| r.get::<_, Option<String>>(i).ok().flatten().map(Value::from).unwrap_or(Value::Null);
@@ -114,6 +123,120 @@ fn row_to_json(r: &rusqlite::Row) -> rusqlite::Result<Value> {
         "cost": r.get::<_, Option<f64>>(19).ok().flatten(), "rights": g(20), "gender": g(21),
         "people_count": g(22), "age_group": g(23), "framing": g(24), "watermark": gi(25), "animal": g(26),
         "erev": g(27),
+    }))
+}
+
+fn row_to_grid_json(r: &rusqlite::Row) -> rusqlite::Result<Value> {
+    let g = |i: usize| r.get::<_, Option<String>>(i).ok().flatten().map(Value::from).unwrap_or(Value::Null);
+    let gi = |i: usize| r.get::<_, Option<i64>>(i).ok().flatten().map(Value::from).unwrap_or(Value::Null);
+    Ok(json!({
+        "sha1": g(0), "w": gi(1), "h": gi(2), "source": g(3), "keep": gi(4),
+        "erev": g(5), "attrs": gi(6),
+    }))
+}
+
+const ATLAS_COLS: usize = 20;
+const ATLAS_MAX_ITEMS: usize = 200;
+const ATLAS_TILE: u32 = 120;
+const ATLAS_QUALITY: u8 = 72;
+const ATLAS_VERSION: u8 = 1;
+
+#[derive(Clone, Deserialize, Serialize)]
+struct AtlasMember {
+    sha1: String,
+    erev: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct AtlasManifest {
+    version: u8,
+    items: Vec<AtlasMember>,
+}
+
+fn valid_sha1(s: &str) -> bool {
+    s.len() == 40 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+fn atlas_key(items: &[AtlasMember]) -> String {
+    let mut h = Sha1::new();
+    h.update(b"fluent-gallery-atlas\0");
+    h.update([ATLAS_VERSION]);
+    h.update((ATLAS_COLS as u32).to_be_bytes());
+    h.update(ATLAS_TILE.to_be_bytes());
+    h.update([ATLAS_QUALITY]);
+    h.update(b"jpeg-triangle-cover-contain-v1\0");
+    h.update((items.len() as u32).to_be_bytes());
+    for item in items {
+        h.update(item.sha1.as_bytes());
+        h.update((item.erev.len() as u32).to_be_bytes());
+        h.update(item.erev.as_bytes());
+    }
+    hex::encode(h.finalize())
+}
+
+fn atlas_dir(root: &Path) -> PathBuf {
+    root.join("store/renders/atlas")
+}
+
+fn atlas_manifest_path(root: &Path, key: &str) -> PathBuf {
+    atlas_dir(root).join(format!("{key}.json"))
+}
+
+fn atlas_image_path(root: &Path, key: &str, fit: bool) -> PathBuf {
+    atlas_dir(root).join(format!("{key}.{}.jpg", if fit { "contain" } else { "cover" }))
+}
+
+/// 同じディレクトリの一時ファイルからrenameし、読み手に途中のJSON/JPEGを見せない。
+fn atomic_publish(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if path.exists() {
+        return Ok(());
+    }
+    let parent = path.parent().ok_or_else(|| std::io::Error::other("no parent"))?;
+    std::fs::create_dir_all(parent)?;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("atlas");
+    let tmp = parent.join(format!(".{name}.{}.{}.tmp", std::process::id(), nonce));
+    std::fs::write(&tmp, bytes)?;
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(_) if path.exists() => {
+            let _ = std::fs::remove_file(tmp);
+            Ok(()) // 同じcontent keyを別requestが先にpublishした
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(tmp);
+            Err(e)
+        }
+    }
+}
+
+/// grid APIの並びそのものをcontent keyにする。offset/queryをkeyにしないので誤った再利用をしない。
+fn prepare_grid_atlas(root: &Path, items: &[Value]) -> Option<Value> {
+    if items.is_empty() || items.len() > ATLAS_MAX_ITEMS {
+        return None;
+    }
+    let members: Vec<AtlasMember> = items
+        .iter()
+        .map(|item| {
+            let sha1 = item["sha1"].as_str()?.to_string();
+            let erev = item["erev"].as_str().unwrap_or("").to_string();
+            (valid_sha1(&sha1) && erev.len() <= 128).then_some(AtlasMember { sha1, erev })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let key = atlas_key(&members);
+    let manifest = AtlasManifest { version: ATLAS_VERSION, items: members };
+    let bytes = serde_json::to_vec(&manifest).ok()?;
+    if let Err(e) = atomic_publish(&atlas_manifest_path(root, &key), &bytes) {
+        eprintln!("atlas manifest write failed: {e}");
+        return None;
+    }
+    Some(json!({
+        "id": key,
+        "cols": ATLAS_COLS,
+        "rows": items.len().div_ceil(ATLAS_COLS),
     }))
 }
 
@@ -265,6 +388,7 @@ fn similar_ranked(app: &App, sha: &str, top: usize) -> Vec<String> {
 
 async fn api_images(State(app): S, Query(q): Query<Q>) -> Json<Value> {
     app.touch_ui();
+    let grid_view = q.view == "grid";
     if !q.similar.is_empty() {
         // 似ている順ビュー(v1: 他フィルタは適用しない・順位が正)
         let sha = q.similar.clone();
@@ -279,10 +403,20 @@ async fn api_images(State(app): S, Query(q): Query<Q>) -> Json<Value> {
             .skip(offset)
             .take(limit)
             .filter_map(|s| {
-                db.query_row(&format!("SELECT {COLS} FROM images WHERE sha1=?1"), [s], row_to_json).ok()
+                if grid_view {
+                    db.query_row(&format!("SELECT {GRID_COLS} FROM images WHERE sha1=?1"), [s], row_to_grid_json).ok()
+                } else {
+                    db.query_row(&format!("SELECT {COLS} FROM images WHERE sha1=?1"), [s], row_to_json).ok()
+                }
             })
             .collect();
-        return Json(json!({"total": ranked.len(), "items": items}));
+        drop(db);
+        let atlas = grid_view.then(|| prepare_grid_atlas(&app.root, &items)).flatten();
+        let mut payload = json!({"total": ranked.len(), "items": items});
+        if let Some(atlas) = atlas {
+            payload["atlas"] = atlas;
+        }
+        return Json(payload);
     }
     let (cond, args) = build_where(&q);
     let db = app.db.lock().unwrap();
@@ -298,18 +432,27 @@ async fn api_images(State(app): S, Query(q): Query<Q>) -> Json<Value> {
         "cost" => "cost IS NULL, cost DESC, ingested DESC",
         _ => "ingested DESC",
     };
+    let cols = if grid_view { GRID_COLS } else { COLS };
     let items: Vec<Value> = db
         .prepare(&format!(
-            "SELECT {COLS} FROM images WHERE {cond} ORDER BY {order} LIMIT {} OFFSET {}",
+            "SELECT {cols} FROM images WHERE {cond} ORDER BY {order} LIMIT {} OFFSET {}",
             q.limit.clamp(1, 500),
             q.offset.max(0)
         ))
         .and_then(|mut st| {
-            st.query_map(params.as_slice(), row_to_json)
+            st.query_map(params.as_slice(), |r| {
+                if grid_view { row_to_grid_json(r) } else { row_to_json(r) }
+            })
                 .map(|rows| rows.filter_map(Result::ok).collect())
         })
         .unwrap_or_default();
-    Json(json!({"total": total, "items": items}))
+    drop(db);
+    let atlas = grid_view.then(|| prepare_grid_atlas(&app.root, &items)).flatten();
+    let mut payload = json!({"total": total, "items": items});
+    if let Some(atlas) = atlas {
+        payload["atlas"] = atlas;
+    }
+    Json(payload)
 }
 
 async fn api_facets(State(app): S) -> Json<Value> {
@@ -647,6 +790,139 @@ async fn micro(State(app): S, AxPath(sha1): AxPath<String>) -> impl IntoResponse
     }
 }
 
+#[derive(Deserialize, Default)]
+struct AtlasQ {
+    #[serde(default)]
+    fit: u8, // 0=cover / 1=contain
+}
+
+fn load_atlas_manifest(root: &Path, key: &str) -> Option<AtlasManifest> {
+    let bytes = std::fs::read(atlas_manifest_path(root, key)).ok()?;
+    if bytes.len() > 128 * 1024 {
+        return None;
+    }
+    let manifest: AtlasManifest = serde_json::from_slice(&bytes).ok()?;
+    if manifest.version != ATLAS_VERSION
+        || manifest.items.is_empty()
+        || manifest.items.len() > ATLAS_MAX_ITEMS
+        || manifest.items.iter().any(|m| !valid_sha1(&m.sha1) || m.erev.len() > 128)
+        || atlas_key(&manifest.items) != key
+    {
+        return None;
+    }
+    Some(manifest)
+}
+
+fn atlas_member_image(root: &Path, item: &AtlasMember) -> Option<image::DynamicImage> {
+    if item.erev.is_empty() {
+        if let Ok(im) = image::open(store::micro_path(root, &item.sha1))
+            .or_else(|_| image::open(store::thumb_path(root, &item.sha1)))
+        {
+            return Some(im);
+        }
+        let meta = store::load_meta(root, &item.sha1)?;
+        return image::open(store::image_path(
+            root,
+            &item.sha1,
+            meta["ext"].as_str().unwrap_or("jpg"),
+        ))
+        .ok();
+    }
+    // 編集直後はmicroの非同期焼き直しよりatlas要求が先に来得る。新revのURLへ旧画像を
+    // immutable保存しないよう、編集履歴からこの場で正しい120px像を得る。
+    let meta = store::load_meta(root, &item.sha1)?;
+    let history = meta.get("edits").cloned().unwrap_or_else(|| json!([]));
+    if edits::rev(&history) != item.erev {
+        // 古い索引でerevだけがずれた既存データも、200枚すべてをatlas不可にはしない。
+        // 現在の正本(history)を描き、content keyのファイルは最初のatomic publish後に不変。
+        // 次に索引が更新されれば正しいrevの別keyへ自然に切り替わる。
+        eprintln!("atlas: stale edit revision for {}", item.sha1);
+    }
+    let ext = meta["ext"].as_str().unwrap_or("jpg");
+    let bytes = edits::render(root, &item.sha1, ext, &history, ATLAS_TILE, None)?;
+    image::load_from_memory(&bytes).ok()
+}
+
+fn generate_atlas(root: &Path, key: &str, fit: bool) -> Option<Vec<u8>> {
+    let manifest = load_atlas_manifest(root, key)?;
+    let rows = manifest.items.len().div_ceil(ATLAS_COLS) as u32;
+    let panel = image::Rgb([0x14, 0x15, 0x1a]);
+    let mut sheet = image::RgbImage::from_pixel(ATLAS_COLS as u32 * ATLAS_TILE, rows * ATLAS_TILE, panel);
+    for (i, item) in manifest.items.iter().enumerate() {
+        // 1枚でも欠けたsheetをimmutable公開すると、その黒タイルを永久キャッシュしてしまう。
+        let im = atlas_member_image(root, item)?;
+        let col = i as u32 % ATLAS_COLS as u32;
+        let row = i as u32 / ATLAS_COLS as u32;
+        if fit {
+            let tile = im.resize(ATLAS_TILE, ATLAS_TILE, image::imageops::FilterType::Triangle).into_rgb8();
+            let x = col * ATLAS_TILE + (ATLAS_TILE - tile.width()) / 2;
+            let y = row * ATLAS_TILE + (ATLAS_TILE - tile.height()) / 2;
+            image::imageops::replace(&mut sheet, &tile, i64::from(x), i64::from(y));
+        } else {
+            let tile = im
+                .resize_to_fill(ATLAS_TILE, ATLAS_TILE, image::imageops::FilterType::Triangle)
+                .into_rgb8();
+            image::imageops::replace(
+                &mut sheet,
+                &tile,
+                i64::from(col * ATLAS_TILE),
+                i64::from(row * ATLAS_TILE),
+            );
+        }
+    }
+    let mut buf = std::io::Cursor::new(Vec::new());
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, ATLAS_QUALITY)
+        .encode_image(&sheet)
+        .ok()?;
+    let bytes = buf.into_inner();
+    let _ = atomic_publish(&atlas_image_path(root, key, fit), &bytes);
+    Some(bytes)
+}
+
+/// 36pxグリッド用contact sheet。1 request/1 decodeで最大200セルを満たす。
+async fn atlas(State(app): S, AxPath(key): AxPath<String>, Query(q): Query<AtlasQ>) -> impl IntoResponse {
+    if !valid_sha1(&key) || q.fit > 1 {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    app.touch_ui();
+    let fit = q.fit == 1;
+    let path = atlas_image_path(&app.root, &key, fit);
+    if let Ok(bytes) = std::fs::read(&path) {
+        return ([(header::CONTENT_TYPE, "image/jpeg"), (header::CACHE_CONTROL, IMMUTABLE)], bytes)
+            .into_response();
+    }
+    if !atlas_manifest_path(&app.root, &key).exists() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    let flight = format!("{key}:{}", q.fit);
+    let owner = { app.atlas_inflight.lock().unwrap().insert(flight.clone()) };
+    if !owner {
+        // 同じsheetを別requestが生成中。atomic publish後の完成ファイルだけを読む。
+        for _ in 0..500 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            if let Ok(bytes) = std::fs::read(&path) {
+                return ([(header::CONTENT_TYPE, "image/jpeg"), (header::CACHE_CONTROL, IMMUTABLE)], bytes)
+                    .into_response();
+            }
+        }
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    let root = app.root.clone();
+    let worker_key = key.clone();
+    let out = tokio::task::spawn_blocking(move || generate_atlas(&root, &worker_key, fit))
+        .await
+        .ok()
+        .flatten();
+    app.atlas_inflight.lock().unwrap().remove(&flight);
+    match out {
+        Some(bytes) => ([(header::CONTENT_TYPE, "image/jpeg"), (header::CACHE_CONTROL, IMMUTABLE)], bytes)
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 // ---------- 非破壊調整(M4): 原本不変・editsはサイドカーの履歴スタック ----------
 
 async fn api_edits_get(State(app): S, AxPath(sha1): AxPath<String>) -> impl IntoResponse {
@@ -697,11 +973,9 @@ async fn api_edits_put(State(app): S, AxPath(sha1): AxPath<String>, Json(e): Jso
             if let Some(pv) = edits::render(&root, &sha, &ext, &ed, 1080, None) {
                 let _ = std::fs::write(store::preview_path(&root, &sha), &pv);
                 if let Ok(img) = image::load_from_memory(&pv) {
-                    let th = img.thumbnail(360, 360).into_rgb8();
-                    let mut buf = std::io::Cursor::new(Vec::new());
-                    if image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 82).encode_image(&th).is_ok() {
-                        let _ = std::fs::write(store::thumb_path(&root, &sha), buf.get_ref());
-                    }
+                    // 360だけ書き換えると小型グリッドが編集前のmicroを出し続ける。
+                    // 共通helperで360+120を同じrevの見た目へ同時更新する。
+                    store::write_thumbs(&root, &sha, &img);
                 }
             }
         });
@@ -3082,6 +3356,7 @@ async fn main() {
         http: reqwest::Client::new(),
         ui_hot: std::sync::atomic::AtomicU64::new(0),
         micro_inflight: Mutex::new(std::collections::HashSet::new()),
+        atlas_inflight: Mutex::new(std::collections::HashSet::new()),
         workers: Mutex::new(serde_json::Map::new()),
     }));
     #[cfg(feature = "faceid")]
@@ -3143,6 +3418,7 @@ async fn main() {
         .route("/api/seg/one", post(api_seg_one))
         .route("/api/seg/refine", post(api_seg_refine))
         .route("/micro/{sha1}", get(micro))
+        .route("/atlas/{key}", get(atlas))
         .route("/cutout/{sha1}", get(cutout))
         .route("/api/seg/stop", post(api_seg_stop))
         .route("/api/enrich/status", get(api_enrich_status))
