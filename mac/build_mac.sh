@@ -21,6 +21,7 @@ for a in "$@"; do case "$a" in
 esac; done
 BUNDLE_ID="${BUNDLE_ID:-com.takatronix.fluentgallery}"
 VERSION=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')
+LLAMA_BUILD="${LLAMA_BUILD:-b10797}"   # 同梱する llama.cpp のビルド(macOS arm64 tar.gz がある番号)
 APP=dist/FluentGallery.app
 DMG=dist/FluentGallery-$VERSION.dmg
 step() { printf '\n\033[1;36m== %s\033[0m\n' "$*"; }
@@ -58,6 +59,15 @@ if [ "$PLAIN" = 0 ]; then
   command -v node >/dev/null || { echo "node が無い(Tauri CLI用)。brew install node か --plain"; exit 1; }
   [ -d mac/tauri/node_modules ] || (cd mac/tauri && npm install --silent)
   cp "$BIN" mac/tauri/src-tauri/binaries/fluent_gallery-aarch64-apple-darwin
+  step "内蔵VLM用 llama-server(公式リリース $LLAMA_BUILD, macOS arm64, MIT)を同梱"
+  LL=mac/tauri/src-tauri/llama
+  if [ ! -x "$LL/llama-server" ]; then
+    rm -rf "$LL"; mkdir -p "$LL"; TMPL=$(mktemp -d)
+    curl -sL -o "$TMPL/llama.tar.gz" "https://github.com/ggml-org/llama.cpp/releases/download/$LLAMA_BUILD/llama-$LLAMA_BUILD-bin-macos-arm64.tar.gz"
+    tar xzf "$TMPL/llama.tar.gz" -C "$TMPL"
+    cp "$TMPL"/llama-*/llama-server "$TMPL"/llama-*/*.dylib "$LL/"; rm -rf "$TMPL"
+  fi
+  ls "$LL" | wc -l | xargs echo "  llama/ files:"
   if [ -n "${SIGN:-}" ]; then export APPLE_SIGNING_IDENTITY="$SIGN"; else unset APPLE_SIGNING_IDENTITY; fi  # 未指定=未署名
   (cd mac/tauri && npx tauri build --ci 2>&1 | grep -vE '^\s+(Compiling|Finished)')
   BUNDLE=mac/tauri/src-tauri/target/release/bundle
@@ -75,6 +85,7 @@ rm -rf "$APP"; mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/web"
 cp "$BIN" "$APP/Contents/MacOS/fluent_gallery"
 cp mac/launcher.sh "$APP/Contents/MacOS/FluentGallery"; chmod +x "$APP/Contents/MacOS/"*
 cp web/index.html "$APP/Contents/Resources/web/index.html"
+if [ -x mac/tauri/src-tauri/llama/llama-server ]; then mkdir -p "$APP/Contents/Resources/llama"; cp mac/tauri/src-tauri/llama/* "$APP/Contents/Resources/llama/"; fi
 [ -f mac/AppIcon.icns ] && cp mac/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 sed -e "s/__BUNDLE_ID__/$BUNDLE_ID/" -e "s/__VERSION__/$VERSION/" mac/Info.plist > "$APP/Contents/Info.plist"
 echo "同梱: $(du -sh "$APP" | cut -f1)"

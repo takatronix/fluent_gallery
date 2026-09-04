@@ -9,15 +9,26 @@ use std::sync::Mutex;
 pub const OLLAMA: &str = "http://127.0.0.1:11434";
 pub const BUILTIN_MODEL: &str = "qwen2.5vl:7b";
 
-/// Mac 既定: アプリ同梱の llama-server(OpenAI 互換, 画像入力可)を内蔵 VLM として使う。
-/// FG_VLM_BASE(例 http://127.0.0.1:8081/v1)が設定され /health が通れば ollama より優先。
+/// 内蔵 VLM(vlm.rs の llama-server 子プロセス、または FG_VLM_BASE で指した外部の OpenAI 互換)の base。
+/// vlm::ensure() が起動に成功すると set_local_vlm_base() で確定する。ollama より優先。
+static LOCAL_VLM_BASE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+pub fn set_local_vlm_base(b: Option<String>) { *LOCAL_VLM_BASE.lock().unwrap() = b; }
 pub fn local_vlm_base() -> Option<String> {
-    std::env::var("FG_VLM_BASE").ok().filter(|s| !s.is_empty()).map(|s| s.trim_end_matches('/').to_string())
+    if let Ok(b) = std::env::var("FG_VLM_BASE") {
+        if !b.is_empty() { return Some(b.trim_end_matches('/').to_string()); }
+    }
+    LOCAL_VLM_BASE.lock().unwrap().clone()
 }
 pub async fn local_vlm_ok(client: &reqwest::Client) -> bool {
     let Some(base) = local_vlm_base() else { return false };
     let health = base.trim_end_matches("/v1").to_string() + "/health";
     client.get(health).timeout(std::time::Duration::from_secs(2)).send().await.map(|r| r.status().is_success()).unwrap_or(false)
+}
+/// 属性付け/目利きに使える VLM が何かしらあるか(内蔵 llama-server / ollama / OpenAI キー)。常駐の空振り抑止に使う
+pub async fn any_vlm_available(client: &reqwest::Client) -> bool {
+    if local_vlm_ok(client).await { return true; }
+    if client.get(format!("{OLLAMA}/api/tags")).timeout(std::time::Duration::from_secs(1)).send().await.map(|r| r.status().is_success()).unwrap_or(false) { return true; }
+    mlhub_key("openai_api_key").is_some()
 }
 /// OpenAI 互換 chat/completions に画像+プロンプトを投げて JSON を返す(llama-server / LM Studio / vLLM 共通)
 /// 属性付け JSON の形(llama-server の json_schema 制約用)。列挙値は PROMPT と同じ。

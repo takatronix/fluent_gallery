@@ -18,6 +18,7 @@ reqwest = { version = "0.12", features = ["json"] }
 base64 = "0.22"
 llama-cpp-2 = { version = "0.1.155" }
 ort = "2.0.0-rc.13"
+tokenizers = { version = "0.22", default-features = false, features = ["fancy-regex"] } # CLIP テキスト検索の BPE(onig 無しの純 Rust)
 zip = { version = "2", default-features = false, features = ["deflate"] } # COCO注釈zipの読み出し(サンプル取得)
 tokio-util = { version = "0.7", features = ["io"] } # zip書き出しのストリーム配信
 

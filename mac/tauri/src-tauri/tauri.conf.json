@@ -27,7 +27,8 @@
       "binaries/fluent_gallery"
     ],
     "resources": {
-      "../../../web/index.html": "web/index.html"
+      "../../../web/index.html": "web/index.html",
+      "llama/": "llama/"
     },
     "macOS": {
       "minimumSystemVersion": "13.0"

@@ -1648,6 +1648,7 @@ async function reload(flip) {
   const r = await j('/api/images?' + params({limit: 200, offset: 0}));
   if (g !== rgen) return; // 追い越された(すでに別の場所へ移動済み)
   items = r.items; total = r.total;
+  if (r.semantic && !reload._semSaid) { reload._semSaid = true; toast('キャプション未取得の画像が多いので、CLIP の意味検索(似ている順)で表示しています'); }
   flip ? flipRender() : render(true);
   syncHash();
 }
@@ -3303,7 +3304,14 @@ function aiMarkHtml(k) {
   switch (k) {
     case 'llm': return A.llm.present ? ok(A.llm.ready ? '常駐中' : '取得済') : A.llm.downloading ? dl(A.llm, 'llm') : ng('未取得', pull('llm', '2.4GB'));
     case 'clip': return A.clip.present ? ok('モデルあり') : A.clip.downloading ? dl(A.clip, 'clip') : ng('未取得', pull('clip', '350MB'));
-    case 'vlm': return A.vlm.present ? ok('ollama接続OK') : A.vlm.reachable ? ng('モデル未取得(初回に自動pull)') : ng('ollama未起動');
+    case 'vlm': {
+      const L = A.vlm.local || {};
+      if (A.vlm.backend === 'llama-server') return ok('内蔵VLM 稼働中(' + (L.model || '') + ')');
+      if (L.downloading) return dl(L, 'vlm');
+      if (L.starting) return ` <span style="color:#e0a83c">起動中…</span>`;
+      if (L.bin) return L.present ? ng('内蔵VLM 停止中', pull('vlm', '起動')) : ng('未取得', pull('vlm', '3.3GB'));
+      return A.vlm.present ? ok('ollama接続OK') : A.vlm.reachable ? ng('モデル未取得(初回に自動pull)') : ng('llama-server なし・ollama未起動');
+    }
     case 'seg': return A.seg.reachable ? ok('ml-hub接続OK') : ng('ml-hub未接続');
     case 'faceid': return !A.faceid?.enabled ? ng('このビルドは顔ID無効') : A.faceid.present ? ok('モデルあり') : A.faceid.downloading ? dl(A.faceid, 'faceid') : ng('未取得', pull('faceid', '288MB'));
     case 'key_anthropic': return A.keys.anthropic ? ok('APIキーあり') : ng('anthropic_api_key未設定');
@@ -3315,8 +3323,8 @@ function aiMark(k) { return `<span class="aimark" data-k="${k}">${aiMarkHtml(k)}
 function aiMarksRefresh() { document.querySelectorAll('.aimark').forEach(el => { el.innerHTML = aiMarkHtml(el.dataset.k); }); }
 async function aiPull(kind) {
   try {
-    await j({llm: '/api/llm/pull', clip: '/api/clip/pull', faceid: '/api/faces/pull'}[kind], {method: 'POST'});
-    toast({llm: '内蔵LLM(2.4GB)の取得を開始しました', clip: 'CLIPモデル(350MB)の取得を開始しました', faceid: '顔IDモデル(288MB・非商用限定)の取得を開始しました'}[kind]);
+    await j({llm: '/api/llm/pull', clip: '/api/clip/pull', faceid: '/api/faces/pull', vlm: '/api/vlm/pull'}[kind], {method: 'POST'});
+    toast({llm: '内蔵LLM(2.4GB)の取得を開始しました', clip: 'CLIPモデル(350MB+テキスト側254MB)の取得を開始しました', faceid: '顔IDモデル(288MB・非商用限定)の取得を開始しました', vlm: '内蔵VLM(Qwen3-VL-4B, 3.3GB)の取得と起動を開始しました — 終わると属性付け・AIフォルダが動きます'}[kind]);
   } catch (e) { toast('❌ ' + e.message); }
 }
 async function watchActivity() {

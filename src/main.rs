@@ -12,6 +12,7 @@ mod faceid;
 mod samples;
 mod urlimport;
 mod onnx;
+mod vlm;
 mod seg;
 mod store;
 
@@ -38,6 +39,7 @@ struct App {
     crawl: Arc<crawl::CrawlState>,
     crawl_queue: Mutex<Vec<CrawlIn>>, // 順番待ち(同時1本=VLM直列の現実に合わせ、弾かず並ばせる)
     llm: Arc<llm::LlmState>,
+    vlm: Arc<vlm::VlmState>, // 内蔵VLM(llama-server 子プロセス)
     seg: Arc<seg::SegState>,
     http: reqwest::Client,
     ui_hot: std::sync::atomic::AtomicU64, // 最後にUIが画像/一覧を要求したunix秒(backfillの遠慮判断)
@@ -67,6 +69,8 @@ impl App {
 
 type S = State<&'static App>;
 
+/// 待受ポート(常駐ワーカーの自己呼び出し用。以前は 8790 固定で PORT を変えると空振りしていた)
+static BIND_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(8790);
 /// ♻自動収集の見回り周期と次回時刻(epoch 秒)。UI に出すために公開する
 const AUTOPILOT_INTERVAL_SECS: u64 = 1800;
 static AUTOPILOT_NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -76,6 +80,7 @@ static AUTOPILOT_NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU
 #[derive(Deserialize, Default)]
 struct Q {
     #[serde(default)] q: String,
+    #[serde(default)] sem: String, // CLIP テキスト意味検索(英語)。空でも q が 0 件なら自動でこちらに落ちる
     #[serde(default)] tag: String,
     #[serde(default)] source: String,
     #[serde(default)] origin: String,
@@ -234,6 +239,11 @@ fn similar_ranked(app: &App, sha: &str, top: usize) -> Vec<String> {
         Some(e)
     })();
     let Some(qe) = query_emb else { return vec![] };
+    ranked_by_emb(app, &qe, top)
+}
+
+/// 任意の 512 次元(画像でもテキストでも)に近い順の sha 一覧。埋め込みは RAM キャッシュ(件数が変わったら再読込)
+fn ranked_by_emb(app: &App, qe: &[f32], top: usize) -> Vec<String> {
     let cache = EMBS.get_or_init(|| Mutex::new((0, vec![])));
     let mut c = cache.lock().unwrap();
     let n: usize = app
@@ -257,7 +267,7 @@ fn similar_ranked(app: &App, sha: &str, top: usize) -> Vec<String> {
     let mut scored: Vec<(f32, &String)> = c
         .1
         .iter()
-        .map(|(s, e)| (e.iter().zip(&qe).map(|(a, b)| a * b).sum::<f32>(), s))
+        .map(|(s, e)| (e.iter().zip(qe).map(|(a, b)| a * b).sum::<f32>(), s))
         .collect();
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     scored.into_iter().take(top).map(|(_, s)| s.clone()).collect()
@@ -284,12 +294,32 @@ async fn api_images(State(app): S, Query(q): Query<Q>) -> Json<Value> {
             .collect();
         return Json(json!({"total": ranked.len(), "items": items}));
     }
+    // 意味検索(CLIP テキスト): sem= を明示するか、q の全文検索が 0 件(キャプション未取得の Mac 初日など)なら
+    // 英語 q を CLIP テキスト埋め込みにして似ている順で返す。VLM 無しでも「dog」「a boat on water」が引ける
+    let sem_query = if !q.sem.is_empty() { Some(q.sem.clone()) } else { None };
+    // DB ガードと Box<dyn ToSql>(どちらも Send でない)を await をまたいで持たないよう、件数はブロック内で取る
+    let total: i64 = {
+        let (cond, args) = build_where(&q);
+        let db = app.db.lock().unwrap();
+        let params: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
+        db.query_row(&format!("SELECT COUNT(*) FROM images WHERE {cond}"), params.as_slice(), |r| r.get(0)).unwrap_or(0)
+    };
+    let sem_query = sem_query.or_else(|| (total == 0 && !q.q.trim().is_empty() && onnx::text_present(&app.root)).then(|| q.q.clone()));
+    if let Some(text) = sem_query {
+        let (limit, offset) = (q.limit.clamp(1, 500) as usize, q.offset.max(0) as usize);
+        let app2 = app;
+        let ranked = tokio::task::spawn_blocking(move || {
+            onnx::embed_text(&app2.root, &text).map(|e| ranked_by_emb(app2, &e, 400)).unwrap_or_default()
+        }).await.unwrap_or_default();
+        let db = app.db.lock().unwrap();
+        let items: Vec<Value> = ranked.iter().skip(offset).take(limit)
+            .filter_map(|s| db.query_row(&format!("SELECT {COLS} FROM images WHERE sha1=?1"), [s], row_to_json).ok())
+            .collect();
+        return Json(json!({"total": ranked.len(), "items": items, "semantic": true}));
+    }
     let (cond, args) = build_where(&q);
     let db = app.db.lock().unwrap();
     let params: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
-    let total: i64 = db
-        .query_row(&format!("SELECT COUNT(*) FROM images WHERE {cond}"), params.as_slice(), |r| r.get(0))
-        .unwrap_or(0);
     // 並び順はホワイトリスト(SQL注入防止)。NULLは常に後ろへ
     let order = match q.sort.as_str() {
         "old" => "ingested ASC",
@@ -1022,6 +1052,10 @@ async fn api_faces_detect(State(app): S, Json(p): Json<FaceDetectIn>) -> impl In
             })
             .unwrap_or_default();
         if stored.is_empty() {
+            // モデル未取得のまま「顔なし」を永続化すると、取得後も二度と再検出されない(2026-09-04 指摘)→ 書かずに空を返す
+            if !faceid::models_present() {
+                return Some(json!({"faces": [], "note": "顔IDモデル未取得"}));
+            }
             let img = image::open(store::image_path(&root, &p.sha1, &ext)).ok()?;
             let (w, h) = (img.width() as f32, img.height() as f32);
             let faces = faceid::detect_faces(&img);
@@ -1725,6 +1759,7 @@ async fn api_crawl(State(app): S, Json(c): Json<CrawlIn>) -> impl IntoResponse {
         return Json(json!({"ok": true, "queued": true, "position": q.len(),
                            "note": "いまの収集が終わったら自動で始まります"})).into_response();
     }
+    vlm_wake(app).await;
     match start_crawl(app, &c.album, c.n, c.minutes, c.min_quality) {
         Ok(slug) => Json(json!({"ok": true, "album": slug})).into_response(),
         Err((code, msg)) => (code, Json(json!({"detail": msg}))).into_response(),
@@ -2182,7 +2217,7 @@ async fn ai_status(app: &'static App) -> Value {
         Some(r) if r.status().is_success() => r.text().await.map(|t| t.contains("annotation")).unwrap_or(false),
         _ => false,
     };
-    let local_vlm = enrich::local_vlm_ok(&app.http).await;
+    let local_vlm = enrich::local_vlm_ok(&app.http).await || vlm::health(&app.http).await;
     let vlm_reachable = local_vlm || ollama.is_some();
     let vlm_present = if local_vlm { true } else { match ollama {
         Some(r) => r.json::<Value>().await.ok()
@@ -2194,7 +2229,8 @@ async fn ai_status(app: &'static App) -> Value {
     let v = json!({
         "llm": app.llm.status(&app.root),
         "clip": onnx::status(&app.root),
-        "vlm": {"backend": if local_vlm { "llama-server" } else { "ollama" }, "model": if local_vlm { "local:vlm" } else { enrich::BUILTIN_MODEL }, "reachable": vlm_reachable, "present": vlm_present},
+        "vlm": {"backend": if local_vlm { "llama-server" } else { "ollama" }, "model": if local_vlm { vlm::MODEL_FILE } else { enrich::BUILTIN_MODEL },
+                "reachable": vlm_reachable, "present": vlm_present || vlm::models_present(&app.root), "local": vlm::status(&app.root, &app.vlm)},
         "seg": {"backend": "ml-hub", "reachable": seg_ok},
         "faceid": faceid_status(),
         "store": cfg!(feature = "store"),
@@ -2218,6 +2254,26 @@ fn tool_present(name: &str) -> bool {
     std::env::var("PATH").unwrap_or_default().split(':').any(|d| std::path::Path::new(d).join(&p).exists())
 }
 
+/// 内蔵VLM(llama-server)を必要なら起動し、enrich 側の base を確定する。外部指定(FG_VLM_BASE)/ollama があればそれでも良い
+async fn vlm_wake(app: &'static App) -> bool {
+    match vlm::ensure(&app.root, &app.http, &app.vlm).await {
+        Ok(base) => { enrich::set_local_vlm_base(Some(base)); true }
+        Err(_) => false,
+    }
+}
+async fn api_vlm_status(State(app): S) -> Json<Value> { Json(vlm::status(&app.root, &app.vlm)) }
+/// モデル(3.3GB)の取得と llama-server の起動を裏で開始。進捗は /api/vlm/status, /api/ai/status
+async fn api_vlm_pull(State(app): S) -> Json<Value> {
+    tokio::spawn(async move {
+        match vlm::ensure(&app.root, &app.http, &app.vlm).await {
+            Ok(base) => enrich::set_local_vlm_base(Some(base)),
+            Err(e) => println!("👁 内蔵VLM 準備失敗: {e}"),
+        }
+    });
+    Json(json!({"ok": true, "note": "進捗は GET /api/vlm/status"}))
+}
+async fn api_vlm_stop(State(app): S) -> Json<Value> { vlm::stop(&app.vlm); enrich::set_local_vlm_base(None); Json(json!({"ok": true})) }
+
 async fn api_ai_status(State(app): S) -> Json<Value> {
     Json(ai_status(app).await)
 }
@@ -2229,6 +2285,9 @@ async fn api_clip_pull(State(app): S) -> Json<Value> {
     tokio::spawn(async move {
         if let Err(e) = onnx::ensure_model(&root, &client).await {
             println!("🧭 CLIPモデルDL失敗: {e}");
+        }
+        if let Err(e) = onnx::ensure_text_model(&root, &client).await {
+            println!("🧭 CLIPテキストモデルDL失敗: {e}");
         }
     });
     Json(json!({"ok": true, "note": "進捗は GET /api/ai/status"}))
@@ -2751,6 +2810,7 @@ async fn api_enrich(State(app): S, Json(e): Json<EnrichIn>) -> impl IntoResponse
         let client = app.http.clone();
         let mut backend = backend;
         if backend == "builtin" {
+            vlm_wake(app).await;
             if let Err(err) = enrich::ensure_builtin(&client).await {
                 // 最低保証: ローカルVLMが動かない環境ではGPT APIに自動フォールバック
                 if enrich::mlhub_key("openai_api_key").is_some() {
@@ -2812,6 +2872,7 @@ async fn api_enrich_one(State(app): S, Json(e): Json<EnrichOneIn>) -> impl IntoR
         return Json(m).into_response(); // もう見てある
     }
     let mut backend = e.backend;
+    if backend == "builtin" { vlm_wake(app).await; }
     if backend == "builtin" && enrich::ensure_builtin(&app.http).await.is_err() {
         if enrich::mlhub_key("openai_api_key").is_some() {
             backend = "gpt".into(); // 最低保証
@@ -3078,6 +3139,7 @@ async fn main() {
         crawl: Arc::new(crawl::CrawlState::default()),
         crawl_queue: Mutex::new(Vec::new()),
         llm: Arc::new(llm::LlmState::default()),
+        vlm: Arc::new(vlm::VlmState::default()),
         seg: Arc::new(seg::SegState::default()),
         http: reqwest::Client::new(),
         ui_hot: std::sync::atomic::AtomicU64::new(0),
@@ -3153,6 +3215,9 @@ async fn main() {
         .route("/api/cache/clean", post(api_cache_clean))
         .route("/api/caps", get(api_caps))
         .route("/api/ai/status", get(api_ai_status))
+        .route("/api/vlm/status", get(api_vlm_status))
+        .route("/api/vlm/pull", post(api_vlm_pull))
+        .route("/api/vlm/stop", post(api_vlm_stop))
         .route("/api/clip/pull", post(api_clip_pull));
     // 顔ID(feature "faceid")。無効ビルドではルート自体が無い=404。UIは/api/capsを見て操作を隠す
     #[cfg(feature = "faceid")]
@@ -3276,9 +3341,16 @@ async fn main() {
                 db.query_row("SELECT COUNT(*) FROM images WHERE vlm_model IS NULL", [], |r| r.get(0)).unwrap_or(0)
             };
             if missing > 0 {
+                // VLM が一つも無い環境(Mac で内蔵VLM未取得・ollama無し・キー無し)では 3 分ごとに空振りしない
+                if !enrich::any_vlm_available(&app.http).await {
+                    static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                    if !SAID.swap(true, Relaxed) { println!("🤖 自動エンリッチ待機: VLM が無い(AI配役で内蔵VLMを取得すると始まります) 未取得{missing}"); }
+                    app.set_worker("groom", false, format!("待機: VLM無し(未取得{missing})"));
+                    continue;
+                }
                 println!("🤖 自動エンリッチ開始(未取得{missing})");
                 app.set_worker("groom", true, format!("属性の穴埋め依頼(残{missing})"));
-                let _ = app.http.post("http://localhost:8790/api/enrich")
+                let _ = app.http.post(format!("http://127.0.0.1:{}/api/enrich", BIND_PORT.load(Relaxed)))
                     .json(&json!({"backend": "builtin", "n": 300}))
                     .send()
                     .await;
@@ -3307,7 +3379,7 @@ async fn main() {
                     let name = a["name"].as_str().unwrap_or("").to_string();
                     println!("🤖 自動マスク開始: {name} (未マスク{n})");
                     last_seg = std::time::Instant::now();
-                    let _ = app.http.post("http://localhost:8790/api/seg")
+                    let _ = app.http.post(format!("http://127.0.0.1:{}/api/seg", BIND_PORT.load(Relaxed)))
                         .json(&json!({"album": name}))
                         .send()
                         .await;
@@ -3325,6 +3397,10 @@ async fn main() {
             AUTOPILOT_NEXT.store(next, Relaxed);
             tokio::time::sleep(std::time::Duration::from_secs(AUTOPILOT_INTERVAL_SECS)).await;
             if app.crawl.alive.load(Relaxed) {
+                continue;
+            }
+            if !enrich::any_vlm_available(&app.http).await {
+                app.set_worker("autopilot", false, "休止: VLM無し(内蔵VLMを取得すると再開)".into());
                 continue;
             }
             app.set_worker("autopilot", false, "見回り済".into());
@@ -3355,6 +3431,13 @@ async fn main() {
         }
     });
     let port: u16 = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8790);
+    BIND_PORT.store(port, Relaxed);
+    // 内蔵VLM: モデルと llama-server が揃っていれば裏で起動しておく(初回の属性付けを待たせない)。無ければ何もしない
+    if vlm::models_present(&app.root) && vlm::server_bin(&app.root).is_some() {
+        tokio::spawn(async move { vlm_wake(app).await; });
+    } else if vlm::server_bin(&app.root).is_none() {
+        println!("👁 内蔵VLM: llama-server が見つからないため無効(brew install llama.cpp か .app 同梱)");
+    }
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await.unwrap();
     println!("🖼 fluent_gallery (rust) on :{port}");
     axum::serve(listener, router).await.unwrap();

@@ -721,8 +721,43 @@ async fn ensure_brief(root: &Path, client: &reqwest::Client, llm_st: &llm::LlmSt
 /// briefが合流済みのgoalからカテゴリを見て、実戦で当たり続けているパターンを決定的に生成。
 /// 1ラウンド目はこれだけで走る(LLM呼び出し不要・$0・即時)。2ラウンド目以降のLLMは
 /// 「まだ試していない角度」の生成に専念する。テンプレは実戦の採用実績から随時追記する台帳。
-fn seed_queries(album: &str, goal: &str, done: &[String]) -> Vec<String> {
+/// テンプレの主語: フォルダ名が識別子っぽい(英数字と_だけ)なら goal の先頭句を使う。
+/// 「test_shiba_local fanart」のような無意味な検索になっていた(2026-09-04 実測: 192検査で1枚)
+fn seed_subject(album: &str, goal: &str) -> String {
     let a = album.trim();
+    let ident = !a.is_empty() && a.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    if !ident || goal.trim().is_empty() {
+        return a.to_string();
+    }
+    let head: String = goal
+        .split(|c: char| matches!(c, '。' | '、' | '，' | ',' | '.' | '(' | '（' | '\n' | ':' | '：' | '!' | '！'))
+        .next()
+        .unwrap_or(goal)
+        .trim()
+        .chars()
+        .take(24)
+        .collect();
+    // 「〜の写真」「〜の実写」「〜の画像」は主語だけに(テンプレ側で 写真/photo を足す)
+    let head = head
+        .trim_end_matches("の実写写真").trim_end_matches("の実写").trim_end_matches("の写真")
+        .trim_end_matches("の画像").trim_end_matches("写真").trim_end_matches("画像").trim().to_string();
+    if head.is_empty() { a.to_string() } else { head }
+}
+/// 「イラスト不可」「アニメ以外」のような否定つきは「欲しい」ではない
+fn wants(goal: &str, key: &str) -> bool {
+    let mut from = 0;
+    while let Some(i) = goal[from..].find(key) {
+        let after: String = goal[from + i + key.len()..].chars().take(6).collect();
+        let neg = ["不可", "禁止", "以外", "なし", "無し", "除く", "除外", "NG", "ダメ", "だめ", "じゃな", "ではな", "は不要", "いらない"];
+        if !neg.iter().any(|n| after.starts_with(n) || after.contains(n)) {
+            return true;
+        }
+        from += i + key.len();
+    }
+    false
+}
+fn seed_queries(album: &str, goal: &str, done: &[String]) -> Vec<String> {
+    let a = seed_subject(album, goal);
     let g = goal;
     let mut out: Vec<String> = vec![];
     if g.contains("K-POP") || g.contains("KPOP") || g.contains("アイドル") || g.contains("케이팝") {
@@ -734,7 +769,7 @@ fn seed_queries(album: &str, goal: &str, done: &[String]) -> Vec<String> {
             format!("{a} photo HD"),
             format!("{a} 사진"),
         ]);
-    } else if g.contains("イラスト") || g.contains("アニメ") || g.contains("漫画") {
+    } else if wants(g, "イラスト") || wants(g, "アニメ") || wants(g, "漫画") {
         out.extend([
             format!("{a} イラスト"),
             format!("{a} fanart"),
