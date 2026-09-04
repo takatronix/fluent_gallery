@@ -18,6 +18,8 @@ CREATE TABLE IF NOT EXISTS images(
 CREATE TABLE IF NOT EXISTS tags(sha1 TEXT, tag TEXT, PRIMARY KEY(sha1, tag));
 CREATE INDEX IF NOT EXISTS idx_tags_tag ON tags(tag);
 CREATE INDEX IF NOT EXISTS idx_images_source ON images(source);
+-- 13万件の無限scrollをOFFSET後半でも全表sortさせない。sha1は同時刻の決定的tie-breaker。
+CREATE INDEX IF NOT EXISTS idx_images_ingested_sha1 ON images(ingested DESC, sha1 DESC);
 CREATE TABLE IF NOT EXISTS faces(
   person TEXT, album TEXT, sha1 TEXT, emb BLOB, bbox TEXT,
   PRIMARY KEY(person, sha1)

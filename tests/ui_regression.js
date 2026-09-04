@@ -30,6 +30,108 @@ const check = (name, ok, detail = '') => {
 
   const b = await puppeteer.launch({executablePath: process.env.CHROME || '/usr/bin/google-chrome', headless: 'new',
     args: ['--no-sandbox'], defaultViewport: {width: 1600, height: 900}});
+
+  // 36pxでは200件が数行にしかならない。旧実装は初期pump後もsentinelが700px帯内に残り、
+  // IntersectionObserverが再発火せず約1400〜1600件で永久停止した。専用page+合成APIでDBを汚さず再現する。
+  const scrollPage = await b.newPage();
+  await scrollPage.setViewport({width: 2400, height: 900});
+  await scrollPage.evaluateOnNewDocument(() => localStorage.setItem('fg_cell', '340')); // boot中の実API pumpを最小化
+  await scrollPage.goto(BASE + '/#t=lib&k=all', {waitUntil: 'networkidle2', timeout: 60000});
+  await scrollPage.waitForFunction(() => typeof reload === 'function' && document.querySelector('.cell') &&
+    !loadMore._busy && !fillViewport._promise, {timeout: 30000});
+  const infiniteScroll = await scrollPage.evaluate(async () => {
+    const realFetch = window.fetch.bind(window), realCellHtml = cellHtml;
+    const fakeTotal = 10000;
+    window.fetch = (input, init) => {
+      const u = new URL(typeof input === 'string' ? input : input.url, location.href);
+      if (u.pathname === '/api/images' && u.searchParams.get('_scrolltest') === '1') {
+        const offset = Math.max(0, +(u.searchParams.get('offset') || 0));
+        const limit = Math.max(1, +(u.searchParams.get('limit') || 200));
+        const end = Math.min(fakeTotal, offset + limit);
+        const fake = [];
+        for (let i = offset; i < end; i++) fake.push({
+          sha1: i.toString(16).padStart(40, '0'), w: 120, h: 120,
+          source: '_scrolltest', keep: 0, erev: null, attrs: 0,
+        });
+        return Promise.resolve(new Response(JSON.stringify({total: fakeTotal, items: fake}), {
+          status: 200, headers: {'Content-Type': 'application/json'},
+        }));
+      }
+      return realFetch(input, init);
+    };
+    // 合成画像のHTTP requestは不要。セルの高さ・仮想window・ページングだけ実コードで検査する。
+    cellHtml = it => `<div class="cell lite in" id="c_${it.sha1}"></div>`;
+    applyCellLayout(36);
+    // 実サーバで収集中の新着がliveDropされない場所にし、合成pageだけを測る。
+    loc = {type: 'source', key: '_scrolltest', criteria: {_scrolltest: '1'}};
+    await reload();
+    const wait = async (fn, ms = 10000) => {
+      const start = performance.now();
+      while (performance.now() - start < ms) {
+        if (fn()) return true;
+        await new Promise(resolve => setTimeout(resolve, 25));
+      }
+      return false;
+    };
+    await wait(() => !loadMore._busy && !fillViewport._promise);
+    const wrap = $('gridwrap'), more = $('more');
+    const covered = () => items.length >= total ||
+      more.getBoundingClientRect().top > wrap.getBoundingClientRect().bottom + LOAD_MORE_MARGIN;
+    const snapshotRange = async () => {
+      // 仮想窓の非同期growが落ち着いてから、テスト側だけ実DOM矩形で表示範囲を独立検算する。
+      for (let i = 0; i < 8; i++) await new Promise(resolve => requestAnimationFrame(resolve));
+      const wr = wrap.getBoundingClientRect(), visible = [];
+      for (const el of $('grid').children) {
+        const r = el.getBoundingClientRect();
+        if (r.bottom > wr.top && r.top < wr.bottom)
+          visible.push(parseInt(el.id.slice(2), 16) + 1);
+      }
+      const match = $('resultcount').textContent.match(/^表示中 ([\d,]+)–([\d,]+) \/ ([\d,]+)枚$/);
+      const pageMatch = $('pagecount').textContent.match(/^([\d,]+) \/ ([\d,]+)$/);
+      const pageSize = gridCols() * Math.max(1, Math.ceil(wrap.clientHeight / cellPitch()));
+      return {
+        text: $('resultcount').textContent,
+        first: match ? +match[1].replaceAll(',', '') : 0,
+        last: match ? +match[2].replaceAll(',', '') : 0,
+        total: match ? +match[3].replaceAll(',', '') : 0,
+        domFirst: visible.length ? Math.min(...visible) : 0,
+        domLast: visible.length ? Math.max(...visible) : 0,
+        loaded: items.length,
+        pageText: $('pagecount').textContent,
+        page: pageMatch ? +pageMatch[1].replaceAll(',', '') : 0,
+        pages: pageMatch ? +pageMatch[2].replaceAll(',', '') : 0,
+        expectedPage: visible.length ? Math.floor(((Math.min(...visible) - 1) +
+          Math.floor((Math.max(...visible) - Math.min(...visible)) / 2)) / pageSize) + 1 : 0,
+        expectedPages: Math.ceil(fakeTotal / pageSize),
+      };
+    };
+    const initial = items.length, initiallyCovered = covered();
+    const ranges = [await snapshotRange()];
+    const growth = [];
+    for (let pass = 0; pass < 3; pass++) {
+      const before = items.length;
+      wrap.scrollTop = wrap.scrollHeight;
+      const grew = await wait(() => items.length > before);
+      await wait(() => !loadMore._busy && !fillViewport._promise);
+      growth.push(grew && items.length > before && covered());
+      ranges.push(await snapshotRange());
+    }
+    const unique = new Set(items.map(it => it.sha1)).size === items.length;
+    const end = items.length;
+    window.fetch = realFetch; cellHtml = realCellHtml; localStorage.removeItem('fg_cell');
+    return {initial, end, initiallyCovered, growth, unique, ranges};
+  });
+  await scrollPage.close();
+  const rangeOk = infiniteScroll.ranges.every(r => r.first === r.domFirst && r.last === r.domLast &&
+    r.total === 10000 && r.last <= r.loaded && r.page === r.expectedPage && r.pages === r.expectedPages) &&
+    infiniteScroll.ranges.slice(1).every((r, i) => r.first > infiniteScroll.ranges[i].first);
+  check('最小サムネ無限スクロール継続', infiniteScroll.initiallyCovered &&
+    infiniteScroll.growth.every(Boolean) && infiniteScroll.end >= infiniteScroll.initial + 600 &&
+    infiniteScroll.unique,
+    `${infiniteScroll.initial}→${infiniteScroll.end} (${infiniteScroll.growth.join('/')})`);
+  check('現在の表示位置/総数', rangeOk,
+    infiniteScroll.ranges.map(r => `${r.pageText} ${r.text}`).join(' → '));
+
   const p = await b.newPage();
   const jsErrors = [];
   p.on('pageerror', e => jsErrors.push(e.message));
@@ -636,7 +738,8 @@ const check = (name, ok, detail = '') => {
     const shellOk = layout.compact
       ? layout.side.height <= 70 && Math.abs(layout.main.y - layout.side.bottom) <= 2 &&
         layout.top.height <= 66 && layout.side.scrollHeight <= layout.side.clientHeight + 2
-      : layout.side.width >= 160 && layout.side.width <= 280 && layout.main.height >= spec.height - 2;
+      : layout.side.width >= 160 && layout.side.width <= 280 && layout.main.height >= spec.height - 2 &&
+        layout.top.height <= 112;
     check(`${spec.name}(画像領域/横ナビ/タッチ)`, shellOk && layout.coarse && layout.filtersReady &&
       layout.docWidth <= spec.width + 1 && layout.grid.height >= spec.height * .60 &&
       layout.grid.bottom <= spec.height + 1 && layout.first.top >= layout.grid.y - 1 && layout.lastReachable,

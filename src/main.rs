@@ -320,7 +320,7 @@ fn query_shas(app: &App, q: &Q) -> Vec<String> {
     let (cond, args) = build_where(q);
     let db = app.db.lock().unwrap();
     let params: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
-    db.prepare(&format!("SELECT sha1 FROM images WHERE {cond} ORDER BY ingested DESC"))
+    db.prepare(&format!("SELECT sha1 FROM images WHERE {cond} ORDER BY ingested DESC, sha1 DESC"))
         .and_then(|mut st| {
             st.query_map(params.as_slice(), |r| r.get::<_, String>(0))
                 .map(|rows| rows.filter_map(Result::ok).collect())
@@ -456,11 +456,11 @@ async fn api_images(State(app): S, Query(q): Query<Q>) -> Json<Value> {
     let params: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
     // 並び順はホワイトリスト(SQL注入防止)。NULLは常に後ろへ
     let order = match q.sort.as_str() {
-        "old" => "ingested ASC",
-        "quality" => "quality IS NULL, quality DESC, ingested DESC",
-        "big" => "bytes DESC",
-        "cost" => "cost IS NULL, cost DESC, ingested DESC",
-        _ => "ingested DESC",
+        "old" => "ingested ASC, sha1 ASC",
+        "quality" => "quality IS NULL, quality DESC, ingested DESC, sha1 DESC",
+        "big" => "bytes DESC, sha1 DESC",
+        "cost" => "cost IS NULL, cost DESC, ingested DESC, sha1 DESC",
+        _ => "ingested DESC, sha1 DESC",
     };
     let cols = if grid_view { GRID_COLS } else { COLS };
     let items: Vec<Value> = db
@@ -700,7 +700,7 @@ async fn api_images_shas(State(app): S, Query(q): Query<Q>) -> Json<Value> {
     let db = app.db.lock().unwrap();
     let params: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
     let shas: Vec<String> = db
-        .prepare(&format!("SELECT sha1 FROM images WHERE {cond} ORDER BY ingested DESC"))
+        .prepare(&format!("SELECT sha1 FROM images WHERE {cond} ORDER BY ingested DESC, sha1 DESC"))
         .and_then(|mut st| st.query_map(params.as_slice(), |r| r.get::<_, String>(0)).map(|rows| rows.flatten().collect()))
         .unwrap_or_default();
     Json(json!({"total": shas.len(), "shas": shas}))

@@ -82,6 +82,14 @@
   .chips.open { max-height:220px; padding:8px 16px 2px; overflow-y:auto; }
   #chipsbtn .badge { background:var(--acc); color:#fff; border-radius:99px; font-size:10px;
                      padding:0 6px; margin-left:2px; }
+  .resultcount { flex:none; inline-size:210px; contain:layout paint; text-align:right;
+                 white-space:nowrap; color:var(--faint); font-size:11px;
+                 font-variant-numeric:tabular-nums; }
+  .pagecount { flex:none; inline-size:92px; contain:layout paint; text-align:right;
+               white-space:nowrap; color:var(--dim); font-size:11px;
+               font-variant-numeric:tabular-nums; }
+  /* iPad横は詳細枚数を省き、ページ位置を優先してツールバーを2段に保つ。 */
+  @media (min-width:901px) and (max-width:1200px) { .resultcount { display:none; } }
   .chip { font-size:11px; padding:3px 10px; border-radius:999px; border:1px solid var(--hair);
           background:none; color:var(--faint); cursor:pointer; transition:all .15s; }
   .chip:hover { color:var(--tx); border-color:#3a3d4a; }
@@ -488,6 +496,8 @@
       <option value="cost">コスト順</option>
     </select>
     <button class="ghost" id="sortbtn" onclick="cycleSort()" title="クリックで並び順を切替">新しい順</button>
+    <span class="pagecount" id="pagecount" title="現在ページ / 全ページ（1ページは現在の画面に入る枚数）">0 / 0</span>
+    <span class="resultcount" id="resultcount" title="現在表示中 / 現在の条件に一致する総数">表示中 0 / 0枚</span>
     <span class="sp"></span>
     <button class="ghost" id="fsbtn" onclick="fsToggle()"
       title="全画面 — ブラウザのUIごと消して画像だけに(戻る: もう一度押す / Esc)"></button>
@@ -681,6 +691,7 @@ function ic(name, size = 15) {
 let loc = {type: 'lib', key: 'all', criteria: {}};
 let prevLoc = null; // 検索から戻る先
 let items = [], total = 0, sel = new Set(), lastCk = -1;
+let resultFirst = 0, resultLast = 0, resultPageSize = 1; // viewport範囲と現在サイズでの1画面分
 let chipFilters = {tag: '', scene: '', subject: '', style: '', gender: '', framing: '', age_group: '', people_count: '', animal: ''};
 let fchips = {origin: '', q8: false, safe: false, clean: false};
 let albumsCache = [], facetsCache = null, datasetsCache = [];
@@ -1785,14 +1796,20 @@ async function reload(flip) {
   flip ? flipRender() : render(true);
   syncHash();
 }
-async function loadMore() {
-  if (loadMore._busy || loadMore._exhausted || !items.length || items.length >= total || loc.type === 'new') return;
+function loadMore() {
+  // Observer・初期fill・ライトボックス末端が同時に要求しても、同じページを二重取得しない。
+  if (loadMore._promise) {
+    // 場所を移動済みなら旧requestを待った直後に、現在の条件で改めて読む。
+    return loadMore._gen === rgen ? loadMore._promise : loadMore._promise.then(() => loadMore(), () => loadMore());
+  }
+  if (loadMore._exhausted || !items.length || items.length >= total || loc.type === 'new') return Promise.resolve(0);
   loadMore._busy = true;
   const g = rgen;
-  try {
+  loadMore._gen = g;
+  const task = (async () => {
     const offset = loadMore._offset ?? items.length;
     const r = prepareGridPage(await j('/api/images?' + params({limit: 200, offset, view: 'grid'})));
-    if (g !== rgen) return; // 場所が変わった後に届いた追加分は捨てる
+    if (g !== rgen) return 0; // 場所が変わった後に届いた追加分は捨てる
     loadMore._offset = offset + r.items.length;
     loadMore._exhausted = !r.items.length;
     total = r.total;
@@ -1804,7 +1821,18 @@ async function loadMore() {
     // dense時に200件読むたび数千セルを作り直していた。
     updateWindow(true, true);
     drawSelbar();
-  } finally { loadMore._busy = false; }
+    return r.items.length;
+  })().catch(e => {
+    if (g === rgen) toast('❌ 続きを読み込めません: ' + e.message, '再試行', fillViewport);
+    return -1;
+  }).finally(() => {
+    if (loadMore._promise === task) {
+      loadMore._promise = null;
+      loadMore._busy = false;
+    }
+  });
+  loadMore._promise = task;
+  return task;
 }
 // (旧DOM_WIN/trimTop/restoreTop方式は真のrow virtualizationへ置換済み 2026-09-03)
 const MOBILE_WIDTH = 900, LITE_CELL = 110, ATLAS_CELL = 48;
@@ -2052,6 +2080,14 @@ function updateWindow(force, reflow, focusIndex, rowOverride) {
   const ne = Math.min(items.length, (row + visRows + buf) * n);
   const visibleStart = Math.min(items.length, row * n);
   const visibleEnd = Math.min(items.length, (row + visRows) * n);
+  // 表示件数はoverscan窓(vStart/vEnd)でなく、本当にviewportと交差する行を示す。
+  // 既に得たscrollTop/列数/行高だけで算出し、scroll中の追加geometry readは行わない。
+  const gap = ch - cellPx;
+  const viewTop = gw.scrollTop - contentTop();
+  const viewBottom = viewTop + H;
+  const firstRow = Math.max(0, Math.floor((viewTop + gap) / ch)); // 行間gapなら次の行から
+  const endRow = Math.max(0, Math.ceil(viewBottom / ch));
+  drawResultCount(Math.min(items.length, firstRow * n), Math.min(items.length, endRow * n), visRows * n);
   if (cellPx <= ATLAS_CELL && !fchips.seg) {
     if (visibleStart === 0) gridScrollDir = 1;
     else if (visibleEnd >= items.length) gridScrollDir = -1;
@@ -2248,6 +2284,7 @@ $('grid').addEventListener('error', e => {
     fallbackAtlasPage(it?._atlas);
   } else im.style.visibility = 'hidden';
 }, true);
+const LOAD_MORE_MARGIN = 700;
 { // スクロールでrAF更新(1フレーム1回)。高速移動中の新規画像decodeは停止後にまとめる。
   let raf = 0, settleRaf = 0, scrollEpoch = 0;
   const gw = $('gridwrap');
@@ -2255,6 +2292,7 @@ $('grid').addEventListener('error', e => {
   const finishScroll = () => {
     if (!gridScrolling) return;
     gridScrolling = false;
+    drawResultCount(); // 移動中は省いた細かな枚数範囲を、停止直後に確定する
     hydrateGridImages();
   };
   const waitForQuietFrames = (epoch, frames = 0) => {
@@ -2272,7 +2310,13 @@ $('grid').addEventListener('error', e => {
     const epoch = ++scrollEpoch;
     cancelAnimationFrame(settleRaf);
     waitForQuietFrames(epoch);
-    if (!raf) raf = requestAnimationFrame(() => { raf = 0; updateWindow(false); });
+    if (!raf) raf = requestAnimationFrame(() => {
+      raf = 0;
+      updateWindow(false);
+      // Observerが「帯の外」を観測する前に次のscrollが来ても、末端ロードを取りこぼさない。
+      if (items.length < total && gw.scrollHeight - gw.scrollTop - gw.clientHeight <= LOAD_MORE_MARGIN + 160)
+        fillViewport();
+    });
   }, {passive: true});
 }
 function render(fresh, from = 0, instant = false) {
@@ -2299,13 +2343,25 @@ function render(fresh, from = 0, instant = false) {
   }
   drawSelbar();
 }
-// 画面+先読み分が埋まるまで明示的に読み足す(sentinelが発火しないケースの保険)
-async function fillViewport() {
-  const gw = $('gridwrap');
-  for (let i = 0; i < 6 && items.length < total; i++) {
-    if (gw.scrollHeight > gw.clientHeight + 1400) break;
-    await loadMore();
+// Observerの監視帯より先まで必ず読み足す。監視点が帯の中に残ったままだと交差状態が
+// 変わらず、最小表示では初回1400件で永久停止していた。
+function fillViewport() {
+  if (fillViewport._promise) {
+    return fillViewport._gen === rgen ? fillViewport._promise : fillViewport._promise.then(() => fillViewport(), () => fillViewport());
   }
+  const g = rgen, gw = $('gridwrap');
+  fillViewport._gen = g;
+  const task = (async () => {
+    // 固定ページ数では超横長/縦長画面で不足する。実際の監視点が帯を出るまで続ける。
+    while (g === rgen && !loadMore._exhausted && items.length < total &&
+           $('more').getBoundingClientRect().top <= gw.getBoundingClientRect().bottom + LOAD_MORE_MARGIN) {
+      const before = loadMore._offset ?? items.length;
+      const loaded = await loadMore();
+      if (g !== rgen || loaded < 0 || (loadMore._offset ?? items.length) <= before) break;
+    }
+  })().finally(() => { if (fillViewport._promise === task) fillViewport._promise = null; });
+  fillViewport._promise = task;
+  return task;
 }
 function openLbSha(sha) { const i = items.findIndex(x => x.sha1 === sha); if (i >= 0) openLb(i); }
 function ckSelSha(sha, e) { const i = items.findIndex(x => x.sha1 === sha); if (i >= 0) ckSel(i, e); }
@@ -2332,6 +2388,37 @@ function drawSelbar() {
   $('selbar').classList.toggle('show', sel.size > 0);
   document.body.classList.toggle('selmode', sel.size > 0);
   $('selcount').textContent = sel.size;
+  drawResultCount();
+}
+function drawResultCount(first = resultFirst, last = resultLast, pageSize = resultPageSize) {
+  const el = $('resultcount'), pel = $('pagecount');
+  if (!el || !pel) return;
+  first = Math.max(0, Math.min(items.length, first));
+  last = Math.max(first, Math.min(items.length, last));
+  pageSize = Math.max(1, Math.round(pageSize));
+  if (!items.length || first >= last) first = last = 0;
+  resultFirst = first; resultLast = last; resultPageSize = pageSize;
+  const pages = total ? Math.ceil(total / pageSize) : 0;
+  // 画面がページ境界をまたぐ時は、上端でなく画面中央の画像を現在ページとする。
+  const center = first < last ? first + Math.floor((last - first - 1) / 2) : 0;
+  const page = first < last ? Math.min(pages, Math.floor(center / pageSize) + 1) : 0;
+  // 移動中は1画面ごとにしか変わらないページ番号だけ更新。行ごとの長い文字列paintを画像と競合させない。
+  const pageKey = `${page}:${pages}:${pageSize}`;
+  if (drawResultCount._pageKey !== pageKey) {
+    drawResultCount._pageKey = pageKey;
+    pel.textContent = `${page.toLocaleString()} / ${pages.toLocaleString()}`;
+    pel.title = `現在 ${page.toLocaleString()}ページ目 / 全${pages.toLocaleString()}ページ（1画面 約${pageSize.toLocaleString()}枚）`;
+  }
+  if (gridScrolling) return;
+  // 正確な範囲と読込済み枚数は停止直後またはデータ変更時だけ書く。
+  const detailKey = `${first}:${last}:${total}:${items.length}`;
+  if (drawResultCount._detailKey === detailKey) return;
+  drawResultCount._detailKey = detailKey;
+  const matched = total.toLocaleString();
+  const range = first < last ? `${(first + 1).toLocaleString()}–${last.toLocaleString()}` : '0';
+  pel.title = `現在 ${page.toLocaleString()}ページ目 / 全${pages.toLocaleString()}ページ（1画面 約${pageSize.toLocaleString()}枚）/ 表示中 ${range}枚 / 全${matched}枚`;
+  el.textContent = `表示中 ${range} / ${matched}枚`;
+  el.title = `現在表示中 ${range}枚 / 条件に一致 ${matched}枚 / 読み込み済み ${items.length.toLocaleString()}枚`;
 }
 function selectAllShown() { items.forEach(it => setSel(it.sha1, true)); drawSelbar(); }
 function clearSel() { [...sel].forEach(s => setSel(s, false)); sel.clear(); drawSelbar(); }
@@ -3897,6 +3984,7 @@ async function liveDrop(album, n) {
       anchor.index += fresh.length;
       restoreCellAnchor(anchor, false);
     } else updateWindow(true);
+    drawResultCount();
     if (vStart === 0) { // 先頭が見えている時だけ「ぽとっ」と落ちる演出
       [...$('grid').children].slice(0, fresh.length).forEach((el, k) => {
         el.classList.add('drop');
@@ -4040,8 +4128,8 @@ async function watchActivity() {
 }
 
 // ================= キーボード / 無限スクロール / 起動 =================
-new IntersectionObserver(es => { if (es[0].isIntersecting) loadMore(); },
-  {root: $('gridwrap'), rootMargin: '700px'}).observe($('more'));
+new IntersectionObserver(es => { if (es.some(e => e.isIntersecting)) fillViewport(); },
+  {root: $('gridwrap'), rootMargin: LOAD_MORE_MARGIN + 'px'}).observe($('more'));
 // ================= キーボードカーソル(Finder流 2026-09-03要望) =================
 // 矢印=カーソル移動 / Shift+矢印=範囲選択しながら移動 / Space=クイックルック開閉 / X・Enter=選択トグル
 let curSha = null;
