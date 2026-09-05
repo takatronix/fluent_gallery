@@ -2295,7 +2295,10 @@ const lbView = {
   },
 };
 let rgen = 0; // reload世代: ナビ連打時に遅い古の応答が新しい場所を上書きする追い越し事故の防止
+// 設定/棚ページ(文書モード)を、裏の更新(属性付け完了・生成終了・リサイズ)が呼ぶサムネ描画で上書きしない
+function pageMode() { return loc.type === 'settings' || loc.type === 'lora'; }
 async function reload(flip) {
+  if (pageMode()) return;
   const g = ++rgen;
   if (loc.type === 'trash') { // ゴミ箱は別世界(索引でなく退避層を直接見る)
     const list = await j('/api/trash');
@@ -2589,6 +2592,7 @@ function contentTop() { // スクロール座標系でのスペーサー上端�
   return gridPadTop(); // .gridwrap の padding-top
 }
 function updateWindow(force, reflow, focusIndex, rowOverride) {
+  if (pageMode()) return;
   const gw = $('gridwrap'), g = $('grid');
   if (!items.length) return;
   const n = gridCols(), ch = cellPitch(), H = gw.clientHeight;
@@ -2846,6 +2850,7 @@ const LOAD_MORE_MARGIN = 700;
   }, {passive: true});
 }
 function render(fresh, from = 0, instant = false) {
+  if (pageMode()) return;
   if (fresh) {
     vStart = vEnd = 0;
     $('gridspacer').style.height = '0';
