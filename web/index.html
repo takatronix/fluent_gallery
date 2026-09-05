@@ -1467,10 +1467,20 @@ async function renderLora() {
     </div>
     <div class="hint" style="margin-bottom:10px">.safetensors ファイルをこのページに落としても取り込めます。Civitai のダウンロードには API キーが要ることがあります(設定 → API キー)。
       ${st.importing ? `<span class="ok">取得中: ${esc(st.name)} ${st.total_mb ? Math.round(100 * st.got_mb / st.total_mb) + '%' : st.got_mb + 'MB'}</span>` : st.last ? `<span class="note">${esc(st.last)}</span>` : ''}</div>
-    ${loraCache.length ? `<div class="lgrid">${loraCache.map(card).join('')}</div>` : `<div class="empty"><div class="big">${ic('layers', 44)}</div>まだ空です。URL を貼るか、ファイルを落としてください。</div>`}
+    ${loraTabsHtml()}
+    ${loraCache.length ? (loraShown().length ? `<div class="lgrid">${loraShown().map(card).join('')}</div>` : `<div class="empty">この親モデル用の LoRA はまだありません</div>`) : `<div class="empty"><div class="big">${ic('layers', 44)}</div>まだ空です。URL を貼るか、ファイルを落としてください。</div>`}
   </div>`;
   if (st.importing || st.probing) setTimeout(() => { if (loc.type === 'lora') renderLora(); }, 3000);
 }
+// 親モデルごとのタブ(2026-09-05 指示「何を持っているか見たい」)。klein 用 / Z-Image 用 / Qwen 用 / 非対応
+let loraTab = (() => { try { return localStorage.getItem('fg_lora_tab') || 'all'; } catch (e) { return 'all'; } })();
+const LORA_TABS = [['all', 'すべて'], ['flux2-klein-4b', 'klein 4B'], ['z-image-turbo', 'Z-Image'], ['qwen-image-edit-2509', 'Qwen-Image'], ['none', '非対応']];
+function loraShown() { return loraCache.filter(it => loraTab === 'all' ? true : loraTab === 'none' ? !it.model : it.model === loraTab); }
+function loraTabsHtml() {
+  const count = key => loraCache.filter(it => key === 'all' ? true : key === 'none' ? !it.model : it.model === key).length;
+  return `<div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:12px">${LORA_TABS.map(([k, label]) => `<span class="engchip ${loraTab === k ? 'on' : ''}" onclick="setLoraTab('${k}')" title="${k === 'none' ? '内蔵モデルに載らない(FLUX.1 / SDXL 等)' : k === 'all' ? '棚の全部' : label + ' で使える LoRA'}">${esc(label)} <span style="opacity:.6">${count(k)}</span></span>`).join('')}</div>`;
+}
+function setLoraTab(k) { loraTab = k; try { localStorage.setItem('fg_lora_tab', k); } catch (e) {} renderLora(); }
 async function loraImport() {
   const url = $('lora_url')?.value.trim(); if (!url) return toast('URL をください');
   try {
@@ -1756,13 +1766,14 @@ function genHeadHtml(a, isNew) {
     </div>
     <div class="frow" style="flex-wrap:wrap">
       <span class="lbl" title="棚の LoRA を着せる(親モデルが合う物だけ候補に出る)。強さは 0.05〜2">LoRA</span>
-      ${(r.lora || []).map((x, i) => `<span class="refchip" title="${esc(x.file)}.safetensors">${ic('layers', 12)} ${esc((loraCache.find(l => l.file === x.file) || {}).name || x.file)}
+      ${(r.lora || []).map((x, i) => { const L = loraCache.find(l => l.file === x.file) || {}; const bad = L.model && L.model !== curModel;
+        return `<span class="refchip" style="${bad ? 'border-color:#e06c75; color:#e06c75' : ''}" title="${esc(x.file)}.safetensors${bad ? '\n⚠ ' + esc(LORA_BASE_LABEL[L.base] || L.base) + ' 用の LoRA。' + esc((spec.label || curModel).split('(')[0]) + ' では効かないので生成時に外されます' : ''}">${bad ? '⚠ ' : ''}${ic('layers', 12)} ${esc(L.name || x.file)}
         <input type="number" value="${x.scale ?? 1}" min="0.05" max="2" step="0.1" style="width:52px; padding:1px 4px; font-size:11px" ${isNew ? '' : `onchange="genLoraScale(${i}, this.value)"`} title="強さ">
-        ${isNew ? '' : `<span class="rm" onclick="genLoraRemove(${i})">${ic('x', 11)}</span>`}</span>`).join('')}
+        ${isNew ? '' : `<span class="rm" onclick="genLoraRemove(${i})">${ic('x', 11)}</span>`}</span>`; }).join('')}
       ${isNew ? `<span class="lbl" style="width:auto">(作成後に棚から選べます)</span>` : `
       <select id="ah_lorapick" onchange="genLoraAdd(this)" title="棚の LoRA を足す">
         <option value="">＋ LoRA を足す…</option>
-        ${loraCache.filter(l => l.model === curModel || (l.base === 'unknown')).filter(l => !(r.lora || []).some(x => x.file === l.file)).map(l => `<option value="${esc(l.file)}">${esc(l.name || l.file)}${l.triggers?.length ? ' (' + esc(l.triggers[0]) + ')' : ''}</option>`).join('')}
+        ${loraCache.filter(l => l.model === curModel).filter(l => !(r.lora || []).some(x => x.file === l.file)).map(l => `<option value="${esc(l.file)}">${esc(l.name || l.file)}${l.triggers?.length ? ' (' + esc(l.triggers[0]) + ')' : ''}</option>`).join('')}
       </select>
       <span class="lbl" style="width:auto">${loraCache.length ? '' : '棚が空です — サイドバー「棚 › LoRA」で取り込み'}</span>`}
     </div>
@@ -1839,7 +1850,7 @@ async function runGenNow() {
   try {
     const r = await j('/api/gen', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({album: loc.key, n})});
-    toast(`生成開始(+${n}枚目標) — 初回はモデル取得(7.1GB)とエンジン起動で数分かかります`);
+    toast(r.dropped_lora?.length ? `生成開始(+${n}枚目標) — 親モデル違いの LoRA を外しました: ${r.dropped_lora.join(', ')}` : `生成開始(+${n}枚目標) — 初回はモデル取得とエンジン起動で数分かかります`);
     await loadAlbums(); renderViewhead();
   } catch (e) { toast('❌ ' + e.message); }
 }
@@ -2063,6 +2074,12 @@ function headAutoSave() {
     const isGen = src.kind === 'gen';
     if (goal && !isGen && (!criteria.source || criteria.source.startsWith('crawl:'))) criteria.source = 'crawl:' + loc.key;
     const recipe = isGen ? {...(src.recipe || {}), size: $('ah_size')?.value || src.recipe?.size || '1024x1024', model: $('ah_model')?.value || src.recipe?.model || ''} : undefined;
+    let droppedLora = [];
+    if (isGen && recipe.lora?.length) { // 使えない LoRA を持たせない: モデルを変えたら親モデルが合わない物は外す
+      const m = recipe.model || lastAI?.gen?.default || 'flux2-klein-4b';
+      droppedLora = recipe.lora.filter(x => { const L = loraCache.find(l => l.file === x.file); return L && L.model !== m; });
+      if (droppedLora.length) recipe.lora = recipe.lora.filter(x => !droppedLora.includes(x));
+    }
     const min_quality = isGen ? Math.min(10, Math.max(1, parseInt($('ah_minq')?.value) || 5)) : (src.agent?.min_quality);
     try {
       const engines = isGen ? (src.engines || []) : engPick();
@@ -2072,6 +2089,7 @@ function headAutoSave() {
                   judge_model: $('ah_judge')?.value ?? (src.agent?.judge_model || ''), ...(min_quality ? {min_quality} : {})},
           keywords, engines, criteria, kind: src.kind || '', recipe})});
       src.goal = goal; src.keywords = keywords; if (recipe) src.recipe = recipe;
+      if (droppedLora.length) { toast(`モデルを変えたので、合わない LoRA を外しました: ${droppedLora.map(x => x.file).join(', ')}`); renderViewhead(); }
       src.agent = {...(src.agent || {}), target, batch, budget_usd, ...(min_quality ? {min_quality} : {}),
                    judge_model: $('ah_judge')?.value ?? (src.agent?.judge_model || '')}; src.engines = engines;
       toast('保存しました');

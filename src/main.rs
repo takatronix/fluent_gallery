@@ -2733,11 +2733,16 @@ fn start_gen(app: &'static App, album: &str, n: usize, minutes: u64) -> Result<S
         }
         refs.fixed.truncate(4);
     }
-    // LoRA(G4): recipe.lora = [{file(stem), scale}]。棚に実在する物だけ
+    // LoRA(G4): recipe.lora = [{file(stem), scale}]。棚に実在し、親モデルが選んだモデルに合う物だけ(klein 用を Qwen に着せない)
+    let mut dropped_lora: Vec<String> = vec![];
     let lora_list: Vec<(String, f32)> = recipe["lora"].as_array().map(|a| a.iter().filter_map(|x| {
         let f = lora::safe_stem(x["file"].as_str()?);
-        lora::file_path(&app.root, &f).exists().then(|| (f, x["scale"].as_f64().unwrap_or(1.0).clamp(0.05, 2.0) as f32))
+        if !lora::file_path(&app.root, &f).exists() { return None; }
+        let base = lora::load_meta(&app.root, &f)["base"].as_str().map(String::from).unwrap_or_else(|| lora::base_from_text(&f).to_string());
+        if lora::model_for_base(&base) != Some(model.as_str()) { dropped_lora.push(format!("{f}({base}用)")); return None; } // 親モデル不明は klein 用扱い
+        Some((f, x["scale"].as_f64().unwrap_or(1.0).clamp(0.05, 2.0) as f32))
     }).take(4).collect()).unwrap_or_default();
+    if !dropped_lora.is_empty() { println!("🧬 親モデル違いで外した LoRA: {}", dropped_lora.join(", ")); }
     let st = app.gen.clone();
     st.alive.store(true, Relaxed);
     st.stop.store(false, Relaxed);
@@ -2748,12 +2753,15 @@ fn start_gen(app: &'static App, album: &str, n: usize, minutes: u64) -> Result<S
     *st.last.lock().unwrap() = "起動中…".into();
     let limits = gen::Limits { max_n: n.clamp(1, 2000), max_secs: minutes.clamp(1, 720) * 60, w: snap(w), h: snap(h), steps, min_quality };
     tokio::spawn(gen::run(app.root.clone(), app.http.clone(), st, app.llm.clone(), app.enrich.clone(), slug.clone(), goal, model, refs, lora_list, limits));
+    *LAST_DROPPED_LORA.lock().unwrap() = dropped_lora;
     Ok(slug)
 }
+/// 直近の ▶ で親モデル違いのため外した LoRA(UI のトーストに出す)
+static LAST_DROPPED_LORA: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 async fn api_gen(State(app): S, Json(g): Json<GenIn>) -> impl IntoResponse {
     match start_gen(app, &g.album, g.n, g.minutes) {
-        Ok(slug) => Json(json!({"ok": true, "album": slug})).into_response(),
+        Ok(slug) => Json(json!({"ok": true, "album": slug, "dropped_lora": LAST_DROPPED_LORA.lock().unwrap().clone()})).into_response(),
         Err((code, msg)) => (code, Json(json!({"detail": msg}))).into_response(),
     }
 }
