@@ -25,6 +25,10 @@ pub async fn local_vlm_ok(client: &reqwest::Client) -> bool {
     client.get(health).timeout(std::time::Duration::from_secs(2)).send().await.map(|r| r.status().is_success()).unwrap_or(false)
 }
 /// 属性付け/目利きに使える VLM が何かしらあるか(内蔵 llama-server / ollama / OpenAI キー)。常駐の空振り抑止に使う
+/// サイドカーに記録する内蔵VLMの名前(実際に使った方): 同梱 llama-server なら Qwen3-VL、無ければ ollama のモデル名
+pub fn builtin_label() -> String {
+    if local_vlm_base().is_some() { format!("builtin/{}", crate::vlm::MODEL_FILE.trim_end_matches(".gguf")) } else { format!("builtin/{BUILTIN_MODEL}") }
+}
 pub async fn any_vlm_available(client: &reqwest::Client) -> bool {
     if local_vlm_ok(client).await { return true; }
     if client.get(format!("{OLLAMA}/api/tags")).timeout(std::time::Duration::from_secs(1)).send().await.map(|r| r.status().is_success()).unwrap_or(false) { return true; }

@@ -938,7 +938,11 @@ function renderSide() {
        onclick="openFolder(this.dataset.album)">
       <span class="kic ${a.kind === 'gen' ? 'gen' : a.goal ? 'crawl' : ''}">${ic(a.kind === 'gen' ? 'wand' : a.goal ? 'globe' : 'smart')}</span><span class="nm"
         ondblclick="startRename(event, 'album', this.closest('.nav').dataset.album)">${esc(a.name)}</span>
-      ${a.running ? `<span class="st live" title="${a.running_kind === 'gen' ? '生成中' : '収集中'}">${ic('play', 11)}</span>` : (a.agent?.auto ? `<span class="st">${ic('loop', 11)}</span>` : '')}
+      ${a.running ? `<span class="st live" title="${a.running_kind === 'gen' ? '生成中' : '収集中'}">${ic('play', 11)}</span>`
+        : !a.agent?.auto ? ''
+        : (a.count ?? 0) >= (a.agent?.target || 200)
+          ? `<span class="st" style="opacity:.45" title="自動: 目標 ${a.agent?.target || 200} 枚に達したので休止中(『まで』を上げるか +200 で再開)">${ic('check', 11)}</span>`
+          : `<span class="st" title="自動${a.kind === 'gen' ? '生成' : '収集'}: 30分ごとに見回り、あと ${(a.agent?.target || 200) - (a.count ?? 0)} 枚を補充">${ic('loop', 11)}</span>`}
       <span class="n">${(a.agent?.spent_usd || 0) > 0
         ? `${a.count ?? 0} · <span style="color:#e5c07b; cursor:pointer" onclick="cycleCostMode(event)"
              title="このフォルダの累計消費(クリックで トークン/$/¥ 切替)">${fmtCost(a.agent?.spent_tok, a.agent.spent_usd)}</span>`
@@ -1743,6 +1747,7 @@ function genHeadHtml(a, isNew) {
         title="ONの間は30分ごとに見回り、目標枚数に足りなければ1回ぶん作ります(夜間の量産向き)。OFFでも「今すぐ1回作る」はいつでも押せます">
         <span class="track"></span>自動生成</span>
       <span class="lbl" id="ah_cycle" style="width:auto; color:var(--faint)" title="見回りの周期と次回時刻(サーバの実測)">${a.agent?.auto ? '30分ごと' : ''}</span>
+      ${progChip(a)}
       <button class="ghost" onclick="$('viewhead').classList.toggle('open')" title="設定(作る物/枚数/サイズ/参照)を開閉">${ic('chevD', 14)}</button>`}
       <button class="ghost" onclick="go({type:'lib', key:'all', criteria:{}})">${ic('x', 13)}</button>
     </div>
@@ -1929,9 +1934,10 @@ function folderHeadHtml(a, isNew) {
         title="このフォルダの累計消費(クリックで トークン/$/¥ 切替) / 上限$${a.agent?.budget_usd ?? 3}(設定欄で変更)">
         ${fmtCost(a.agent?.spent_tok, a.agent?.spent_usd)}<span style="color:var(--faint)"> / $${a.agent?.budget_usd ?? 3}</span></span>` : ''}
       <span class="switch ${a.agent?.auto ? 'on' : ''}" onclick="toggleAutoHead()"
-        title="ONの間は30分ごとに見回り、目標枚数に足りなければ1回ぶん(既定30枚・最長15分)集めます。消して減ってもまた埋めます">
+        title="ONの間は30分ごとに見回り、目標枚数に足りなければ1回ぶん(既定30枚・最長15分)集めます。目標に達すると休止(増やすには『まで』を上げる)。消して減ってもまた埋めます。古い画像を消すことはありません">
         <span class="track"></span>自動収集</span>
       <span class="lbl" id="ah_cycle" style="width:auto; color:var(--faint)" title="見回りの周期と次回時刻(サーバの実測)">${a.agent?.auto ? '30分ごと' : ''}</span>
+      ${progChip(a)}
       <span class="switch ${a.agent?.rights_clean ? 'on' : ''}" onclick="toggleCleanHead()"
         title="ONの間はCC/公式APIの検索元(Openverse/Wikimedia/Pexels/Pixabay)だけで集めます。DDG/YouTube/Xは権利不明のため使いません(サーバー側で強制)">
         <span class="track"></span>${a.agent?.rights_clean ? '🟢' : ''}権利クリーン</span>
@@ -2087,6 +2093,25 @@ async function createFolder() {
   } catch (e) { toast('❌ ' + e.message); }
 }
 // 自動保存(既存のみ・800msデバウンス・パネル再描画なし=フォーカス維持)
+// 目標に対する進み具合。自動ONで目標に達していると見回りは何もしないので、それを言葉で出し「+200」で上げられるようにする
+// (「200で止まってるのに自動が動かない」「古い画像を消してるの?」という誤解の元。目標は自動補充の上限であって、削除はしない)
+function progChip(a) {
+  const count = a.count ?? 0, target = a.agent?.target || 200, done = count >= target;
+  const auto = !!a.agent?.auto;
+  const state = done ? (auto ? '目標に達したので自動は休止中' : '目標に達しています') : (auto ? `あと${target - count}枚を自動で補充` : '');
+  return `<span class="lbl" style="width:auto; color:${done ? 'var(--tx)' : 'var(--faint)'}"
+      title="目標は自動補充の上限です(超えた分を消したりはしません)。▶や「今すぐ1回」は目標に関係なく1回ぶん追加します">${count.toLocaleString()} / ${target.toLocaleString()} 枚${state ? ' · ' + state : ''}</span>
+    ${done ? `<button class="ghost" style="font-size:11px; padding:1px 8px" onclick="bumpTarget(200)" title="目標を200枚増やす(自動ONならその分を補充し始めます)">+200</button>` : ''}`;
+}
+async function bumpTarget(n) {
+  const a = albumsCache.find(x => x.name === loc.key); if (!a) return;
+  const t = (a.agent?.target || 200) + n;
+  const inp = $('ah_target'); if (inp) inp.value = t;
+  a.agent = {...(a.agent || {}), target: t};
+  headAutoSave();
+  setTimeout(() => { loadAlbums(); renderViewhead(); }, 1200);
+  toast(`目標を ${t} 枚にしました` + (a.agent?.auto ? ' — 次の見回りから補充します' : ''));
+}
 function headAutoSave() {
   clearTimeout(window._ahT);
   window._ahT = setTimeout(async () => {

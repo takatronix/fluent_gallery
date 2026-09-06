@@ -3458,7 +3458,7 @@ async fn api_enrich(State(app): S, Json(e): Json<EnrichIn>) -> impl IntoResponse
             match enrich::describe(&client, &path, &backend).await {
                 Ok(v) => {
                     m["vlm"] = json!({
-                        "model": if backend == "builtin" { format!("builtin/{}", enrich::BUILTIN_MODEL) } else { backend.clone() },
+                        "model": if backend == "builtin" { enrich::builtin_label() } else { backend.clone() },
                         "ts": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64(),
                         "caption": v["caption"], "tags": v["tags"], "attrs": v["attrs"],
                     });
@@ -3508,7 +3508,7 @@ async fn api_enrich_one(State(app): S, Json(e): Json<EnrichOneIn>) -> impl IntoR
     match enrich::describe(&app.http, &path, &backend).await {
         Ok(v) => {
             m["vlm"] = json!({
-                "model": if backend == "builtin" { format!("builtin/{}", enrich::BUILTIN_MODEL) } else { backend },
+                "model": if backend == "builtin" { enrich::builtin_label() } else { backend },
                 "ts": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64(),
                 "caption": v["caption"], "tags": v["tags"], "attrs": v["attrs"],
             });
@@ -3976,6 +3976,10 @@ async fn main() {
                 continue;
             }
             if app.crawl.alive.load(Relaxed) || app.enrich.alive.load(Relaxed) {
+                continue;
+            }
+            if app.gen.alive.load(Relaxed) { // 生成中は内蔵VLMを譲る(api_enrich が 409 を返すので、開始ログも出さない)
+                app.set_worker("groom", false, "生成中は待機".into());
                 continue;
             }
             let missing: i64 = {
