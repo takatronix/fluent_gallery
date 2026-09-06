@@ -221,7 +221,7 @@ pub fn phash64(img: &image::DynamicImage) -> String {
 }
 
 /// 平均色(即時表示プレースホルダ用の魔法の種)
-fn tint(img: &image::DynamicImage) -> String {
+pub(crate) fn tint(img: &image::DynamicImage) -> String {
     let t = img.thumbnail(8, 8).to_rgb8();
     let (mut r, mut g, mut b, mut n) = (0u32, 0u32, 0u32, 0u32);
     for p in t.pixels() {

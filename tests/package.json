@@ -8,6 +8,7 @@
     "test:filters": "node folder_filters.js",
     "test:auto": "node auto_adjust.js",
     "test:edit-race": "node edit_metadata_race.js",
+    "test:studio": "node studio_save.js && node studio_editor.js",
     "perf:thumb": "node thumbnail_perf.js"
   },
   "keywords": [],

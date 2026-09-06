@@ -3603,7 +3603,8 @@ $('lbbar').innerHTML = `
       onclick="event.stopPropagation()" onkeydown="if(event.key==='Enter'){event.preventDefault(); lbFaceEnroll();}">
     <button class="ghost" onclick="event.stopPropagation(); lbFaceEnroll()">${ic('check', 12)} 登録</button>
   </span>
-  <button class="ghost" id="edbtn" onclick="edToggle()" title="非破壊調整のOn/Off (E)">${ic('sliders', 13)} 編集</button>
+  <button id="lbstudiobtn" onclick="studioOpen()" title="fluent_sceneのフィルターエディターでこの画像を開く">${ic('wand', 13)} フィルター</button>
+  <button class="ghost" id="edbtn" onclick="edToggle()" title="露出・色調・クロップの調整 (E)">${ic('sliders', 13)} 写真調整</button>
   <button class="ghost" onclick="immToggle()" title="全画面 — UIを消して画像だけ(戻る: クリック/Space/Esc)">${ic('box', 13)} 全画面</button>
   <button class="ghost" id="lbsel" onclick="lbSel()" title="選択に加える (X)">${ic('circle', 13)} 選択</button>
   <button class="ghost" id="edcompare" style="display:none"
@@ -3853,6 +3854,7 @@ function lbMorphOpen(sha) {
   setTimeout(reveal, 900); // 保険: 読み込みが遅くても必ず出す
 }
 function closeLb() {
+  if (typeof studioClose === 'function') studioClose();
   const lb = $('lb');
   if (!lb.classList.contains('show')) return;
   ++lbContext; lbView.cancelPending(); lbView.comparing = false;
@@ -4166,7 +4168,9 @@ const ED_LABEL = {adjust: '調整', auto: '自動', filter: 'フィルタ', rota
 function edHist(list) {
   $('edhist').innerHTML = list.length
     ? '履歴: ' + list.map(e => `<span class="tag">${ED_LABEL[e.op] || e.op}${e.op === 'filter' ? ' ' + (e.params?.name || '') : ''}</span>`).join('') + ' <span style="opacity:.6">(原本は不変・1手ずつ戻せます)</span>'
-    : '<span style="opacity:.6">履歴なし = 原本そのまま</span>';
+    : lbMeta?.filter_source_sha || lbMeta?.studio?.source_sha
+      ? '<span style="opacity:.6">フィルター加工済み画像 · 「原本に戻す」で元画像を開きます</span>'
+      : '<span style="opacity:.6">履歴なし = 原本そのまま</span>';
 }
 const edQueues = new Map(), edEpoch = new Map(), edStates = new Map();
 function edSyncStatus() {
@@ -4244,7 +4248,54 @@ function edAuto() {
   return edPush({op: 'auto', params: {version: 3}});
 }
 function edUndo() { return edMutate({action: 'pop'}); }
-function edClear() { return edMutate({action: 'clear'}); }
+async function edClear() {
+  const sha = items[lbIdx]?.sha1, context = lbContext;
+  if (!sha) return false;
+  try {
+    await edQueues.get(sha);
+    if (context !== lbContext || items[lbIdx]?.sha1 !== sha) return false;
+    $('edstatus').textContent = '元画像を確認しています…';
+    const original = await j('/api/original/' + sha);
+    if (context !== lbContext || items[lbIdx]?.sha1 !== sha) return false;
+    if (!original.derived) return edMutate({action: 'clear'});
+    // Baked pixels have no edit stack to undo. Follow provenance and select the
+    // retained source; never overwrite a content-addressed filtered PNG.
+    let index = items.findIndex(it => it.sha1 === original.sha1);
+    if (index < 0) {
+      await go({type: 'source', key: original.meta.source, criteria: {source: original.meta.source}});
+      if (context !== lbContext) return false;
+      index = items.findIndex(it => it.sha1 === original.sha1);
+      if (index < 0) {
+        // The source may be older than the first page or hidden by a search chip.
+        // Pin the explicitly opened image without loading an entire folder.
+        items.unshift({...original.meta, erev: original.meta.edits?.length ? original.meta.edits_rev : null});
+        total = Math.max(total, items.length);
+        render(true);
+        index = 0;
+      }
+    }
+    await lbShow(index, 0);
+    if (items[lbIdx]?.sha1 !== original.sha1) return false;
+    const targetContext = lbContext;
+    lbSegOn = false;
+    $('lbsegbtn').classList.remove('on');
+    $('segfix').style.display = 'none';
+    if (lbMeta?.edits?.length) {
+      if (!await edMutate({action: 'clear'})) return false;
+    } else if (!await lbView.original(original.sha1)) return false;
+    if (targetContext !== lbContext || items[lbIdx]?.sha1 !== original.sha1) return false;
+    edReset();
+    const state = edStates.get(original.sha1) || {pending: 0, activeAuto: false};
+    state.message = '元画像に戻りました（加工画像も保持しています）';
+    edStates.set(original.sha1, state);
+    edSyncStatus(); syncHash();
+    return true;
+  } catch (error) {
+    if (context === lbContext) $('edstatus').textContent = error.message;
+    toast('❌ ' + error.message);
+    return false;
+  }
+}
 async function edApplyAdjust() {
   const v = edVals();
   if (!Object.keys(v).length) return toast('スライダを動かしてから適用');
@@ -4839,6 +4890,7 @@ function hoverPvHide() {
     .onfinish = () => pv.style.display = 'none';
 }
 
+const album_slug_js = v => String(v || '').trim();
 function crawlRelevant(album) {
   return (loc.type === 'lib' && loc.key === 'all') ||
     (loc.type === 'folder' && loc.criteria.source === 'crawl:' + album) ||
@@ -4858,9 +4910,18 @@ function watchGenPart(s) {
       if (s.queue?.length) $('gn_prog').innerHTML += ` <span style="color:var(--faint)" title="順番待ち: ${esc(s.queue.join(', '))}">⏳ 順番待ち ${s.queue.length}</span>`;
       const pv = '/api/gen/preview?t=' + Date.now();
       $('gn_prev').src = pv;
-      const ap = document.getElementById('ah_prev'); if (ap) ap.src = pv;
+      // 開いているフォルダの実況欄には、そのフォルダが生成している時だけ出す。
+      // 別フォルダの状態を書き込むと「タスクが混ざった」ように見える(実際は別々に走っている)
+      const mine = loc.type === 'folder' && album_slug_js(loc.key) === album_slug_js(s.album);
+      const ap = document.getElementById('ah_prev');
+      if (ap) { ap.src = mine ? pv : ''; ap.style.display = mine ? '' : 'none'; }
       if (hoverPv._el && (hoverPv._el === ap || hoverPv._el.id === 'gn_prev')) $('hoverpv_img').src = pv; // 拡大表示中も追従
-      const an = document.getElementById('ah_now'); if (an) an.innerHTML = `${s.steps > 0 ? `${s.step}/${s.steps} ステップ · ` : ''}${esc(s.prompt || s.last || '')}`;
+      const an = document.getElementById('ah_now');
+      if (an) an.innerHTML = mine
+        ? `${s.steps > 0 ? `${s.step}/${s.steps} ステップ · ` : ''}${esc(s.prompt || s.last || '')}`
+        : (s.queue || []).some(q => album_slug_js(q) === album_slug_js(loc.key))
+          ? `<span style="color:var(--faint)">順番待ち — いまは「${esc(s.album)}」を生成中</span>`
+          : `<span style="color:var(--faint)">待機中(いまは「${esc(s.album)}」を生成中)</span>`;
       $('gn_strip').innerHTML = (s.recent || []).map(e =>
         `<img src="${e.ok ? '/thumb/' + e.r : '/crawl/reject/' + e.r}"
            onmouseenter="hoverPv(this, '${esc(e.why)}')" onmouseleave="hoverPvHide()"
@@ -5251,3 +5312,5 @@ setInterval(refreshFacets, 30000);
   }, 700);
 })();
 </script>
+<link rel="stylesheet" href="/studio-gallery.css">
+<script src="/studio-gallery.js"></script>

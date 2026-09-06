@@ -1,0 +1,31 @@
+/* Only the hosting layout changes; the Studio's graph, controls and dialogs stay intact. */
+body.gallery-embed { padding: 12px 10px 18px; gap: 12px; min-height: 100%; height: auto; }
+body.gallery-embed header { width: min(97vw, 1280px); }
+body.gallery-embed header .links, body.gallery-embed > a { display: none; }
+body.gallery-embed #frame { width: min(95vw, calc(46vh * var(--gallery-aspect, 1.7777778)), 1280px); }
+body.gallery-embed #v { aspect-ratio: var(--gallery-aspect, 1.7777778); height: auto; }
+body.gallery-embed #srcBtns { right: 52px; overflow-x: auto; scrollbar-width: none; }
+body.gallery-embed #srcBtns > * { flex: none; white-space: nowrap; }
+body.gallery-embed #pill { top: auto; bottom: 12px; right: 12px; }
+body.gallery-embed #hint { display: none; }
+body.gallery-embed #aibar { flex-wrap: wrap; border-radius: 20px; margin-top: 0; }
+body.gallery-embed #aiText { flex: 1 1 180px; }
+body.gallery-embed.theater #v,
+body.gallery-embed.theater #peekCv,
+body.gallery-embed.theater #post {
+  width: min(100vw, calc(100vh * var(--gallery-aspect, 1.7777778)));
+  aspect-ratio: var(--gallery-aspect, 1.7777778);
+}
+body.gallery-embed.gallery-exporting #aibar,
+body.gallery-embed.gallery-exporting #dock,
+body.gallery-embed.gallery-exporting #srcBtns,
+body.gallery-embed.gallery-exporting #insp { pointer-events: none; opacity: .6; }
+@media (max-width: 600px) {
+  body.gallery-embed header small { display: none; }
+  body.gallery-embed #srcBtns { top: 7px; left: 7px; gap: 3px; }
+  body.gallery-embed #srcBtns button { font-size: 11px; padding: 4px 6px; }
+  body.gallery-embed #pill { top: auto; bottom: 12px; right: 10px; }
+  body.gallery-embed #aibar { padding: 8px; gap: 6px; }
+  body.gallery-embed #aiText { flex-basis: calc(100% - 94px); }
+  body.gallery-embed #lookRow { width: 95vw; }
+}

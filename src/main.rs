@@ -22,6 +22,7 @@ mod urlimport;
 mod onnx;
 mod vlm;
 mod store;
+mod studio;
 
 use axum::{
     extract::{Path as AxPath, Query, State},
@@ -4285,6 +4286,7 @@ async fn main() {
     #[cfg(feature = "faceid")]
     faceid::set_root(&app.root);
     let router = Router::new()
+        .merge(studio::assets(&app.root))
         .route("/", get(index_page))
         .route("/api/images", get(api_images))
         .route("/api/facets", get(api_facets))
@@ -4299,6 +4301,8 @@ async fn main() {
         .route("/preview/{sha1}", get(preview))
         .route("/render/{sha1}", get(render_img))
         .route("/api/edits/{sha1}", get(api_edits_get).put(api_edits_put))
+        .route("/api/studio/{sha1}/save", post(studio::save).layer(axum::extract::DefaultBodyLimit::max(96 << 20)))
+        .route("/api/original/{sha1}", get(studio::original))
         .route("/api/filters/plan", post(api_filter_plan))
         .route("/api/filters/status", get(api_folder_filter_status))
         .route("/api/filters/stop", post(api_folder_filter_stop))

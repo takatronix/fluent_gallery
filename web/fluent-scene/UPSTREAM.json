@@ -1,0 +1,8 @@
+{
+  "repository": "https://github.com/takatronix/fluent_scene",
+  "commit": "0a93630a3acf95d62739477be794a3af04604c9c",
+  "entry": "wasm/dist/edit.html",
+  "entry_sha256": "d4dbbf3bfd33e890e3642ebca74c974fc88689a42480df992312eabad3d0921f",
+  "sync": "python3 tools/sync_scene_editor.py ../fluent_scene",
+  "patch": "Gallery image input, aspect ratio, original-size PNG export, source bindings and host messaging. Studio UI and filters remain upstream."
+}
