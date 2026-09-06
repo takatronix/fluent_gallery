@@ -1,4 +1,4 @@
-// Baked fluent_scene saves: original preservation, alpha/full size, provenance and revision races.
+// In-place fluent_scene edits: stable item counts/IDs, private baked pixels, Undo, originals and revisions.
 // Run against an isolated data root: FG_URL=http://127.0.0.1:<port> node tests/studio_save.js
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
@@ -93,134 +93,167 @@ async function preview(sha, body, expected = 200) {
   return Buffer.from(await response.arrayBuffer());
 }
 
+async function recipeFor(sha, recipe) {
+  const input = recipe.input_sha || sha;
+  const [targetMeta, inputMeta] = await Promise.all([api('/api/meta/' + sha), api('/api/meta/' + input)]);
+  return {...recipe, input_sha: input, source_edits_rev: inputMeta.edits_rev, target_edits_rev: targetMeta.edits_rev};
+}
+async function rendered(sha, revision) {
+  return bytes('/render/' + sha + '?' + new URLSearchParams({v: revision, w: '0'}));
+}
+async function uploadPNG(data, name) {
+  const form = new FormData(); form.append('source', source); form.append('file', new Blob([data]), name);
+  const response = await fetch(BASE + '/api/upload', {method: 'POST', body: form});
+  assert(response.ok); assert.equal((await response.json()).added, 1);
+  const sha = hash(data); created.add(sha); return sha;
+}
+async function sourceItems() { return api('/api/images?' + new URLSearchParams({source})); }
+
 (async () => {
   await api('/api/enrich/stop', {});
-  const original = png(1280, 960), rendered = png(1280, 960, true);
-  const form = new FormData(); form.append('source', source); form.append('file', new Blob([original]), 'source.png');
-  const upload = await fetch(BASE + '/api/upload', {method: 'POST', body: form});
-  assert(upload.ok); assert.equal((await upload.json()).added, 1);
-  const sha = hash(original); created.add(sha);
+  const original = png(1280, 960), finalPixels = png(1280, 960, true);
+  const sha = await uploadPNG(original, 'source.png');
   for (let i = 0; i < 16; i++) {
     const pushed = await api('/api/edits/' + sha, {action: 'push', edit: {op: 'adjust', params: {exposure: (i % 10) / 10}}}, 'PUT');
     const persisted = await api('/api/meta/' + sha);
-    assert.equal(persisted.edits_rev, pushed.rev, 'PUT revision must match the immediately reloaded sidecar');
-    const rendition = await fetch(BASE + '/render/' + sha + '?' + new URLSearchParams({v: pushed.rev, w: '64'}));
-    assert(rendition.ok, 'the revision returned by PUT must render immediately: ' + rendition.status);
-    await rendition.arrayBuffer();
+    assert.equal(persisted.edits_rev, pushed.rev, 'PUT revision must match its reloaded sidecar');
+    const response = await fetch(BASE + '/render/' + sha + '?' + new URLSearchParams({v: pushed.rev, w: '64'}));
+    assert(response.ok, 'PUT revision renders immediately: ' + response.status); await response.arrayBuffer();
     await api('/api/edits/' + sha, {action: 'pop'}, 'PUT');
   }
-  passed('edit revisions remain stable across PUT, persisted metadata reloads and immediate rendering');
+  passed('edit revisions remain stable across PUT, persisted metadata and immediate rendering');
   const edit = await api('/api/edits/' + sha, {action: 'push', edit: {op: 'adjust', params: {exposure: .25}}}, 'PUT');
   const before = await api('/api/meta/' + sha);
+  assert.equal(before.studio_save_mode, 'in_place', 'server advertises the safe save protocol');
+  const originalTiers = new Map();
+  for (const tier of ['micro', 'thumb', 'preview']) originalTiers.set(tier, hash(await bytes('/' + tier + '/' + sha)));
   const basePreview = await preview(sha, {edits: [], source_edits_rev: edit.rev});
   assert.deepEqual(rgbaPixel(basePreview, 10, 20), rgbaPixel(original, 10, 20));
   const photoEdits = [{op: 'adjust', params: {exposure: .5}}];
-  const adjustedPreview = await preview(sha, {edits: photoEdits, source_edits_rev: edit.rev});
-  assert.equal(rgbaPixel(adjustedPreview, 1200, 900).pixel[0], 80, 'draft runs on original pixels without reapplying current edits');
+  const adjusted = await preview(sha, {edits: photoEdits, source_edits_rev: edit.rev});
+  assert.equal(rgbaPixel(adjusted, 1200, 900).pixel[0], 80, 'draft does not reapply saved adjustments');
   const geometry = await preview(sha, {edits: [{op: 'crop', params: {fx: 0, fy: 0, fw: .5, fh: .5}},
     {op: 'rotate', params: {deg: 90}}], source_edits_rev: edit.rev});
-  const cropped = rgbaPixel(geometry, 0, 0);
-  assert.equal(cropped.width, 480); assert.equal(cropped.height, 640);
-  assert.deepEqual(cropped.pixel, rgbaPixel(original, 0, 479).pixel);
+  assert.deepEqual(rgbaPixel(geometry, 0, 0), {width: 480, height: 640, pixel: rgbaPixel(original, 0, 479).pixel});
   assert.deepEqual(await api('/api/meta/' + sha), before);
-  assert.equal(hash(await bytes('/img/' + sha)), hash(original));
-  assert.equal((await api('/api/images?' + new URLSearchParams({source}))).total, 1);
-  passed('写真調整 draft preview applies exact supplied history at full resolution without saving or altering source');
+  assert.equal(hash(await bytes('/img/' + sha)), sha); assert.equal((await sourceItems()).total, 1);
+  passed('full-resolution draft controls preserve source pixels, transparency and metadata');
   await preview(sha, {edits: [], source_edits_rev: '0'.repeat(12)}, 409);
   await preview(sha, {edits: [{op: 'adjust', params: {exposure: 99}}]}, 400);
-  await preview(sha, {edits: [{op: 'crop', params: {fx: 0, fy: 0, fw: 0, fh: 1}}]}, 400);
+  await preview(sha, {edits: [{op: 'studio', params: {render_sha: '../private'}}]}, 400);
+  await preview(sha, {edits: [{op: 'studio', params: {render_sha: '0'.repeat(40)}}]}, 400);
   await preview(sha, {edits: Array.from({length: 65}, () => ({op: 'auto', params: {version: 3}}))}, 400);
   await preview(sha, {edits: [], ignored: 'x'.repeat(1 << 20)}, 413);
-  passed('draft preview rejects stale revisions, invalid parameters, excessive operations and oversized requests');
-  const recipe = {version: 1, source_edits_rev: edit.rev, width: 1280, height: 960, time: 0,
+  passed('draft preview rejects stale revisions, bad references, parameters and oversized requests');
+
+  const recipe = {save_mode: 'in_place', version: 1, input_sha: sha, width: 1280, height: 960, time: 0,
     photo_edits: photoEdits,
     graph: {n: [{i: 'n1', t: 'src', x: 40, y: 100, k: 'smp'}, {i: 'n2', t: 'filter', x: 240, y: 100, f: 'grayscale', v: {}},
       {i: 'n3', t: 'out', x: 440, y: 100}], e: [['n1', 0, 'n2', 0], ['n2', 0, 'n3', 0]]},
     sceneYaml: 'scene:\n  width: 1280\n  height: 960\n# ' + nonce};
-  const result = await save(sha, rendered, recipe);
-  assert.notEqual(result.sha1, sha); assert.equal(result.reused, false);
-  assert.equal(result.meta.w, 1280); assert.equal(result.meta.h, 960);
-  assert.equal(result.meta.source, source);
-  assert(!result.meta.edits?.length, 'no render-time edit stack on baked output');
-  assert.equal(result.meta.studio.source_sha, sha);
-  assert.equal(result.meta.studio.source_edits_rev, edit.rev);
-  assert.deepEqual(result.meta.studio.source_edits, edit.edits);
-  assert.deepEqual(result.meta.studio.recipe, recipe);
-  passed('full-size ordinary image has separate ID and exact source/recipe provenance');
-
-  const resolved = await api('/api/original/' + result.sha1);
-  assert.equal(resolved.sha1, sha); assert(resolved.derived);
-  assert.deepEqual(resolved.chain, [result.sha1, sha]);
-  assert.deepEqual(resolved.meta.edits, edit.edits);
-  const plain = await api('/api/original/' + sha);
-  assert.equal(plain.sha1, sha); assert.equal(plain.derived, false);
-  const {source_edits_rev: omittedRevision, ...nestedRecipe} = recipe;
-  const nested = await save(result.sha1, rendered, nestedRecipe);
-  const nestedResolved = await api('/api/original/' + nested.sha1);
-  assert.equal(nestedResolved.sha1, sha);
-  assert.deepEqual(nestedResolved.chain, [nested.sha1, result.sha1, sha]);
+  const {save_mode: omittedMode, ...oldProtocol} = await recipeFor(sha, recipe);
+  await save(sha, finalPixels, oldProtocol, 400);
   assert.deepEqual(await api('/api/meta/' + sha), before);
-  passed('原本に戻す resolves baked provenance chains without modifying any source history');
+  assert.equal((await sourceItems()).total, 1);
+  passed('old clients without in_place save mode are rejected without creating or editing images');
 
-  const output = await bytes('/img/' + result.sha1);
-  assert.equal(hash(output), result.sha1, 'normal SHA-addressed image');
-  assert.deepEqual(rgbaPixel(output, 10, 20), rgbaPixel(rendered, 10, 20));
-  assert.deepEqual(rgbaPixel(output, 1200, 900), rgbaPixel(rendered, 1200, 900));
-  assert.equal(hash(await bytes('/img/' + sha)), hash(original));
-  const after = await api('/api/meta/' + sha);
-  assert.deepEqual(after, before, 'source sidecar unchanged');
-  passed('full-resolution pixels and transparency preserved; source bytes and metadata unchanged');
+  const firstRecipe = await recipeFor(sha, recipe);
+  const first = await save(sha, finalPixels, firstRecipe);
+  assert.equal(first.sha1, sha, 'Apply keeps the selected logical ID'); assert.equal(first.reused, false);
+  const firstMarker = first.meta.edits.at(-1), firstRender = firstMarker.params.render_sha;
+  assert.equal(firstMarker.op, 'studio'); assert.match(firstRender, /^[a-f0-9]{40}$/);
+  assert.notEqual(firstRender, sha); assert.deepEqual(first.meta.edits.slice(0, -1), edit.edits);
+  assert.equal(first.meta.studio_edit.source_sha, sha); assert.equal(first.meta.studio_edit.render_sha, firstRender);
+  assert.deepEqual(first.meta.studio_edit.recipe, firstRecipe);
+  assert.equal(first.meta.studio_edit.w, 1280); assert.equal(first.meta.studio_edit.h, 960);
+  assert(!first.meta.studio, 'active edit must not become immutable source provenance');
+  for (const field of ['sha1', 'ext', 'w', 'h', 'bytes', 'source', 'ingested', 'phash', 'tint']) {
+    assert.deepEqual(first.meta[field], before[field], 'immutable original metadata: ' + field);
+  }
+  const list = await sourceItems(); assert.equal(list.total, 1); assert.equal(list.items[0].sha1, sha);
+  assert.equal(list.items[0].erev, first.meta.edits_rev);
+  assert.equal((await fetch(BASE + '/api/meta/' + firstRender)).status, 404);
+  assert.equal((await fetch(BASE + '/img/' + firstRender)).status, 404);
+  const firstPNG = await rendered(sha, first.meta.edits_rev);
+  assert.equal(hash(firstPNG), firstRender); assert.deepEqual(rgbaPixel(firstPNG, 10, 20), rgbaPixel(finalPixels, 10, 20));
+  assert.deepEqual(rgbaPixel(firstPNG, 1200, 900), rgbaPixel(finalPixels, 1200, 900));
+  assert.equal(hash(await bytes('/img/' + sha)), sha);
+  passed('Apply updates one existing item; full-resolution RGBA bake stays private and originals remain immutable');
 
   for (const tier of ['micro', 'thumb', 'preview']) {
-    const data = await bytes('/' + tier + '/' + result.sha1);
-    assert.equal(data[0], 255); assert.equal(data[1], 216, tier + ' ready as JPEG');
+    const data = await bytes('/' + tier + '/' + sha + '?v=' + first.meta.edits_rev);
+    assert.equal(data[0], 255); assert.equal(data[1], 216);
+    assert.notEqual(hash(data), originalTiers.get(tier), tier + ' shows the baked pixels');
+    assert.equal(hash(await bytes('/' + tier + '/' + sha)), originalTiers.get(tier), tier + ' original URL remains immutable');
   }
-  const list = await api('/api/images?' + new URLSearchParams({source, exclude_filtered: 'true'}));
-  assert(list.items.some(item => item.sha1 === result.sha1));
-  assert(list.items.some(item => item.sha1 === sha));
-  passed('baked preview tiers and output available in the source folder immediately');
+  const resolved = await api('/api/original/' + sha);
+  assert.equal(resolved.sha1, sha); assert.equal(resolved.derived, false); assert.deepEqual(resolved.chain, [sha]);
+  const repeatsRecipe = await recipeFor(sha, recipe);
+  const repeats = await Promise.all([save(sha, finalPixels, repeatsRecipe), save(sha, finalPixels, repeatsRecipe)]);
+  assert(repeats.every(value => value.sha1 === sha && value.reused && value.meta.edits.length === first.meta.edits.length));
+  assert.equal((await sourceItems()).total, 1);
+  passed('versioned tiers reflect the edit; repeated identical saves do not add images or history entries');
 
-  const repeats = await Promise.all([save(sha, rendered, recipe), save(sha, rendered, recipe)]);
-  assert(repeats.every(value => value.sha1 === result.sha1 && value.reused));
-  const different = await save(sha, rendered, {...recipe, sceneYaml: recipe.sceneYaml + '\n# second recipe'});
-  assert.notEqual(different.sha1, result.sha1);
-  passed('identical exports reuse their ID; distinct recipes retain distinct provenance');
+  const second = await save(sha, original, await recipeFor(sha, {...recipe, sceneYaml: recipe.sceneYaml + '\n# second'}));
+  assert.equal(second.sha1, sha); assert.notEqual(second.meta.studio_edit.render_sha, firstRender);
+  assert.equal(second.meta.edits.length, first.meta.edits.length + 1);
+  assert.deepEqual(rgbaPixel(await rendered(sha, second.meta.edits_rev), 10, 20), rgbaPixel(original, 10, 20));
+  await api('/api/edits/' + sha, {action: 'pop'}, 'PUT');
+  let current = await api('/api/meta/' + sha);
+  assert.equal(current.studio_edit.render_sha, firstRender);
+  assert.equal(hash(await rendered(sha, current.edits_rev)), firstRender);
+  const inverted = await api('/api/edits/' + sha, {action: 'push', edit: {op: 'filter', params: {name: 'invert'}}}, 'PUT');
+  const composed = await preview(sha, {edits: [firstMarker, inverted.edits.at(-1)], source_edits_rev: inverted.rev});
+  assert.equal(rgbaPixel(composed, 1200, 900).pixel[0], 25, 'native edits are applied after the last baked image');
+  current = await api('/api/meta/' + sha);
+  assert.deepEqual(current.studio_edit.tail_edits, [inverted.edits.at(-1)]);
+  await api('/api/edits/' + sha, {action: 'clear'}, 'PUT');
+  current = await api('/api/meta/' + sha);
+  assert(!current.studio_edit); assert.deepEqual(current.edits, []);
+  assert.equal(hash(await rendered(sha, current.edits_rev)), sha); assert.equal(hash(await bytes('/img/' + sha)), sha);
+  assert.equal((await sourceItems()).total, 1);
+  passed('later saves, native edits, Undo and Reset retain one ID and restore exact earlier pixels');
 
   const asset = png(64, 48, true);
   const withAsset = {...recipe, assets: [{kind: 'source', key: 'upload-1', name: 'layer.png', data: 'data:image/png;base64,' + asset.toString('base64')}]};
-  const assetResult = await save(sha, rendered, withAsset);
-  const savedRecipe = assetResult.meta.studio.recipe;
+  const assetResult = await save(sha, finalPixels, await recipeFor(sha, withAsset));
+  const savedRecipe = assetResult.meta.studio_edit.recipe;
   assert.match(savedRecipe.assets[0].data, /^\/studio-assets\/[a-f0-9]{40}\.png$/);
   assert.equal(hash(await bytes(savedRecipe.assets[0].data)), hash(asset));
-  assert.equal((await save(sha, rendered, savedRecipe)).sha1, assetResult.sha1);
-  assert.equal((await save(sha, rendered, withAsset)).sha1, assetResult.sha1);
-  await save(sha, rendered, {...recipe, assets: [{kind: 'resource', name: 'bad', data: 'https://example.com/private.png'}]}, 400);
-  await save(sha, rendered, {...recipe, assets: [{kind: 'resource', name: 'bad', data: '/studio-assets/../index.sqlite'}]}, 400);
-  passed('extra layers stored as SHA assets, reopenable and reusable without bloating sidecars');
+  const reopened = await save(sha, finalPixels, await recipeFor(sha, savedRecipe));
+  assert(reopened.reused); assert.equal(reopened.meta.studio_edit.render_sha, assetResult.meta.studio_edit.render_sha);
+  assert.equal((await sourceItems()).total, 1);
+  passed('additional layers stay in separate reusable assets, with no extra gallery entries');
 
-  const outputEdit = await api('/api/edits/' + result.sha1, {action: 'push', edit: {op: 'filter', params: {name: 'invert'}}}, 'PUT');
-  const editedOutputMeta = await api('/api/meta/' + result.sha1);
-  const repeatEdited = await save(sha, rendered, recipe);
-  assert.notEqual(repeatEdited.sha1, result.sha1);
-  assert.deepEqual((await api('/api/meta/' + result.sha1)).edits, outputEdit.edits);
-  assert.deepEqual(await api('/api/meta/' + result.sha1), editedOutputMeta);
-  passed('editing a previous output never gets overwritten by a later export');
-
-  const current = await api('/api/edits/' + sha, {action: 'push', edit: {op: 'filter', params: {name: 'sepia'}}}, 'PUT');
-  await save(sha, rendered, recipe, 409);
-  await save('0'.repeat(40), rendered, {...recipe, source_edits_rev: current.rev}, 404);
-  await save(sha, Buffer.from('broken png'), {...recipe, source_edits_rev: current.rev}, 400);
-  await save(sha, rendered, {...recipe, graph: {}}, 400);
-  await save(sha, rendered, {...recipe, photo_edits: [{op: 'adjust', params: {exposure: 99}}]}, 400);
-  await save(sha, rendered, {...recipe, sceneYaml: 'x'.repeat(16 << 20)}, 413);
-  passed('stale edits, missing source, malformed PNG/graph and oversized recipe rejected');
-
-  // Header claims an oversized canvas but the compressed pixels remain tiny: reject before allocation.
+  const valid = await recipeFor(sha, recipe), invalidBefore = await api('/api/meta/' + sha);
+  await save(sha, finalPixels, {...valid, target_edits_rev: '0'.repeat(12)}, 409);
+  await save(sha, finalPixels, {...valid, source_edits_rev: '0'.repeat(12)}, 409);
+  await save('0'.repeat(40), finalPixels, {...valid, input_sha: '0'.repeat(40)}, 404);
+  await save(sha, Buffer.from('broken PNG'), valid, 400);
+  await save(sha, finalPixels, {...valid, graph: {}}, 400);
+  await save(sha, finalPixels, {...valid, photo_edits: [{op: 'adjust', params: {exposure: 99}}]}, 400);
+  await save(sha, finalPixels, {...valid, photo_edits: [{op: 'studio', params: {render_sha: '0'.repeat(40)}}]}, 400);
+  await save(sha, finalPixels, {...valid, sceneYaml: 'x'.repeat(16 << 20)}, 413);
+  await save(sha, finalPixels, {...valid, assets: [{kind: 'resource', name: 'bad', data: 'https://example.com/private.png'}]}, 400);
+  await save(sha, finalPixels, {...valid, assets: [{kind: 'resource', name: 'bad', data: '/studio-assets/../index.sqlite'}]}, 400);
   const header = Buffer.alloc(13); header.writeUInt32BE(8193); header.writeUInt32BE(960, 4); header[8] = 8; header[9] = 6;
-  const oversized = Buffer.concat([rendered.subarray(0, 8), chunk('IHDR', header), rendered.subarray(33)]);
-  await save(sha, oversized, {...recipe, source_edits_rev: current.rev}, 400);
-  assert.equal(hash(await bytes('/img/' + sha)), hash(original));
-  passed('oversized dimensions rejected before decode; original still intact');
+  await save(sha, Buffer.concat([finalPixels.subarray(0, 8), chunk('IHDR', header), finalPixels.subarray(33)]), valid, 400);
+  assert.deepEqual(await api('/api/meta/' + sha), invalidBefore); assert.equal((await sourceItems()).total, 1);
+  passed('invalid and stale saves preserve the current item, its history and original bytes');
+
+  const otherBytes = png(96, 64), otherSha = await uploadPNG(otherBytes, 'other-input.png');
+  const otherBefore = await api('/api/meta/' + otherSha);
+  const otherRecipe = await recipeFor(sha, {...recipe, input_sha: otherSha, photo_edits: []});
+  await save(sha, otherBytes, {...otherRecipe, target_edits_rev: '0'.repeat(12)}, 409);
+  await save(sha, otherBytes, {...otherRecipe, source_edits_rev: '0'.repeat(12)}, 409);
+  const otherInputSave = await save(sha, otherBytes, otherRecipe);
+  assert.equal(otherInputSave.sha1, sha); assert.equal(otherInputSave.meta.studio_edit.source_sha, otherSha);
+  assert.equal(otherInputSave.meta.studio_edit.w, 96); assert.equal(otherInputSave.meta.studio_edit.h, 64);
+  assert.deepEqual(await api('/api/meta/' + otherSha), otherBefore);
+  assert.equal(hash(await bytes('/img/' + sha)), sha); assert.equal(hash(await bytes('/img/' + otherSha)), otherSha);
+  const finalList = await sourceItems(); assert.equal(finalList.total, 2);
+  assert.deepEqual(finalList.items.map(item => item.sha1).sort(), [sha, otherSha].sort());
+  passed('separate input and selected image have independent revision guards; only the selected image changes');
   console.log(`\n${checks} checks passed`);
 })().catch(error => { console.error(error.stack || error); process.exitCode = 1; }).finally(async () => {
   if (created.size) await api('/api/trash', {shas: [...created]}).catch(error => console.error('cleanup:', error.message));

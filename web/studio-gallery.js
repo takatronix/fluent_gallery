@@ -169,7 +169,24 @@ async function studioOpen() {
     if (studioSession !== state) return null;
     const options = {signal: state.controller.signal};
     let meta = await j('/api/meta/' + item.sha1, options), recipe = null;
-    if (meta.studio?.recipe?.graph && !meta.edits?.length) {
+    if (meta.studio_save_mode !== 'in_place') {
+      throw new Error('同じ画像に適用するには、更新済みサーバーの起動が必要です');
+    }
+    state.targetEditsRev = meta.edits_rev;
+    if (meta.studio_edit?.recipe?.graph) {
+      const saved = meta.studio_edit;
+      if (!saved.tail_edits?.length) {
+        recipe = saved.recipe;
+        const sourceSha = saved.source_sha || recipe.input_sha || meta.sha1;
+        // sourceSha may equal this logical item. Read its immutable /img input
+        // once; never follow studio_edit recursively or feed its baked output twice.
+        const original = sourceSha === meta.sha1 ? meta : await j('/api/meta/' + sourceSha, options);
+        state.photoEdits = structuredClone(recipe.photo_edits || saved.source_edits || []);
+        meta = original;
+      }
+      // A later photo operation belongs after the saved graph. Preserve the
+      // complete rendered history as the input of a fresh graph in that case.
+    } else if (meta.studio?.recipe?.graph && !meta.edits?.length) {
       const saved = meta.studio;
       const original = await j('/api/meta/' + saved.source_sha, options);
       recipe = saved.recipe;
@@ -442,26 +459,37 @@ async function studioSave() {
     if (studioSession !== state) return false;
     if (!(result.image instanceof Blob) || result.image.type !== 'image/png') throw new Error('画像を書き出せませんでした');
     const form = new FormData(); form.append('image', result.image, 'filtered.png');
-    form.append('recipe', JSON.stringify({...result.recipe, photo_edits: state.photoEdits, source_edits_rev: state.source.edits_rev}));
-    const response = await fetch(`/api/studio/${state.source.sha1}/save`, {method: 'POST', body: form});
+    form.append('recipe', JSON.stringify({...result.recipe, photo_edits: state.photoEdits,
+      save_mode: 'in_place', input_sha: state.source.sha1,
+      source_edits_rev: state.source.edits_rev, target_edits_rev: state.targetEditsRev}));
+    const saveEpoch = (edEpoch.get(state.selectedSha) || 0) + 1;
+    edEpoch.set(state.selectedSha, saveEpoch);
+    const response = await fetch(`/api/studio/${state.selectedSha}/save`, {method: 'POST', body: form});
     const saved = await response.json();
     if (!response.ok) throw new Error(saved.detail || '画像を保存できませんでした');
-    const active = studioSession === state;
-    const context = lbContext, view = rgen;
-    if (active) studioClose(false);
-    await refreshFacets();
-    if (!active) { toast('加工画像を保存しました'); return true; }
-    if (context !== lbContext || view !== rgen) { toast('加工画像を保存しました'); return true; }
-    await reload(true);
-    if (context !== lbContext || rgen !== view + 1) { toast('加工画像を保存しました'); return true; }
-    let index = items.findIndex(value => value.sha1 === saved.sha1);
-    if (index < 0) {
-      await go({type: 'source', key: saved.meta.source, criteria: {source: saved.meta.source}});
-      if (context !== lbContext) return true;
-      index = items.findIndex(value => value.sha1 === saved.sha1);
+    if (saved.sha1 !== state.selectedSha || saved.meta?.sha1 !== state.selectedSha) {
+      throw new Error('保存された画像のIDが一致しません');
     }
-    if (index >= 0) await lbShow(index, 0);
-    toast('写真調整とフィルターを保存しました（原本は保持）');
+    // An older response may arrive after another edit/save of this same item.
+    // Its persisted success must not roll the newer visible revision backward.
+    const current = (edEpoch.get(state.selectedSha) || 0) === saveEpoch;
+    if (current) {
+      edEpoch.set(state.selectedSha, saveEpoch + 1);
+      const item = items.find(value => value.sha1 === state.selectedSha);
+      if (item) { item.erev = saved.meta.edits?.length ? saved.meta.edits_rev : null; edRefreshGrid(item); }
+    }
+    const active = current && studioSession === state && state.context === lbContext && items[lbIdx]?.sha1 === state.selectedSha;
+    if (active) {
+      // Keep the same list position and photo controls. Closing only the draft
+      // makes the existing Undo button pop the persisted studio step normally.
+      studioClose(false);
+      lbMeta = saved.meta;
+      edHist(saved.meta.edits || []);
+      $('edcompare').style.display = saved.meta.edits?.length ? '' : 'none';
+      await lbView.render(`/render/${state.selectedSha}?v=${encodeURIComponent(saved.meta.edits_rev)}&w=0`);
+      edSyncStatus();
+    }
+    toast('写真調整とフィルターを適用しました（原本は保持）');
     return true;
   } catch (error) { studioStatus(state, error.message); return false; }
   finally { state.saving = false; studioSetBusy(state); }

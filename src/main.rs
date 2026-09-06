@@ -23,6 +23,7 @@ mod onnx;
 mod vlm;
 mod store;
 mod studio;
+mod studio_archive;
 
 use axum::{
     extract::{Path as AxPath, Query, State},
@@ -562,6 +563,8 @@ async fn api_meta(State(app): S, AxPath(sha1): AxPath<String>) -> impl IntoRespo
             // UIがレンダURLをrevで固定キャッシュできるよう同梱
             let e = m.get("edits").cloned().unwrap_or_else(|| json!([]));
             m["edits_rev"] = json!(edits::rev(&e));
+            studio::decorate_meta(&app.root, &mut m);
+            m["studio_save_mode"] = json!("in_place");
             Json(m).into_response()
         }
         None => StatusCode::NOT_FOUND.into_response(),
@@ -653,6 +656,7 @@ async fn api_export(State(app): S, Json(i): Json<ExportIn>) -> impl IntoResponse
             let mut zw = zip::ZipWriter::new(f);
             let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored).large_file(true);
             let mut manifest = Vec::new();
+            let mut private_files = std::collections::HashSet::new();
             for sha in &shas {
                 let Some(m) = store::load_meta(&root, sha) else { continue };
                 let ext = m["ext"].as_str().unwrap_or("png").to_string();
@@ -661,6 +665,13 @@ async fn api_export(State(app): S, Json(i): Json<ExportIn>) -> impl IntoResponse
                 zw.write_all(&data).map_err(|e| e.to_string())?;
                 zw.start_file(format!("{name2}/meta/{sha}.json"), opts).map_err(|e| e.to_string())?;
                 zw.write_all(serde_json::to_string_pretty(&m).unwrap_or_default().as_bytes()).map_err(|e| e.to_string())?;
+                for (relative, path) in studio_archive::export_files(&root, &m)? {
+                    if private_files.insert(relative.clone()) {
+                        zw.start_file(format!("{name2}/{relative}"), opts).map_err(|e| e.to_string())?;
+                        let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+                        std::io::copy(&mut file, &mut zw).map_err(|e| e.to_string())?;
+                    }
+                }
                 manifest.push(json!({"sha1": sha, "file": format!("{sha}.{ext}"), "source": m["source"], "rights": m["rights"],
                                      "credit": m["credit"], "title": m["crawl"]["title"], "landing": m["crawl"]["landing"], "url": m["crawl"]["url"]}));
                 if let Some(j) = exports().lock().unwrap().get_mut(&id2) { j.done += 1; }
@@ -733,6 +744,13 @@ struct ImageRevision { #[serde(default)] v: String }
 // All display sizes of an edit share one 1600px rendition. A thumbnail request cannot
 // race the editor and independently reprocess the full original under the same revision.
 fn edit_preview_bytes(root: &Path, sha: &str, ext: &str, history: &Value, width: u32) -> Option<Vec<u8>> {
+    // Studio previews are durable saved image data. Browsing or cache eviction
+    // must never execute the native filter graph again.
+    if let Some(render) = edits::studio_render(history) {
+        if let Some(path) = studio::display_path(root, render, width) {
+            if let Ok(bytes) = std::fs::read(path) { return Some(bytes); }
+        }
+    }
     let revision = edits::rev(history);
     let path = edits::render_path(root, sha, &revision, width, false);
     if let Ok(bytes) = std::fs::read(&path) { return Some(bytes); }
@@ -940,7 +958,7 @@ fn atlas_member_image(root: &Path, item: &AtlasMember) -> Option<image::DynamicI
         eprintln!("atlas: stale edit revision for {}", item.sha1);
     }
     let ext = meta["ext"].as_str().unwrap_or("jpg");
-    let bytes = edits::render(root, &item.sha1, ext, &history, ATLAS_TILE, None)?;
+    let bytes = edit_preview_bytes(root, &item.sha1, ext, &history, ATLAS_TILE)?;
     image::load_from_memory(&bytes).ok()
 }
 
@@ -1027,11 +1045,14 @@ async fn atlas(State(app): S, AxPath(key): AxPath<String>, Query(q): Query<Atlas
 // ---------- 非破壊調整(M4): 原本不変・editsはサイドカーの履歴スタック ----------
 
 async fn api_edits_get(State(app): S, AxPath(sha1): AxPath<String>) -> impl IntoResponse {
-    let Some(m) = store::load_meta(&app.root, &sha1) else {
+    let Some(mut m) = store::load_meta(&app.root, &sha1) else {
         return StatusCode::NOT_FOUND.into_response();
     };
     let e = m.get("edits").cloned().unwrap_or_else(|| json!([]));
-    Json(json!({"edits": e, "rev": edits::rev(&e)})).into_response()
+    m["edits_rev"] = json!(edits::rev(&e));
+    studio::decorate_meta(&app.root, &mut m);
+    m["studio_save_mode"] = json!("in_place");
+    Json(json!({"edits": e, "rev": edits::rev(&e), "meta": m})).into_response()
 }
 
 #[derive(Deserialize)]
@@ -1086,12 +1107,19 @@ async fn api_edits_put(State(app): S, AxPath(sha1): AxPath<String>, Json(e): Jso
             if e.edit["op"].as_str().is_none() {
                 return (StatusCode::BAD_REQUEST, Json(json!({"detail": "edit.op がありません"}))).into_response();
             }
+            if e.edit["op"] == "studio" {
+                return err_json(StatusCode::BAD_REQUEST, "フィルター画像は編集画面の適用から保存してください");
+            }
             let mut ed = e.edit;
             if ed["op"] == "auto" {
                 // Auto is a correction, not an accumulating effect. Repeated clicks leave
                 // the same one-step result; old repeated auto entries are collapsed once.
                 if list.last().is_some_and(|last| last["op"] == "auto" && last["params"]["version"] == edits::AUTO_VERSION) {
-                    return Json(json!({"edits": list, "rev": edits::rev(&json!(list))})).into_response();
+                    let revision = edits::rev(&json!(list));
+                    m["edits_rev"] = json!(revision);
+                    studio::decorate_meta(&app.root, &mut m);
+                    m["studio_save_mode"] = json!("in_place");
+                    return Json(json!({"edits": list, "rev": revision, "meta": m})).into_response();
                 }
                 while list.last().is_some_and(|last| last["op"] == "auto") { list.pop(); }
                 ed["params"] = json!({"version": edits::AUTO_VERSION});
@@ -1124,7 +1152,10 @@ async fn api_edits_put(State(app): S, AxPath(sha1): AxPath<String>, Json(e): Jso
         }
     }
     let e = m["edits"].clone();
-    Json(json!({"edits": e, "rev": edits::rev(&e)})).into_response()
+    m["edits_rev"] = json!(edits::rev(&e));
+    studio::decorate_meta(&app.root, &mut m);
+    m["studio_save_mode"] = json!("in_place");
+    Json(json!({"edits": e, "rev": edits::rev(&e), "meta": m})).into_response()
 }
 
 #[derive(Deserialize)]
@@ -1146,6 +1177,14 @@ async fn render_img(State(app): S, AxPath(sha1): AxPath<String>, Query(rq): Quer
     let ext = m["ext"].as_str().unwrap_or("png").to_string();
     let seg_shapes = (rq.seg == "1").then(|| m["seg"]["shapes"].clone()).filter(|s| s.is_array());
     let cache_control = if versioned { IMMUTABLE } else { "no-cache" };
+    if rq.w == 0 && seg_shapes.is_none() {
+        if let Some(render) = edits::studio_render(&e) {
+            return match studio::asset_path(&app.root, render).and_then(|path| std::fs::read(path).ok()) {
+                Some(bytes) => ([(header::CONTENT_TYPE, "image/png"), (header::CACHE_CONTROL, cache_control)], bytes).into_response(),
+                None => (StatusCode::NOT_FOUND, [(header::CACHE_CONTROL, "no-store")]).into_response(),
+            };
+        }
+    }
     // 履歴なし・原寸要求・マスク無しなら原本をそのまま(コピーゼロ)
     if e.as_array().map(|a| a.is_empty()).unwrap_or(true) && rq.w == 0 && seg_shapes.is_none() {
         return match std::fs::read(store::image_path(&app.root, &sha1, &ext)) {
@@ -1693,6 +1732,50 @@ fn album_slug(name: &str) -> String {
         .take(48)
         .collect();
     if s.is_empty() { "album".into() } else { s }
+}
+
+/// 入れ物としてのフォルダ(グループ)。中身が空でも存在できるように名前だけを覚えておく。
+/// グループは元々「タスクの folder 欄に名前が書かれていれば画面に現れる」だけの存在で、
+/// 空のグループが作れなかった(「フォルダ +」を押しても収集タスクしか生まれない)
+fn groups_path(root: &std::path::Path) -> std::path::PathBuf { album_dir(root).join("_groups.json") }
+fn load_groups(root: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(groups_path(root)).ok()
+        .and_then(|t| serde_json::from_str::<Vec<String>>(&t).ok()).unwrap_or_default()
+}
+fn save_groups(root: &std::path::Path, g: &[String]) -> std::io::Result<()> {
+    let _ = std::fs::create_dir_all(album_dir(root));
+    std::fs::write(groups_path(root), serde_json::to_string_pretty(g)?)
+}
+/// 画面に出す入れ物 = 明示的に作られた物 + タスクが属している物(従来どおり)
+async fn api_groups(State(app): S) -> Json<Value> { Json(json!(load_groups(&app.root))) }
+
+#[derive(Deserialize)]
+struct GroupIn { name: String }
+
+async fn api_group_make(State(app): S, Json(g): Json<GroupIn>) -> impl IntoResponse {
+    let name = folder_norm(&g.name);
+    if name.is_empty() {
+        return err_json(StatusCode::BAD_REQUEST, "名前をください");
+    }
+    let mut all = load_groups(&app.root);
+    if all.iter().any(|x| x == &name) {
+        return err_json(StatusCode::CONFLICT, &format!("入れ物「{name}」はもうあります"));
+    }
+    all.push(name.clone());
+    all.sort();
+    if save_groups(&app.root, &all).is_err() {
+        return err_json(StatusCode::INTERNAL_SERVER_ERROR, "保存できませんでした");
+    }
+    Json(json!({"ok": true, "name": name})).into_response()
+}
+
+/// 中身があっても消せる(入れ物を消すだけで、中のフォルダは一番上へ出る)
+async fn api_group_del(State(app): S, AxPath(name): AxPath<String>) -> impl IntoResponse {
+    let name = folder_norm(&name);
+    let mut all = load_groups(&app.root);
+    all.retain(|x| x != &name && !x.starts_with(&format!("{name}/")));
+    let _ = save_groups(&app.root, &all);
+    Json(json!({"ok": true})).into_response()
 }
 
 fn load_albums(root: &std::path::Path) -> Vec<Value> {
@@ -2412,6 +2495,10 @@ async fn api_upload(State(app): S, mut mp: axum::extract::Multipart) -> impl Int
                 let db = Connection::open(root.join("store/index.sqlite")).unwrap();
                 store::ensure_schema(&db);
                 let Ok(mut ar) = zip::ZipArchive::new(std::io::Cursor::new(&data[..])) else { return (0, 0, 1, 0) };
+                if let Err(error) = studio_archive::import_files(&root, &mut ar) {
+                    eprintln!("zip private edit data: {error}");
+                    return (0, 0, 1, 0);
+                }
                 use std::io::Read;
                 let mut metas: std::collections::HashMap<String, Value> = Default::default();
                 for i in 0..ar.len() {
@@ -2433,6 +2520,7 @@ async fn api_upload(State(app): S, mut mp: axum::extract::Multipart) -> impl Int
                     if e.is_dir() { continue; }
                     let name = e.name().to_string();
                     let base = name.rsplit('/').next().unwrap_or("").to_string();
+                    if studio_archive::is_private_entry(&name) { continue; }
                     if base.starts_with("._") || base.starts_with('.') { continue; } // macOSのリソースフォーク等
                     let ext = base.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
                     if !["jpg", "jpeg", "png", "webp", "gif", "bmp", "tif", "tiff"].contains(&ext.as_str()) { continue; }
@@ -4325,6 +4413,8 @@ async fn main() {
         .route("/api/move", post(api_move))
         .route("/trash/img/{sha1}", get(trash_img))
         .route("/api/albums", post(api_album_make).get(api_albums))
+        .route("/api/groups", get(api_groups).post(api_group_make))
+        .route("/api/groups/{name}", delete(api_group_del))
         .route("/api/albums/{name}", delete(api_album_del))
         .route("/api/albums/{name}/rename", post(api_album_rename))
         .route("/api/albums/{name}/move", post(api_album_move))

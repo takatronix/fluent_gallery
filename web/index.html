@@ -4162,7 +4162,7 @@ $('edfilters').innerHTML = ED_FILTERS.map(f => `<span class="fxchip"
 function edToggle() {
   const on = $('lb').classList.toggle('editing');
   if (!on && typeof studioClose === 'function') studioClose();
-  if (on && lbMeta?.studio?.recipe?.graph && typeof studioOpen === 'function') studioOpen();
+  if (on && (lbMeta?.studio_edit?.recipe?.graph || lbMeta?.studio?.recipe?.graph) && typeof studioOpen === 'function') studioOpen();
 }
 function edVals() {
   const o = {};
@@ -4190,7 +4190,7 @@ function edReset() {
   $('lbimg').style.filter = '';
   if (typeof studioSession !== 'undefined' && studioSession) studioPreviewAdjust({});
 }
-const ED_LABEL = {adjust: '調整', auto: '自動', filter: 'フィルタ', rotate: '回転', flip: '反転', crop: 'クロップ'};
+const ED_LABEL = {adjust: '調整', auto: '自動', filter: 'フィルタ', studio: 'フィルター', rotate: '回転', flip: '反転', crop: 'クロップ'};
 function edHist(list) {
   const draft = typeof studioSession !== 'undefined' && studioSession;
   if (draft?.photoEdits) {
@@ -4256,7 +4256,7 @@ function edMutate(body) {
       const it = items.find(x => x.sha1 === sha);
       if (it) { it.erev = item.erev; edRefreshGrid(it); }
       if (context === lbContext && items[lbIdx]?.sha1 === sha) {
-        lbMeta = {...(lbMeta || {}), sha1: sha, edits: r.edits, edits_rev: r.rev};
+        lbMeta = r.meta || {...(lbMeta || {}), sha1: sha, edits: r.edits, edits_rev: r.rev};
         edReset(); edHist(r.edits);
         $('edcompare').style.display = r.edits.length ? '' : 'none';
         if (r.edits.length || (lbSegOn && lbMeta.seg?.shapes?.length)) await lbView.render(lbUrl(sha, 1600));
@@ -4279,6 +4279,9 @@ function edMutate(body) {
 }
 function edPush(edit) {
   if (typeof studioSession !== 'undefined' && studioSession) return studioPhotoEdit({action: 'push', edit});
+  if (lbMeta?.sha1 === items[lbIdx]?.sha1 && lbMeta?.studio_edit && typeof studioOpen === 'function') {
+    return studioOpen().then(state => state ? studioPhotoEdit({action: 'push', edit}) : false);
+  }
   return edMutate({action: 'push', edit});
 }
 function edAuto() {
@@ -4319,6 +4322,9 @@ async function edClear() {
   try {
     await edQueues.get(sha);
     if (context !== lbContext || items[lbIdx]?.sha1 !== sha) return false;
+    if (lbMeta?.sha1 === sha && lbMeta.studio_edit && !lbMeta.studio?.source_sha && !lbMeta.filter_source_sha) {
+      return edMutate({action: 'clear'});
+    }
     $('edstatus').textContent = '元画像を確認しています…';
     const original = await edOriginal(sha);
     if (context !== lbContext || items[lbIdx]?.sha1 !== sha) return false;
@@ -4363,6 +4369,9 @@ async function edClear() {
 }
 async function edApplyAdjust() {
   if (typeof studioSession !== 'undefined' && studioSession) return studioSave();
+  if (lbMeta?.sha1 === items[lbIdx]?.sha1 && lbMeta?.studio_edit && typeof studioOpen === 'function') {
+    return await studioOpen() ? studioSave() : false;
+  }
   const v = edVals();
   if (!Object.keys(v).length) return toast('スライダを動かしてから適用');
   return edPush({op: 'adjust', params: v});

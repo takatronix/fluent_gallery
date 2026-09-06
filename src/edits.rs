@@ -9,6 +9,30 @@ use std::path::{Path, PathBuf};
 
 use crate::store;
 
+/// A saved Studio result is an internal revision of this image, not another
+/// gallery item. Only the newest baked revision and any later photo edits run.
+pub fn studio_render(edits: &Value) -> Option<&str> {
+    let last = edits.as_array()?.last()?;
+    (last["op"] == "studio").then(|| last["params"]["render_sha"].as_str()).flatten()
+}
+
+pub fn load(root: &Path, sha1: &str, ext: &str, edits: &Value) -> Option<DynamicImage> {
+    let list = edits.as_array().map(Vec::as_slice).unwrap_or(&[]);
+    if let Some(index) = list.iter().rposition(|edit| edit["op"] == "studio") {
+        let path = crate::studio::asset_path(root, list[index]["params"]["render_sha"].as_str()?)?;
+        let mut reader = image::ImageReader::open(path).ok()?;
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(8192);
+        limits.max_image_height = Some(8192);
+        limits.max_alloc = Some(512 << 20);
+        reader.limits(limits);
+        let image = reader.decode().ok()?;
+        if u64::from(image.width()) * u64::from(image.height()) > 32_000_000 { return None; }
+        return Some(apply(image, &json!(&list[index + 1..])));
+    }
+    Some(apply(image::open(store::image_path(root, sha1, ext)).ok()?, edits))
+}
+
 /// 履歴のリビジョン(=レンダキャッシュのキー)。edits配列のJSONをハッシュ。
 pub fn rev(edits: &Value) -> String {
     let s = serde_json::to_string(edits).unwrap_or_default();
@@ -608,8 +632,7 @@ fn draw_seg(img: &mut image::RgbImage, shapes: &Value) {
 
 /// 切り抜きPNG(透過・フェザー付き) — 「背景なかったことにする」本体。編集履歴も適用済み
 pub fn cutout_png(root: &Path, sha1: &str, ext: &str, edits: &Value, shapes: &Value, w_limit: u32) -> Option<Vec<u8>> {
-    let mut img = image::open(store::image_path(root, sha1, ext)).ok()?;
-    img = apply(img, edits);
+    let mut img = load(root, sha1, ext, edits)?;
     if w_limit > 0 && (img.width() > w_limit || img.height() > w_limit) {
         img = img.thumbnail(w_limit, w_limit);
     }
@@ -636,8 +659,7 @@ pub fn render(root: &Path, sha1: &str, ext: &str, edits: &Value, w: u32, seg: Op
     if let Ok(b) = std::fs::read(&rp) {
         return Some(b);
     }
-    let mut img = image::open(store::image_path(root, sha1, ext)).ok()?;
-    img = apply(img, edits);
+    let mut img = load(root, sha1, ext, edits)?;
     if w > 0 && (img.width() > w || img.height() > w) {
         img = img.thumbnail(w, w);
     }

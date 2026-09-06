@@ -9,11 +9,12 @@ assert(BASE, 'Set FG_URL to an isolated test server');
 const target = new URL(BASE);
 assert(['127.0.0.1', 'localhost'].includes(target.hostname) && target.port !== '8790');
 const nonce = crypto.randomBytes(8).toString('hex'), source = `crawl:_gallery_edit_${nonce}`;
+const album = `_gallery_edit_${nonce}`;
 // Keep this fixture below the desktop/mobile CPU preview caps so preview and
 // export have identical pixel dimensions; the Studio suite covers large exports.
 const FIXTURE_WIDTH = 480, FIXTURE_HEIGHT = 360;
 const created = new Set(), originals = new Map(), browserErrors = [], networkErrors = [];
-let browser, page, checks = 0;
+let browser, page, checks = 0, albumCreated = false, initialCounts;
 const pass = label => { checks++; console.log(`PASS ${label}`); };
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 async function api(path, body, method = body === undefined ? 'GET' : 'POST') {
@@ -25,6 +26,12 @@ async function api(path, body, method = body === undefined ? 'GET' : 'POST') {
 async function bytes(sha) {
   const response = await fetch(BASE + '/img/' + sha); assert(response.ok);
   return Buffer.from(await response.arrayBuffer());
+}
+async function counts() {
+  const [all, scoped, albums] = await Promise.all([api('/api/images?limit=1'),
+    api('/api/images?' + new URLSearchParams({source, limit: '100'})), api('/api/albums')]);
+  return {all: all.total, source: scoped.total, shas: scoped.items.map(item => item.sha1).sort(),
+    album: albums.find(value => value.name === album)?.count};
 }
 async function waitForImage(sha, edited = false) {
   await page.waitForFunction(({sha, edited}) => {
@@ -62,6 +69,10 @@ async function signature(selector = '#lbimg') {
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({edits, source_edits_rev: state.source.edits_rev})});
       if (!response.ok) throw new Error('Draft preview failed: ' + response.status);
+      element = await response.blob();
+    } else if (selector.startsWith('/')) {
+      const response = await fetch(selector);
+      if (!response.ok) throw new Error('Saved render failed: ' + response.status);
       element = await response.blob();
     } else element = document.querySelector(selector);
     if (!element) throw new Error('No main preview ' + selector);
@@ -266,21 +277,29 @@ async function integratedFiltersAndMobile(sha, originalPixels) {
   await page.click('#edapply');
   const saved = await (await savedResponse).json(); created.add(saved.sha1);
   await page.waitForFunction(sha => !studioSession && items[lbIdx]?.sha1 === sha, {timeout: 60000}, saved.sha1);
-  await waitForImage(saved.sha1);
-  assert.notEqual(saved.sha1, sha); assert.equal(saved.meta.studio.source_sha, sha);
+  await waitForImage(saved.sha1, true);
+  assert.equal(saved.sha1, sha, 'Apply created another gallery image');
+  assert.deepEqual(await counts(), initialCounts, 'Apply changed gallery, source, or album membership');
+  assert.equal(saved.meta.studio_edit.source_sha, sha);
   assert.deepEqual([saved.meta.w, saved.meta.h], [FIXTURE_WIDTH, FIXTURE_HEIGHT]);
-  assert(!saved.meta.edits?.length);
-  assert(saved.meta.studio.recipe.photo_edits.some(edit => edit.op === 'auto'));
-  const savedAdjustments = saved.meta.studio.recipe.photo_edits.filter(edit => edit.op === 'adjust');
+  assert.equal(saved.meta.edits.at(-1).op, 'studio');
+  assert.equal(saved.meta.edits.at(-1).params.render_sha, saved.meta.studio_edit.render_sha);
+  assert(saved.meta.studio_edit.recipe.photo_edits.some(edit => edit.op === 'auto'));
+  const savedAdjustments = saved.meta.studio_edit.recipe.photo_edits.filter(edit => edit.op === 'adjust');
   assert.equal(savedAdjustments.length, 1, 'pending exposure was committed more than once');
   assert.equal(savedAdjustments[0].params.exposure, .2);
-  assert(saved.meta.studio.recipe.graph.n.some(node => node.t === 'filter' && node.f === 'invert'));
-  assert.deepEqual(await signature(), visibleBeforeSave, 'saved PNG pixels differ from the actual main preview shown before Apply');
+  assert(saved.meta.studio_edit.recipe.graph.n.some(node => node.t === 'filter' && node.f === 'invert'));
+  assert.deepEqual(await signature(`/render/${sha}?w=0&v=${saved.meta.edits_rev}`), visibleBeforeSave,
+    'saved private PNG pixels differ from the actual main preview shown before Apply');
   assert(!nearSamples((await signature()).samples, originalPixels.samples, 8));
-  assert.equal((await api('/api/edits/' + sha)).edits.length, 0);
+  assert.equal((await api('/api/edits/' + sha)).edits.at(-1).op, 'studio');
   await assertGalleryRemainsVisible();
-  pass('pending photo sliders render before native filters with no duplicate edits; Apply saves exactly the visible full-resolution pixels');
+  pass('pending photo sliders render before native filters; Apply saves exact private PNG pixels under the same image with unchanged counts');
   await page.screenshot({path: '/tmp/fg-gallery-edit-saved.png'});
+
+  await page.click('#edactions button[onclick="edClear()"]'); await waitForImage(sha);
+  assert.deepEqual(await signature(), originalPixels, 'Reset after saving did not restore the same original image');
+  assert.deepEqual(await counts(), initialCounts, 'Reset changed gallery, source, or album membership');
 
   await show(sha); await page.setViewport({width: 390, height: 844});
   const controls = ['#ed_exposure', '#ed_contrast', '#ed_saturation', '#ed_temperature', '#edauto', '#cropbtn',
@@ -351,6 +370,8 @@ async function integratedFiltersAndMobile(sha, originalPixels) {
   assert.equal(listing.items.length, 2);
   const [sha, fresh] = listing.items.map(item => item.sha1);
   for (const image of [sha, fresh]) { created.add(image); originals.set(image, hash(await bytes(image))); }
+  await api('/api/albums', {name: album, criteria: {source}, folder: '', agent: {}, goal: ''}); albumCreated = true;
+  initialCounts = await counts(); assert.equal(initialCounts.source, 2); assert.equal(initialCounts.album, 2);
   await show(fresh);
   assert.equal(await page.evaluate(sha => edStates.has(sha), fresh), false, 'fresh image unexpectedly has an edit state');
   if (!await page.evaluate(() => $('lb').classList.contains('editing'))) await page.click('#edbtn');
@@ -379,5 +400,6 @@ async function integratedFiltersAndMobile(sha, originalPixels) {
   }
 }).finally(async () => {
   if (browser) await browser.close();
+  if (albumCreated) await api('/api/albums/' + album, undefined, 'DELETE').catch(() => {});
   if (created.size) await api('/api/trash', {shas: [...created]}).catch(error => console.error('cleanup:', error.message));
 });
