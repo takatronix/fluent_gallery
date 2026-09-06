@@ -532,8 +532,6 @@
   <div id="side_spacer" style="flex:1"></div>
   <div id="sidefoot">
     <div id="libline" style="padding:8px 10px 4px" title="このライブラリの枚数・容量と、これまでに使ったAPI代"></div>
-    <div id="ai_meters" style="padding:0 10px 4px; font-size:11px; color:var(--faint); cursor:pointer"
-         onclick="openPlacement()" title="クリックで、どのモデルがどこで動いているかを見る"></div>
     <div class="sec" id="ai_head" style="display:flex; align-items:center; gap:4px; cursor:pointer"
          onclick="cycleAiView()" title="仕事の行の見せ方: 全部 → 稼働中のみ → 閉じる(枚数・料金・メーターは常に出ます)">
       <span id="ai_tri" style="display:flex; flex:none"></span><span style="white-space:nowrap">AI稼働状況</span>
@@ -541,6 +539,8 @@
       <span id="facesbtn" style="margin-left:auto; cursor:pointer; opacity:.7; display:flex; align-items:center; gap:3px"
         onclick="event.stopPropagation(); facesOpen()" title="顔ID台帳 — 登録済みの人物と参照顔の一覧/管理"></span></div>
     <div id="ai_activity" style="padding:0 10px 6px; font-size:11px; color:var(--faint); cursor:pointer"
+         onclick="openPlacement()" title="クリックで、どのモデルがどこで動いているかを見る"></div>
+    <div id="ai_meters" style="padding:0 10px 4px; font-size:11px; color:var(--faint); cursor:pointer"
          onclick="openPlacement()" title="クリックで、どのモデルがどこで動いているかを見る"></div>
     <div class="nav" data-loc="settings:" onclick="go({type:'settings', key:'', criteria:{}})" title="AIの役・接続先・APIキー・モデル・自動運転・保存先(行ごとに自動保存)">
       <span class="kic" id="settings_ic"></span><span class="nm">設定</span></div>
