@@ -161,6 +161,41 @@ pub fn external_base() -> Option<String> {
 }
 pub fn preview_on() -> bool { crate::config::get_bool("gen.preview", true) }
 
+/// VAE デコードの計算バッファ(MiB)。画素数にきれいに比例する。実測 1024² で 6658MiB(docs/gen-cuda-notes.md §2)
+fn vae_buffer_mb(w: u32, h: u32) -> u64 { 6658 * (w as u64 * h as u64) / (1024 * 1024) }
+/// --vae-tiling を付けたときの VAE 計算バッファの頭打ち(解像度に依らない。実測 約1.8GB)
+const TILED_VAE_MB: u64 = 1843;
+
+/// 空きVRAM(MiB)。複数GPUなら一番少ない物に合わせる。
+/// Mac は統合メモリで VRAM の区別が無いので None(=引数を足さない=従来どおり)
+fn free_vram_mb() -> Option<u64> {
+    if cfg!(target_os = "macos") { return None; }
+    let out = std::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"]).output().ok()?;
+    if !out.status.success() { return None; }
+    String::from_utf8_lossy(&out.stdout).lines().filter_map(|l| l.trim().parse::<u64>().ok()).min()
+}
+
+/// 空きVRAMに収まる中で一番速い引数を選ぶ(docs/gen-cuda-notes.md §4)。
+/// tiling は無料ではない(512²で1.67倍・768²で1.46倍遅い)ので、入るなら付けない。
+/// 逆に付けないと 1024² は VAE デコードで 6.5GB を一括要求して落ちる ―― しかもサンプリング成功後に落ちるので
+/// 描けた絵を捨てて failed になる。offload は更に 1.44 倍遅いが、VRAM をほぼ使わない最後の砦。
+fn memory_args(s: &ModelSpec, w: u32, h: u32) -> Vec<String> {
+    let Some(free) = free_vram_mb() else { return vec![] };
+    let weights = s.files.iter().map(|f| f.bytes).sum::<u64>() >> 20;
+    let usable = free * 9 / 10; // 安全率。他プロセスが後から VRAM を取りに来る
+    if weights + vae_buffer_mb(w, h) <= usable { return vec![]; }
+    if weights + TILED_VAE_MB <= usable { return vec!["--vae-tiling".into()]; }
+    vec!["--vae-tiling".into(), "--offload-to-cpu".into()]
+}
+/// 内蔵 sd-server は常駐で解像度を選べないので、設定の既定サイズで判定する
+fn server_memory_args(s: &ModelSpec) -> Vec<String> {
+    let size = crate::config::value("gen.size");
+    let (w, h) = size.as_str().and_then(|t| t.split_once('x'))
+        .and_then(|(a, b)| Some((a.trim().parse().ok()?, b.trim().parse().ok()?))).unwrap_or((1024, 1024));
+    memory_args(s, w, h)
+}
+
 fn find_bin(root: &Path, name: &str, env: &str, cfg: &str) -> Option<PathBuf> {
     if let Some(p) = crate::config::env_or(env, cfg) {
         let p = PathBuf::from(p);
@@ -275,6 +310,7 @@ pub async fn start_server(root: &Path, client: &reqwest::Client, st: &GenState, 
             role_path(root, s, "diff").unwrap().display(), role_path(root, s, "vae").unwrap().display(), role_path(root, s, "llm").unwrap().display());
         if let Some(mm) = role_path(root, s, "mmproj") { args += &format!(" --llm_vision \"{}\"", mm.display()); }
         if s.flow_shift > 0.0 { args += &format!(" --flow-shift {}", s.flow_shift); }
+        for a in server_memory_args(s) { args += &format!(" {a}"); }
         let sh = format!(
             "\"{}\" {} --lora-model-dir \"{}\" --diffusion-fa --listen-ip 127.0.0.1 --listen-port {} >> \"{}\" 2>&1 & pid=$!; while kill -0 {} 2>/dev/null; do sleep 3; done; kill $pid 2>/dev/null",
             bin.display(), args, lora_dir(root).display(), port(), log.display(), parent);
@@ -390,6 +426,7 @@ async fn generate_cli(root: &Path, cli: &Path, s: &ModelSpec, job: &GenJob, refs
         .arg("--sampling-method").arg("euler").arg("--diffusion-fa").arg("-s").arg(job.seed.to_string())
         .arg("-o").arg(&out);
     if s.flow_shift > 0.0 { c.arg("--flow-shift").arg(s.flow_shift.to_string()); }
+    for a in memory_args(s, job.w, job.h) { c.arg(a); }
     if preview_on() { c.arg("--preview").arg("proj").arg("--preview-path").arg(&prev).arg("--preview-interval").arg("1"); }
     for r in refs { c.arg("-r").arg(r); }
     c.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).kill_on_drop(true);

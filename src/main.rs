@@ -1612,12 +1612,14 @@ fn folder_norm(f: &str) -> String {
 struct AlbumIn {
     name: String,
     criteria: Value, // /api/images と同じパラメータ集合
-    #[serde(default)] folder: String, // "植物/病害" のようなネスト可のフォルダパス
-    #[serde(default)] goal: String, // AIフォルダの目標宣言(例「可愛い犬の画像を1000枚、実写優先」)。
+    // 部分更新(自動保存・スイッチ)で送られなかった項目は既存を引き継ぐ。
+    // None=送られていない=引き継ぐ / Some("")=明示的に空にした=消す、を区別するため Option で受ける
+    #[serde(default)] folder: Option<String>, // "植物/病害" のようなネスト可のフォルダパス
+    #[serde(default)] goal: Option<String>, // AIフォルダの目標宣言(例「可愛い犬の画像を1000枚、実写優先」)。
                                     // コピー→書き換えでエージェントのレシピごと増殖する(常駐キュレーターの器)
     #[serde(default)] agent: Value, // {auto: bool, target: 枚数} — 置いとくと自動で増える(オートパイロット)
-    #[serde(default)] keywords: Vec<String>, // 手動キーワード(LLM生成より優先で検索に使う)
-    #[serde(default)] engines: Vec<String>, // 検索元の選択(空=全部)
+    #[serde(default)] keywords: Option<Vec<String>>, // 手動キーワード(LLM生成より優先で検索に使う)
+    #[serde(default)] engines: Option<Vec<String>>, // 検索元の選択(空=全部)
     #[serde(default)] kind: String, // ""|"crawl"=収集 / "gen"=AI生成(docs/gen-design.md)。空なら既存を引き継ぐ
     #[serde(default)] recipe: Value, // 生成レシピ {size, steps, ...}。object 以外なら既存を引き継ぐ
 }
@@ -1629,9 +1631,15 @@ async fn api_album_make(State(app): S, Json(a): Json<AlbumIn>) -> impl IntoRespo
     let prev = std::fs::read_to_string(dir.join(format!("{slug}.json"))).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok());
     let kind = if !a.kind.is_empty() { a.kind.clone() } else { prev.as_ref().and_then(|p| p["kind"].as_str()).unwrap_or("").to_string() };
     let recipe = if a.recipe.is_object() { a.recipe.clone() } else { prev.as_ref().map(|p| p["recipe"].clone()).filter(|v| v.is_object()).unwrap_or(json!({})) };
-    let mut rec = json!({"name": slug, "criteria": a.criteria, "folder": folder_norm(&a.folder), "goal": a.goal,
+    let prev_str = |k: &str| prev.as_ref().and_then(|p| p[k].as_str()).unwrap_or("").to_string();
+    let prev_list = |k: &str| prev.as_ref().map(|p| p[k].clone()).filter(|v| v.is_array()).unwrap_or_else(|| json!([]));
+    let folder = a.folder.unwrap_or_else(|| prev_str("folder"));
+    let goal = a.goal.unwrap_or_else(|| prev_str("goal"));
+    let keywords = a.keywords.map(|k| json!(k)).unwrap_or_else(|| prev_list("keywords"));
+    let engines = a.engines.map(|e| json!(e)).unwrap_or_else(|| prev_list("engines"));
+    let mut rec = json!({"name": slug, "criteria": a.criteria, "folder": folder_norm(&folder), "goal": goal,
         "agent": if a.agent.is_object() { a.agent } else { json!({}) },
-        "keywords": a.keywords, "engines": a.engines, "kind": kind, "recipe": recipe,
+        "keywords": keywords, "engines": engines, "kind": kind, "recipe": recipe,
         "created": prev.as_ref().and_then(|p| p["created"].as_f64())
             .unwrap_or_else(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64())});
     if let Some(lr) = prev.as_ref().map(|p| p["last_run"].clone()).filter(|v| v.is_object()) {
