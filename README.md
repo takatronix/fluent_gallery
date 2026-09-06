@@ -171,6 +171,10 @@ GET  /api/samples / POST /api/samples/{id}?n=1000        権利クリアなサ�
 POST /api/ingest/stop                                     取り込み/まとめ取りを途中で止める(取った分は残る)
 POST /api/ingest/url {url,source?,max?}                  指定ページ(または画像URL)の画像を取り込む。YouTube/X等の動画・SNSは yt-dlp でコマ取り込み(要 yt-dlp+ffmpeg、store版は拒否)、内部ネットワーク拒否
 POST /api/crawl  {album,n,minutes}                      AIフォルダの収集を開始
+POST /api/browse {album,url,goal?,limits?,judge?}         ブラウザ内蔵クローラー(crawler/ = Node+Playwright)で指定サイトを人目線で見て回り、内容画像を集める。
+                                                          未起動なら crawler/server.js を子プロセスで起こす(要 node + `cd crawler && npm install && npx playwright install chromium`)
+GET  /api/browse/status / POST /api/browse/stop           その状態(gallery 側の 渡した/通過/却下 + クローラー側の ページ/候補/止まった理由)/停止
+POST /api/deliver (multipart meta,file)                   クローラーからの引き渡し口。dup→寸法→目利き(内蔵VLM)→ crawl:<album> に収蔵し verdict を返す(docs/browser-crawler-spec.md §3)
 POST /api/enrich {backend,n}                            VLM属性付け
 POST /api/faces/enroll {album,person,shas,point}        顔IDの人物登録(pointで顔を指定)
 POST /api/faces/detect {sha1}                           顔位置+台帳との照合結果

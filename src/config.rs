@@ -19,6 +19,7 @@ pub fn defaults() -> Value {
         "tools": {"sd_server": "", "llama_server": ""}, // バイナリの手動指定(空=自動検出)
         "autopilot": {"interval_min": 30, "groom": true}, // ♻見回りの周期 / 属性・マスクの自動お手入れ
         "storage": {"cache_mb": 20480},               // preview/render キャッシュの上限
+        "crawler": {"base": "", "port": 8796, "dir": ""}, // ブラウザ内蔵クローラー(crawler/)。base=別プロセス/別マシン(空=子プロセスで起動)、dir=server.js の場所(空=自動検出)
     });
     // ステップ数はモデルごとに正解が違う(蒸留の klein は 4 で完成し、非蒸留の Qwen-Image-Edit は 20 要る)。
     // 共通の1個で上書きすると、少ない方に合わせたときに非蒸留モデルがノイズの残った絵を吐く。
@@ -130,7 +131,7 @@ pub fn masked() -> Value {
 
 /// いま効いている環境変数の上書き(設定画面に「開発用の上書き中」と出す)
 pub fn env_overrides() -> Value {
-    let names = ["FG_GEN_BASE", "FG_GEN_PORT", "FG_SD_SERVER", "FG_VLM_BASE", "FG_VLM_PORT", "FG_LLAMA_SERVER", "FG_CACHE_MB", "PORT"];
+    let names = ["FG_GEN_BASE", "FG_GEN_PORT", "FG_SD_SERVER", "FG_VLM_BASE", "FG_VLM_PORT", "FG_LLAMA_SERVER", "FG_CACHE_MB", "FG_CRAWLER_BASE", "FG_CRAWLER_DIR", "FG_CRAWLER_PORT", "PORT"];
     let mut o = serde_json::Map::new();
     for n in names {
         if let Ok(v) = std::env::var(n) { if !v.is_empty() { o.insert(n.into(), json!(v)); } }

@@ -2,6 +2,7 @@
 //! 原則: 人を待たせない(重い処理は全てバックグラウンドジョブ+進捗)、UIをロックしない、
 //!       正本はサイドカー・SQLiteは使い捨て索引、AI 1st(全操作がAPI=MCP化可能)。
 
+mod browse;
 mod crawl;
 mod edits;
 mod filter_commands;
@@ -49,6 +50,7 @@ struct App {
     folder_filter_owner: Mutex<Option<(String, String)>>,
     enrich: Arc<enrich::EnrichState>,
     crawl: Arc<crawl::CrawlState>,
+    browse: Arc<browse::BrowseState>, // ブラウザ内蔵クローラー(crawler/)の子プロセス+引き渡し成績
     crawl_queue: Mutex<Vec<CrawlIn>>, // 順番待ち(同時1本=VLM直列の現実に合わせ、弾かず並ばせる)
     gen_queue: Mutex<Vec<GenIn>>,     // 生成の順番待ち(同時1本のエンジンを弾かず並ばせる。「実行中です」で止めない)
     gen: Arc<gen::GenState>, // AI生成フォルダ(sd-server 子プロセス+ジョブ状態、docs/gen-design.md)
@@ -2629,6 +2631,163 @@ async fn api_crawl_stop(State(app): S) -> Json<Value> {
     Json(json!({"ok": true}))
 }
 
+// ---------- ブラウザ内蔵クローラー(crawler/ = Node+Playwright、docs/browser-crawler-spec.md) ----------
+// 収集(検索エンジン巡回)の隣にある「指定サイトを人目線で見て回る」経路。クローラーは選ぶだけ、判断(目利き)はここ=gallery 側
+
+#[derive(Deserialize)]
+struct BrowseIn {
+    album: String,
+    url: String,
+    #[serde(default)] goal: String,  // 空ならフォルダの goal
+    #[serde(default)] limits: Value, // spec §2 の limits(部分指定可、残りはクローラーの既定)
+    #[serde(default = "d_true")] judge: bool,
+    #[serde(default = "d_true")] headless: bool,
+}
+
+async fn api_browse(State(app): S, Json(b): Json<BrowseIn>) -> impl IntoResponse {
+    let bad = |m: String| (StatusCode::BAD_REQUEST, Json(json!({"detail": m}))).into_response();
+    let Ok(page) = reqwest::Url::parse(b.url.trim()) else { return bad("URLの形式が不正です".into()) };
+    if !matches!(page.scheme(), "http" | "https") { return bad("http/https のURLだけ見て回れます".into()); }
+    let host = page.host_str().unwrap_or("").to_string();
+    if let Some(x) = urlimport::blocked_host(&host) { return bad(format!("{x} は規約でダウンロードが禁止されているため対象外です")); }
+    if urlimport::media_host(&host) { return bad(format!("{host} は動画/SNS媒体なので「URLから取り込む」(yt-dlp)の側で扱います")); }
+    if !crawl::is_safe_url(page.as_str()).await { return bad("内部ネットワーク宛てのURLは対象外です".into()); }
+    let slug = album_slug(&b.album);
+    let Some(rec) = load_albums(&app.root).into_iter().find(|a| a["name"] == json!(slug.clone())) else {
+        return (StatusCode::NOT_FOUND, Json(json!({"detail": format!("フォルダ{slug}が見つかりません(先に目標付きフォルダを作ってください)")}))).into_response();
+    };
+    let goal = if b.goal.trim().is_empty() { rec["goal"].as_str().unwrap_or("").to_string() } else { b.goal.trim().to_string() };
+    let base = match browse::ensure(&app.root, &app.http, &app.browse).await {
+        Ok(x) => x,
+        Err(e) => return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"detail": e}))).into_response(),
+    };
+    if b.judge && !goal.is_empty() { vlm_wake(app).await; } // 目利きの VLM を先に温める(1枚目の deliver で 3 分待たせない)
+    let body = json!({"url": page.as_str(), "goal": goal, "album": slug,
+                      "gallery": format!("http://127.0.0.1:{}", BIND_PORT.load(Relaxed)),
+                      "deliver": true, "judge": b.judge, "headless": b.headless,
+                      "limits": if b.limits.is_object() { b.limits } else { json!({}) }});
+    let v: Value = match app.http.post(format!("{base}/jobs")).json(&body).timeout(std::time::Duration::from_secs(20)).send().await {
+        Ok(r) => r.json().await.unwrap_or(json!({})),
+        Err(e) => return (StatusCode::BAD_GATEWAY, Json(json!({"detail": format!("crawler: {e}")}))).into_response(),
+    };
+    let Some(id) = v["id"].as_str() else {
+        return (StatusCode::BAD_GATEWAY, Json(json!({"detail": format!("crawler が id を返しません: {v}")}))).into_response();
+    };
+    app.browse.reset();
+    *app.browse.last_job.lock().unwrap() = id.to_string();
+    *app.browse.last_album.lock().unwrap() = slug.clone();
+    println!("🕵 ブラウザ収集開始 {slug} ← {} (job {id})", page.as_str());
+    Json(json!({"ok": true, "id": id, "album": slug, "base": base})).into_response()
+}
+
+/// gallery 側の成績(delivered/accepted/…)+クローラー側のジョブ状態(pages/frontier/current/stop_reason)を合わせて返す
+async fn api_browse_status(State(app): S) -> Json<Value> {
+    let mut s = app.browse.status();
+    s["service"]["alive"] = json!(browse::health(&app.http).await.is_some());
+    let id = app.browse.last_job.lock().unwrap().clone();
+    if !id.is_empty() {
+        let job = app.http.get(format!("{}/jobs/{id}", browse::base())).timeout(std::time::Duration::from_secs(3)).send().await;
+        s["crawler"] = match job { Ok(r) => r.json::<Value>().await.unwrap_or(Value::Null), Err(_) => Value::Null };
+    }
+    Json(s)
+}
+
+async fn api_browse_stop(State(app): S) -> Json<Value> {
+    let id = app.browse.last_job.lock().unwrap().clone();
+    if id.is_empty() { return Json(json!({"ok": false, "detail": "ジョブなし"})); }
+    let r = app.http.post(format!("{}/jobs/{id}/stop", browse::base())).timeout(std::time::Duration::from_secs(5)).send().await;
+    Json(json!({"ok": r.is_ok()}))
+}
+
+/// クローラーからの引き渡し(spec §3)。dup→寸法→目利き(内蔵VLM)→収蔵の順で、verdict を返す。判断はここがする
+async fn api_deliver(State(app): S, mut mp: axum::extract::Multipart) -> impl IntoResponse {
+    let mut meta = json!({});
+    let mut data: Option<Vec<u8>> = None;
+    while let Ok(Some(field)) = mp.next_field().await {
+        match field.name() {
+            Some("meta") => { if let Ok(t) = field.text().await { meta = serde_json::from_str(&t).unwrap_or(json!({})); } }
+            Some("file") => { if let Ok(b) = field.bytes().await { data = Some(b.to_vec()); } }
+            _ => {}
+        }
+    }
+    let st = &app.browse;
+    let no = |reason: &str, why: String| Json(json!({"ok": false, "reason": reason, "why": why})).into_response();
+    let Some(data) = data else { return (StatusCode::BAD_REQUEST, Json(json!({"detail": "file がありません"}))).into_response() };
+    let album = meta["album"].as_str().unwrap_or("").trim().to_string();
+    if album.is_empty() { return (StatusCode::BAD_REQUEST, Json(json!({"detail": "meta.album がありません"}))).into_response(); }
+    let slug = album_slug(&album);
+    let Some(rec) = load_albums(&app.root).into_iter().find(|a| a["name"] == json!(slug.clone())) else {
+        return (StatusCode::NOT_FOUND, Json(json!({"detail": format!("フォルダ{slug}が見つかりません")}))).into_response();
+    };
+    st.delivered.fetch_add(1, Relaxed);
+    let sha1 = hex::encode(Sha1::digest(&data));
+    if store::meta_path(&app.root, &sha1).exists() { st.dup.fetch_add(1, Relaxed); return no("dup", "収蔵済み".into()); }
+    let url = meta["crawl"]["url"].as_str().unwrap_or("").to_string();
+    let landing = meta["crawl"]["landing"].as_str().unwrap_or("").to_string();
+    let landing_host = reqwest::Url::parse(&landing).ok().and_then(|u| u.host_str().map(String::from)).unwrap_or_default();
+    let uk = hex::encode(Sha1::digest(if url.is_empty() { sha1.as_bytes() } else { url.as_bytes() }));
+    let d2 = data.clone();
+    let Ok(Ok(img)) = tokio::task::spawn_blocking(move || image::load_from_memory(&d2)).await else {
+        st.bad.fetch_add(1, Relaxed);
+        return no("bad", "画像として読めない".into());
+    };
+    let min_side = meta["min_side"].as_u64().unwrap_or(200) as u32;
+    if img.width().min(img.height()) < min_side {
+        st.bad.fetch_add(1, Relaxed);
+        return no("too_small", format!("{}x{}", img.width(), img.height()));
+    }
+    let goal = {
+        let g = rec["goal"].as_str().unwrap_or("").trim().to_string();
+        if g.is_empty() { meta["crawl"]["query"].as_str().unwrap_or("").to_string() } else { g }
+    };
+    let keywords: Vec<String> = rec["keywords"].as_array().map(|a| a.iter().filter_map(|k| k.as_str().map(String::from)).collect()).unwrap_or_default();
+    let min_q = rec["agent"]["min_quality"].as_i64().filter(|q| *q > 0).unwrap_or(5);
+    let judge = meta["judge"].as_bool().unwrap_or(true) && !goal.is_empty();
+    let mut verdict = "pending";
+    let mut quality: Option<i64> = None;
+    if judge {
+        if enrich::local_vlm_base().is_none() { vlm_wake(app).await; }
+        match crawl::judge_builtin(&app.http, &img, &goal, &keywords).await {
+            Ok((m, q)) if m && q >= min_q => { verdict = "accepted"; quality = Some(q); }
+            Ok((m, q)) => {
+                st.rejected.fetch_add(1, Relaxed);
+                crawl::save_reject_thumb(&app.root, &uk, &img);
+                let why = if !m { "目標と不一致".to_string() } else { format!("品質低 q{q}") };
+                st.push_recent(false, &uk, &why);
+                return no("rejected", why);
+            }
+            Err(e) => { println!("🕵 目利き不可・保留のまま収蔵: {e}"); } // VLM が無くても受け取りは止めない(後で目利きできる)
+        }
+    }
+    let title = meta["crawl"]["title"].as_str().unwrap_or("").to_string();
+    let mut extra = json!({
+        "rights": meta["rights"].as_str().filter(|s| !s.is_empty()).unwrap_or("unknown"),
+        "origin": "real", "review": verdict,
+        "crawl": browse::normalize_crawl(meta["crawl"].clone(), &slug, &goal, &landing_host),
+    });
+    if let Some(q) = quality { extra["quality"] = json!(q); }
+    let (root, ext, src) = (app.root.clone(), browse::ext_of(&data), format!("crawl:{slug}"));
+    let res = tokio::task::spawn_blocking(move || {
+        let db = app.db.lock().unwrap();
+        store::ingest_bytes(&root, &db, &data, ext, &src, &extra)
+    }).await.unwrap_or(Err("bad"));
+    match res {
+        Ok(sha) => {
+            let label = if verdict == "accepted" {
+                st.accepted.fetch_add(1, Relaxed);
+                format!("採用 q{}", quality.unwrap_or(0))
+            } else {
+                st.pending.fetch_add(1, Relaxed);
+                "保留(目利きなし)".to_string()
+            };
+            st.push_recent(true, &sha, &format!("{label} {}", title.chars().take(30).collect::<String>()));
+            Json(json!({"ok": true, "sha1": sha, "verdict": verdict})).into_response()
+        }
+        Err("dup") => { st.dup.fetch_add(1, Relaxed); no("dup", "収蔵済み".into()) }
+        Err(_) => { st.bad.fetch_add(1, Relaxed); no("bad", "収蔵失敗".into()) }
+    }
+}
+
 // ---------- ブラウザ/スマホからのアップロード(画像・動画・カメラ直撮り) ----------
 
 async fn api_upload(State(app): S, mut mp: axum::extract::Multipart) -> impl IntoResponse {
@@ -3273,6 +3432,7 @@ async fn api_activity(State(app): S) -> Json<Value> {
     Json(json!({
         "ai": ai_status(app).await,
         "crawl": crawl,
+        "browse": app.browse.status(),
         "gen": gen,
         "lora": app.lora.status(),
         "enrich": app.enrich.status(),
@@ -4531,6 +4691,7 @@ async fn main() {
         folder_filter_owner: Mutex::new(None),
         enrich: Arc::new(enrich::EnrichState::default()),
         crawl: Arc::new(crawl::CrawlState::default()),
+        browse: Arc::new(browse::BrowseState::default()),
         crawl_queue: Mutex::new(Vec::new()),
         gen_queue: Mutex::new(Vec::new()),
         gen: Arc::new(gen::GenState::default()),
@@ -4589,6 +4750,10 @@ async fn main() {
         .route("/api/crawl/status", get(api_crawl_status))
         .route("/api/crawl/stop", post(api_crawl_stop))
         .route("/api/crawl/ledger/clear", post(api_ledger_clear))
+        .route("/api/browse", post(api_browse))
+        .route("/api/browse/status", get(api_browse_status))
+        .route("/api/browse/stop", post(api_browse_stop))
+        .route("/api/deliver", post(api_deliver).layer(axum::extract::DefaultBodyLimit::max(64 << 20)))
         .route("/api/gen", post(api_gen))
         .route("/api/gen/queue/{name}", delete(api_gen_queue_del))
         .route("/api/gen/status", get(api_gen_status))

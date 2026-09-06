@@ -1,0 +1,10 @@
+[
+  {"name": "commons_shiba", "url": "https://commons.wikimedia.org/wiki/Category:Shiba_Inu", "goal": "柴犬の写真。イラスト不可", "album": "bench_shiba",
+   "limits": {"max_pages": 12, "max_images": 30, "max_minutes": 6, "max_depth": 2}},
+  {"name": "nasa_saturn", "url": "https://science.nasa.gov/saturn/", "goal": "土星の写真(探査機やハッブルの実写)", "album": "bench_saturn",
+   "limits": {"max_pages": 10, "max_images": 30, "max_minutes": 6, "max_depth": 2}},
+  {"name": "met_impressionism", "url": "https://www.metmuseum.org/art/collection/search?q=impressionism&showOnly=openAccess", "goal": "印象派の油彩画", "album": "bench_impressionism",
+   "limits": {"max_pages": 10, "max_images": 30, "max_minutes": 6, "max_depth": 2}},
+  {"name": "blog_wpthemes", "url": "https://wordpress.org/showcase/", "goal": "ウェブサイトのスクリーンショット", "album": "bench_showcase",
+   "limits": {"max_pages": 8, "max_images": 20, "max_minutes": 5, "max_depth": 2}}
+]

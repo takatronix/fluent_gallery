@@ -894,7 +894,7 @@ fn parse_judge(text: &str) -> Result<(bool, i64), String> {
 }
 
 /// 内蔵VLM(無料)。原寸を送ると転送/前処理が重いので896pxに縮めて送る(判定精度は落ちない)
-async fn judge_builtin(client: &reqwest::Client, img: &image::DynamicImage, goal: &str, hints: &[String]) -> Result<(bool, i64), String> {
+pub(crate) async fn judge_builtin(client: &reqwest::Client, img: &image::DynamicImage, goal: &str, hints: &[String]) -> Result<(bool, i64), String> {
     use base64::Engine;
     let th = img.thumbnail(896, 896).into_rgb8();
     let mut buf = std::io::Cursor::new(Vec::new());

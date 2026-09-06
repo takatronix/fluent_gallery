@@ -32,6 +32,20 @@ TOOLS = [
      "description": "フォルダの収集台帳(使用済みクエリ/既読URL数/目標解釈brief)を読む",
      "inputSchema": {"type": "object", "properties": {
          "album": {"type": "string"}}, "required": ["album"]}},
+    {"name": "browse_start",
+     "description": "ブラウザ内蔵クローラー(crawler/、人目線で指定サイトを見て回る)で、指定 URL から画像を集めてフォルダに渡す。目利き(内蔵VLM)は gallery 側で行う",
+     "inputSchema": {"type": "object", "properties": {
+         "album": {"type": "string", "description": "目標付きフォルダ名"},
+         "url": {"type": "string", "description": "開始 URL(http/https)"},
+         "goal": {"type": "string", "description": "何を集めたいか(空ならフォルダの目標)"},
+         "limits": {"type": "object", "description": "max_pages/max_images/max_minutes/max_depth/min_side/same_site/bored_pages(部分指定可)"}},
+         "required": ["album", "url"]}},
+    {"name": "browse_status",
+     "description": "ブラウザ内蔵クローラーの現在状態(訪問ページ/候補/渡した・通過・却下・重複/直近ページ/止まった理由)",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "browse_stop",
+     "description": "ブラウザ内蔵クローラーのジョブを止める(いまのページを終えたら止まる)",
+     "inputSchema": {"type": "object", "properties": {}}},
     {"name": "gen_status",
      "description": "AI生成フォルダの現在状態(計画/生成/収蔵/却下/秒毎枚/直近ストリップ)とエンジン(sd-server, モデル取得状況)を返す",
      "inputSchema": {"type": "object", "properties": {}}},
@@ -98,6 +112,13 @@ def call_tool(name, args):
                     "brief": d.get("brief", "")}
         except Exception as e:
             return {"error": str(e)}
+    if name == "browse_start":
+        body = {k: v for k, v in args.items() if k in ("album", "url", "goal", "limits")}
+        return http("/api/browse", "POST", body, timeout=120)
+    if name == "browse_status":
+        return http("/api/browse/status")
+    if name == "browse_stop":
+        return http("/api/browse/stop", "POST", {})
     if name == "gen_status":
         return http("/api/gen/status")
     if name == "gen_start":

@@ -1,0 +1,18 @@
+{
+  "name": "fluent-crawler",
+  "version": "0.1.0",
+  "description": "fluent_gallery のブラウザ内蔵インテリジェント画像クローラー(fable 版)。人の目線でサイトを見て回り、関連しそうな画像を出典つきで gallery に渡す",
+  "main": "server.js",
+  "type": "commonjs",
+  "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "crawl": "node crawl.js",
+    "test": "node test/unit.js",
+    "bench": "node bench/run.js"
+  },
+  "dependencies": {
+    "playwright": "^1.63.0"
+  },
+  "license": "UNLICENSED"
+}

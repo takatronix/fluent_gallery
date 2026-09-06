@@ -660,6 +660,12 @@
         onkeydown="if(event.key==='Enter'){event.preventDefault(); ingestUrl();}">
       <button onclick="ingestUrl()">URLから取り込む</button>
     </div>
+    <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:8px">
+      <input id="brw_url" placeholder="またはサイトのURL — 内蔵ブラウザで人のように見て回り、フォルダの目標に合いそうな画像を集める(採否は内蔵AIの目利き)" style="flex:1; min-width:240px"
+        onkeydown="if(event.key==='Enter'){event.preventDefault(); browseSite();}">
+      <input id="brw_album" placeholder="目標付きフォルダ名" style="width:160px">
+      <button onclick="browseSite()">見て回って集める</button>
+    </div>
     <div class="sub" id="ing_msg" style="margin-top:6px"></div>
     <div id="presets" style="margin-top:10px; display:flex; gap:6px; flex-wrap:wrap"></div>
   </div>
@@ -5153,7 +5159,26 @@ async function enrich() {
     toast('属性付けを始めました' + (backend === 'builtin' ? '(内蔵VLM)' : ''));
   } catch (e) { toast('❌ ' + e.message); }
 }
-function openIngest() { $('ovl').classList.add('show'); }
+function openIngest() {
+  $('ovl').classList.add('show');
+  const a = albumsCache.find(x => x.name === loc.key); // フォルダを開いた状態なら、見て回る先の既定はそのフォルダ
+  if (a && a.goal && $('brw_album')) $('brw_album').value = a.name;
+}
+// サイトを見て回って集める(ブラウザ内蔵クローラー crawler/、docs/browser-crawler-spec.md)。
+// クローラーは「人が内容の画像と思う物」を選ぶだけで、採否はサーバ側の目利き(内蔵VLM)が決める
+async function browseSite() {
+  const url = $('brw_url').value.trim();
+  const album = $('brw_album').value.trim();
+  if (!url) return;
+  if (!album) { $('ing_msg').textContent = '目標付きのフォルダ名を入れてください(フォルダを開いてから取り込みを押すと自動で入ります)'; return; }
+  $('ing_msg').textContent = 'クローラー(内蔵ブラウザ)を起こしています…';
+  try {
+    const r = await j('/api/browse', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({album, url})});
+    toast(`「${album}」へ ${url} を見て回って集めます(job ${r.id})。通過した画像からフォルダに入ります`);
+    $('ing_msg').textContent = ''; $('brw_url').value = '';
+    closeIngest();
+  } catch (e) { $('ing_msg').textContent = '❌ ' + e.message; }
+}
 // URL取り込み: 指定した1ページに載っている画像を取り込む(利用者が場所を指定する=ブラウザで保存と同じ立場)。
 // YouTube/X/Instagram 等はサーバ側で門前払い(規約・ストア審査)
 async function ingestUrl() {
