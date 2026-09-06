@@ -45,6 +45,7 @@ pub fn build_cached(path: &Path, threads: usize, gpu: bool, what: &str, cache_di
             #[cfg(all(feature = "metal", not(feature = "cuda")))]
             {
                 use ort::ep::coreml::{ComputeUnits, ModelFormat};
+                use ort::ep::ArbitrarilyConfigurableExecutionProvider; // with_arbitrary_config はこのトレイト経由
                 let mut ep = ort::ep::CoreML::default()
                     .with_model_format(ModelFormat::MLProgram)
                     .with_compute_units(ComputeUnits::All)
