@@ -2458,6 +2458,7 @@ async fn api_ai_placement(State(app): S) -> Json<Value> {
 fn memory_budget(sys: &Value) -> Value {
     #[cfg(target_os = "macos")]
     {
+        let _ = sys; // 統合メモリ側は sys(nvidia-smi 由来)を使わない
         let sysctl = |k: &str| -> Option<String> {
             let o = std::process::Command::new("sysctl").args(["-n", k]).output().ok()?;
             Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
@@ -2470,10 +2471,13 @@ fn memory_budget(sys: &Value) -> Value {
             .args(["-r", "-d1", "-c", "IOAccelerator"]).output().ok()
             .map(|o| {
                 let t = String::from_utf8_lossy(&o.stdout).to_string();
-                let pick = |key: &str| t.split(key).nth(1)
-                    .and_then(|s| s.split(|c: char| !c.is_ascii_digit()).find(|x| !x.is_empty()))
-                    .and_then(|x| x.parse::<u64>().ok());
-                (pick("\"In use system memory\"").map(|b| b >> 20), pick("\"Device Utilization %\""))
+                // "=" まで含めて探す。ioreg には同じ語が凡例(IOReportLegend)にも出るが、
+                // 値を持つのは "…"=NNN の形だけ。mac_stats() の num_after と同じ流儀で並び順に依存しない
+                let pick = |key: &str| -> Option<u64> {
+                    let i = t.find(key)? + key.len();
+                    t[i..].chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse().ok()
+                };
+                (pick("\"In use system memory\"=").map(|b| b >> 20), pick("\"Device Utilization %\"="))
             }).unwrap_or((None, None));
         return json!({
             "kind": "unified", "unit": "統合メモリ",
