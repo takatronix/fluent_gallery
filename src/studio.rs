@@ -1,5 +1,5 @@
-//! fluent_scene exports are baked images. The source and its edit history stay immutable;
-//! the graph is a recipe for reopening the editor, never work performed while browsing.
+//! fluent_scene saves are private baked edit snapshots on the selected logical image.
+//! Original bytes stay immutable; browsing reads finished pixels, never executes the graph.
 
 use axum::{
     extract::{Multipart, Path as AxPath, State},
@@ -11,7 +11,11 @@ use base64::Engine;
 use image::{DynamicImage, ImageFormat, ImageReader};
 use serde_json::{json, Value};
 use sha1::{Digest, Sha1};
-use std::{io::Cursor, path::Path, sync::Mutex};
+use std::{
+    io::Cursor,
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
 
 use crate::{edits, store, App, S};
 
@@ -20,6 +24,10 @@ const MAX_RECIPE_BYTES: usize = 16 << 20;
 const MAX_EDGE: u32 = 8192;
 const MAX_PIXELS: u64 = 32_000_000;
 type Failure = (StatusCode, String);
+
+fn valid_sha(sha: &str) -> bool {
+    sha.len() == 40 && sha.bytes().all(|c| c.is_ascii_hexdigit())
+}
 
 fn fail(status: StatusCode, message: &str) -> Failure {
     (status, message.into())
@@ -35,6 +43,11 @@ fn io_error(error: impl std::fmt::Display) -> Failure {
 }
 
 fn validate_recipe(recipe: &Value) -> Result<(), Failure> {
+    if recipe["save_mode"] != "in_place" {
+        return Err(bad(
+            "保存方式が更新されました。ページを再読み込みしてから適用してください",
+        ));
+    }
     if !recipe.is_object() || !recipe["graph"].is_object() || !recipe["sceneYaml"].is_string() {
         return Err(bad("recipe には graph と sceneYaml が必要です"));
     }
@@ -47,13 +60,21 @@ fn validate_recipe(recipe: &Value) -> Result<(), Failure> {
     {
         return Err(bad("フィルタグラフのノードまたは接続が不正です"));
     }
-    if let Some(rev) = recipe.get("source_edits_rev") {
-        let Some(rev) = rev.as_str() else {
-            return Err(bad("source_edits_rev が不正です"));
-        };
-        if rev.len() != 12 || !rev.bytes().all(|c| c.is_ascii_hexdigit()) {
-            return Err(bad("source_edits_rev が不正です"));
+    for name in ["source_edits_rev", "target_edits_rev"] {
+        if let Some(rev) = recipe.get(name) {
+            let Some(rev) = rev.as_str() else {
+                return Err(bad(&format!("{name} が不正です")));
+            };
+            if rev.len() != 12 || !rev.bytes().all(|c| c.is_ascii_hexdigit()) {
+                return Err(bad(&format!("{name} が不正です")));
+            }
         }
+    }
+    if recipe
+        .get("input_sha")
+        .is_some_and(|sha| !sha.as_str().is_some_and(valid_sha))
+    {
+        return Err(bad("input_sha が不正です"));
     }
     if let Some(edits) = recipe.get("photo_edits") {
         validate_photo_edits(edits)?;
@@ -121,6 +142,16 @@ fn validate_photo_edit(edit: &Value) -> Result<(), Failure> {
                 .is_some_and(|version| version != 2 && version != edits::AUTO_VERSION)
             {
                 return Err(bad("未対応の自動補正バージョンです"));
+            }
+        }
+        Some("studio") => {
+            allowed_params(params, &["render_sha"])?;
+            if !params
+                .get("render_sha")
+                .and_then(Value::as_str)
+                .is_some_and(valid_sha)
+            {
+                return Err(bad("保存済みフィルター画像の参照が不正です"));
             }
         }
         Some("rotate") => {
@@ -202,6 +233,20 @@ fn validate_photo_edits(edits: &Value) -> Result<(), Failure> {
     Ok(())
 }
 
+fn validate_photo_references(root: &Path, edits: &Value) -> Result<(), Failure> {
+    for edit in edits.as_array().into_iter().flatten() {
+        if edit["op"] == "studio"
+            && edit["params"]["render_sha"]
+                .as_str()
+                .and_then(|sha| asset_path(root, sha))
+                .is_none()
+        {
+            return Err(bad("保存済みフィルター画像が見つかりません"));
+        }
+    }
+    Ok(())
+}
+
 /// Render draft photo controls from the source file, without changing its saved edit stack.
 pub async fn preview(
     State(app): S,
@@ -269,6 +314,7 @@ fn render_photo_preview(
         }
         (original, revision)
     };
+    validate_photo_references(&app.root, draft)?;
     let path = store::image_path(&app.root, sha, original["ext"].as_str().unwrap());
     let (w, h) = ImageReader::open(&path)
         .map_err(|_| bad("元画像を読み取れませんでした"))?
@@ -280,16 +326,8 @@ fn render_photo_preview(
             "画像は各辺 8192 px 以下、3200 万画素以下にしてください",
         ));
     }
-    let mut reader = ImageReader::open(&path).map_err(|_| bad("元画像を読み取れませんでした"))?;
-    let mut limits = image::Limits::default();
-    limits.max_image_width = Some(MAX_EDGE);
-    limits.max_image_height = Some(MAX_EDGE);
-    limits.max_alloc = Some(512 << 20);
-    reader.limits(limits);
-    let image = reader
-        .decode()
-        .map_err(|_| bad("元画像を読み取れませんでした"))?;
-    let image = edits::apply(image, draft);
+    let image = edits::load(&app.root, sha, original["ext"].as_str().unwrap(), draft)
+        .ok_or_else(|| bad("元画像または保存済みフィルター画像を読み取れませんでした"))?;
     let mut png = Cursor::new(Vec::new());
     image
         .write_to(&mut png, ImageFormat::Png)
@@ -584,135 +622,195 @@ fn save_resources(root: &Path, recipe: &Value) -> Result<Value, Failure> {
     Ok(recipe)
 }
 
-fn ordinary_output(root: &Path, sha: &str, identity: &str) -> Option<Value> {
-    let meta = store::load_meta(root, sha)?;
-    (meta["studio"]["identity"] == identity
-        && history(&meta) == json!([])
-        && store::image_path(root, sha, "png").is_file())
-    .then_some(meta)
+fn private_path(root: &Path, render_sha: &str, suffix: &str) -> PathBuf {
+    root.join("store/studio_renders")
+        .join(&render_sha[..2])
+        .join(format!("{render_sha}.{suffix}"))
+}
+
+/// A baked edit is private storage, never an images/meta row or a gallery item.
+pub fn asset_path(root: &Path, render_sha: &str) -> Option<PathBuf> {
+    if !valid_sha(render_sha) {
+        return None;
+    }
+    let path = private_path(root, render_sha, "png");
+    path.is_file().then_some(path)
+}
+
+/// These tiers are prepared at save time and remain usable after ordinary render-cache cleanup.
+pub fn display_path(root: &Path, render_sha: &str, width: u32) -> Option<PathBuf> {
+    if !valid_sha(render_sha) || !matches!(width, 120 | 360 | 1080 | 1600) {
+        return None;
+    }
+    let path = private_path(root, render_sha, &format!("{width}.jpg"));
+    path.is_file().then_some(path)
+}
+
+fn load_snapshot(root: &Path, render_sha: &str) -> Option<Value> {
+    asset_path(root, render_sha)?;
+    let snapshot: Value =
+        serde_json::from_slice(&std::fs::read(private_path(root, render_sha, "json")).ok()?)
+            .ok()?;
+    (snapshot["render_sha"] == render_sha
+        && snapshot["version"] == 2
+        && snapshot["recipe"].is_object())
+    .then_some(snapshot)
+}
+
+/// Add an ephemeral editor view of the last baked history entry. Legacy `studio` provenance
+/// stays untouched, so ordinary source resolution never follows a new self-reference.
+pub fn decorate_meta(root: &Path, meta: &mut Value) {
+    if let Some(object) = meta.as_object_mut() {
+        object.remove("studio_edit");
+    }
+    let Some(list) = meta["edits"].as_array() else {
+        return;
+    };
+    let Some(index) = list.iter().rposition(|edit| edit["op"] == "studio") else {
+        return;
+    };
+    let Some(render_sha) = list[index]["params"]["render_sha"].as_str() else {
+        return;
+    };
+    let Some(mut snapshot) = load_snapshot(root, render_sha) else {
+        return;
+    };
+    snapshot["index"] = json!(index);
+    snapshot["tail_edits"] = json!(&list[index + 1..]);
+    meta["studio_edit"] = snapshot;
+}
+
+fn reply_meta(root: &Path, mut meta: Value) -> Value {
+    meta["edits_rev"] = json!(edits::rev(&history(&meta)));
+    meta["studio_save_mode"] = json!("in_place");
+    decorate_meta(root, &mut meta);
+    meta
 }
 
 fn materialize(
     app: &'static App,
-    sha: &str,
+    selected_sha: &str,
     bytes: &[u8],
     recipe: &Value,
 ) -> Result<(Value, bool), Failure> {
-    // Serialize saves, but leave the gallery DB and image serving free during PNG work.
     static SAVES: Mutex<()> = Mutex::new(());
     let _save = SAVES.lock().unwrap_or_else(|p| p.into_inner());
-    let original = {
+    let input_sha = recipe["input_sha"].as_str().unwrap_or(selected_sha);
+    let (target, input) = {
         let _db = app.db.lock().unwrap_or_else(|p| p.into_inner());
-        source_meta(&app.root, sha)?
+        (
+            source_meta(&app.root, selected_sha)?,
+            source_meta(&app.root, input_sha)?,
+        )
     };
-    let previous = history(&original);
-    let previous_rev = edits::rev(&previous);
+    let target_history = history(&target);
+    let target_revision = edits::rev(&target_history);
+    let input_history = history(&input);
+    let input_revision = edits::rev(&input_history);
     if recipe
         .get("source_edits_rev")
-        .is_some_and(|rev| rev != &json!(previous_rev))
+        .is_some_and(|revision| revision != &json!(input_revision))
     {
         return Err(fail(
             StatusCode::CONFLICT,
-            "元画像の編集内容が変わりました。エディターを開き直してください",
+            "入力画像の編集内容が変わりました。エディターを開き直してください",
         ));
+    }
+    let expected_target = recipe.get("target_edits_rev").or_else(|| {
+        (input_sha == selected_sha)
+            .then(|| recipe.get("source_edits_rev"))
+            .flatten()
+    });
+    if expected_target.is_some_and(|revision| revision != &json!(target_revision)) {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            "この画像は別の操作で編集されました。開き直してください",
+        ));
+    }
+    if let Some(photo_edits) = recipe.get("photo_edits") {
+        validate_photo_references(&app.root, photo_edits)?;
     }
     let image = decode_png(bytes)?;
     let recipe = save_resources(&app.root, recipe)?;
+    // CAS tokens describe the request, not its pixels. A subsequent unchanged save must
+    // reuse its existing baked file even though the selected image's revision has advanced.
+    let mut identity_recipe = recipe.clone();
+    if let Some(object) = identity_recipe.as_object_mut() {
+        for field in [
+            "source_edits_rev",
+            "target_edits_rev",
+            "save_mode",
+            "input_sha",
+        ] {
+            object.remove(field);
+        }
+    }
     let identity = hex::encode(Sha1::digest(
-        serde_json::to_vec(&json!(["fluent-scene-baked-v1", sha, previous_rev, recipe]))
-            .map_err(io_error)?,
+        serde_json::to_vec(&json!([
+            "fluent-scene-in-place-v2",
+            selected_sha,
+            input_sha,
+            identity_recipe
+        ]))
+        .map_err(io_error)?,
     ));
-    // Re-encode after bounded decode: preserve PNG pixels/alpha, drop arbitrary input metadata.
     let mut png = Cursor::new(Vec::new());
     image
         .write_to(&mut png, ImageFormat::Png)
         .map_err(io_error)?;
-    let mut data = png_identity(png.into_inner(), &identity);
-    let mut output_sha = hex::encode(Sha1::digest(&data));
-    if ordinary_output(&app.root, &output_sha, &identity).is_some() {
-        write_display_files(&app.root, &output_sha, &image)?;
-        let db = app.db.lock().unwrap_or_else(|p| p.into_inner());
-        check_snapshot(&app.root, sha, &previous_rev)?;
-        // The prior output can be edited while display files are being prepared.
-        // Reload under the same lock used by edits so an old snapshot cannot clear its index revision.
-        if let Some(meta) = ordinary_output(&app.root, &output_sha, &identity) {
-            ensure_indexed(&db, &meta)?;
-            return Ok((meta, true));
-        }
+    let data = png_identity(png.into_inner(), &identity);
+    let render_sha = hex::encode(Sha1::digest(&data));
+    let snapshot = json!({"version": 2, "render_sha": render_sha, "identity": identity,
+        "target_sha": selected_sha, "source_sha": input_sha, "source_edits": input_history,
+        "source_edits_rev": input_revision, "recipe": recipe,
+        "w": image.width(), "h": image.height(), "bytes": data.len(),
+        "phash": store::phash64(&image), "tint": store::tint(&image)});
+    write_display_files(&app.root, &render_sha, &image)?;
+    crate::atomic_publish(&private_path(&app.root, &render_sha, "png"), &data).map_err(io_error)?;
+    crate::atomic_publish(
+        &private_path(&app.root, &render_sha, "json"),
+        &serde_json::to_vec(&snapshot).map_err(io_error)?,
+    )
+    .map_err(io_error)?;
+    if load_snapshot(&app.root, &render_sha).is_none() {
+        return Err(io_error(
+            "保存済みフィルター画像の情報を読み取れませんでした",
+        ));
     }
-    // An earlier output may now have its own edits. Keep that image/history unchanged.
-    if store::meta_path(&app.root, &output_sha).exists() {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        data = png_identity(data, &format!("{identity}:{nonce}"));
-        output_sha = hex::encode(Sha1::digest(&data));
-    }
-    let mut meta = original.clone();
-    let object = meta
-        .as_object_mut()
-        .ok_or_else(|| bad("元画像の情報が不正です"))?;
-    for field in [
-        "sha1",
-        "ext",
-        "w",
-        "h",
-        "bytes",
-        "phash",
-        "tint",
-        "ingested",
-        "edits",
-        "edits_rev",
-        "erev",
-        "redo",
-        "seg",
-        "faces",
-        "emb",
-        "embs",
-        "studio",
-        "filter_source_sha",
-        "filter_source",
-        "filter_source_edits",
-        "filter_recipe",
-        "filter_cache_key",
-    ] {
-        object.remove(field);
-    }
-    meta["sha1"] = json!(output_sha);
-    meta["ext"] = json!("png");
-    meta["w"] = json!(image.width());
-    meta["h"] = json!(image.height());
-    meta["bytes"] = json!(data.len());
-    meta["phash"] = json!(store::phash64(&image));
-    meta["tint"] = json!(store::tint(&image));
-    meta["ingested"] = json!(std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs_f64());
-    meta["original_thumbs"] = json!(true);
-    meta["studio"] = json!({"version": 1, "source_sha": sha, "source_edits": previous,
-        "source_edits_rev": previous_rev, "recipe": recipe, "identity": identity});
-    write_display_files(&app.root, &output_sha, &image)?;
-    crate::atomic_publish(&store::image_path(&app.root, &output_sha, "png"), &data)
-        .map_err(io_error)?;
-    // Only final metadata publication takes the DB lock, matching normal edit commits.
+    // The only logical image touched is the selected item; no INSERT of a new SHA occurs.
+    // Preserve concurrently refreshed tags/attributes by reloading under the edit commit lock.
     let db = app.db.lock().unwrap_or_else(|p| p.into_inner());
-    if let Err(error) = check_snapshot(&app.root, sha, &previous_rev) {
-        // A stale save never becomes a gallery item or leaves its full-size output behind.
-        for path in [
-            store::image_path(&app.root, &output_sha, "png"),
-            store::micro_path(&app.root, &output_sha),
-            store::thumb_path(&app.root, &output_sha),
-            store::preview_path(&app.root, &output_sha),
-        ] {
-            let _ = std::fs::remove_file(path);
+    check_snapshot(&app.root, input_sha, &input_revision)?;
+    check_snapshot(&app.root, selected_sha, &target_revision)?;
+    let mut current = source_meta(&app.root, selected_sha)?;
+    let mut list = history(&current).as_array().unwrap().clone();
+    let legacy_thumbs = !list.is_empty() && current["original_thumbs"] != true;
+    let reused = list
+        .last()
+        .is_some_and(|edit| edit["op"] == "studio" && edit["params"]["render_sha"] == render_sha);
+    if !reused {
+        list.push(json!({"op": "studio", "params": {"render_sha": render_sha}}));
+        current["edits"] = json!(list);
+        current["original_thumbs"] = json!(true);
+        // A decorated API object must never become the persisted source of truth.
+        if let Some(object) = current.as_object_mut() {
+            object.remove("studio_edit");
+            object.remove("studio_save_mode");
+            object.remove("edits_rev");
         }
-        return Err(error);
+        store::save_meta(&app.root, &current).map_err(io_error)?;
+        if legacy_thumbs {
+            for path in [
+                store::thumb_path(&app.root, selected_sha),
+                store::micro_path(&app.root, selected_sha),
+                store::preview_path(&app.root, selected_sha),
+            ] {
+                let _ = std::fs::remove_file(path);
+            }
+        }
     }
-    store::save_meta(&app.root, &meta).map_err(io_error)?;
-    ensure_indexed(&db, &meta)?;
-    Ok((meta, false))
+    ensure_indexed(&db, &current)?;
+    Ok((reply_meta(&app.root, current), reused))
 }
 
 fn check_snapshot(root: &Path, sha: &str, revision: &str) -> Result<(), Failure> {
@@ -728,25 +826,23 @@ fn check_snapshot(root: &Path, sha: &str, revision: &str) -> Result<(), Failure>
 fn ensure_indexed(db: &rusqlite::Connection, meta: &Value) -> Result<(), Failure> {
     let tx = db.unchecked_transaction().map_err(io_error)?;
     store::index_meta(&tx, meta);
+    let expected = edits::rev(&history(meta));
     let present: bool = tx
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM images WHERE sha1=? AND (erev IS NULL OR erev=''))",
-            [meta["sha1"].as_str().unwrap()],
+            "SELECT EXISTS(SELECT 1 FROM images WHERE sha1=? AND erev=?)",
+            [meta["sha1"].as_str().unwrap(), &expected],
             |row| row.get(0),
         )
         .map_err(io_error)?;
     if !present {
-        return Err(io_error("画像索引の保存に失敗しました"));
+        return Err(io_error("画像索引の更新に失敗しました"));
     }
     tx.commit().map_err(io_error)
 }
 
-fn write_display_files(root: &Path, sha: &str, image: &DynamicImage) -> Result<(), Failure> {
-    for (path, width, quality) in [
-        (store::micro_path(root, sha), 120, 72),
-        (store::thumb_path(root, sha), 360, 82),
-        (store::preview_path(root, sha), 1080, 88),
-    ] {
+fn write_display_files(root: &Path, render_sha: &str, image: &DynamicImage) -> Result<(), Failure> {
+    for (width, quality) in [(120, 72), (360, 82), (1080, 88), (1600, 90)] {
+        let path = private_path(root, render_sha, &format!("{width}.jpg"));
         if path.is_file() {
             continue;
         }
@@ -805,7 +901,11 @@ mod tests {
         )
         .is_err());
         assert!(validate_recipe(&json!({"sceneYaml": "scene: {}"})).is_err());
-        assert!(validate_recipe(&json!({"graph": {"n": [{"i": "n1", "t": "src"}], "e": []}, "sceneYaml": "scene: {}", "source_edits_rev": "0123456789ab"})).is_ok());
+        assert!(validate_recipe(&json!({"save_mode": "in_place", "graph": {"n": [{"i": "n1", "t": "src"}], "e": []}, "sceneYaml": "scene: {}", "source_edits_rev": "0123456789ab"})).is_ok());
+        assert!(validate_recipe(
+            &json!({"graph": {"n": [{"i": "n1", "t": "src"}], "e": []}, "sceneYaml": "scene: {}"})
+        )
+        .is_err());
     }
 
     #[test]
@@ -873,6 +973,10 @@ mod tests {
             {"op": "pipeline", "params": {"edits": [{"op": "filter", "params": {"name": "canny"}}]}}
         ]);
         assert!(validate_photo_edits(&draft).is_ok());
+        assert!(validate_photo_edits(
+            &json!([{"op":"studio","params":{"render_sha":"a".repeat(40)}}])
+        )
+        .is_ok());
         for invalid in [
             json!([{"op": "adjust", "params": {"exposure": 99}}]),
             json!([{"op": "filter", "params": {"name": "blur", "amount": -1}}]),
@@ -888,5 +992,52 @@ mod tests {
         let invalid_recipe = json!({"graph": {"n": [{"i": "n1", "t": "src"}], "e": []},
             "sceneYaml": "scene: {}", "photo_edits": [{"op": "unknown", "params": {}}]});
         assert!(validate_recipe(&invalid_recipe).is_err());
+    }
+
+    #[test]
+    fn active_studio_snapshot_is_private_and_follows_history_undo() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "fluent-studio-private-{}-{nonce}",
+            std::process::id()
+        ));
+        let (selected, render) = ("a".repeat(40), "b".repeat(40));
+        let png = private_path(&root, &render, "png");
+        std::fs::create_dir_all(png.parent().unwrap()).unwrap();
+        std::fs::write(png, b"private image marker").unwrap();
+        std::fs::write(
+            private_path(&root, &render, "json"),
+            json!({"version": 2,
+            "render_sha": render, "source_sha": selected, "recipe": {"graph": {"n": [], "e": []}}})
+            .to_string(),
+        )
+        .unwrap();
+        let mut meta = json!({"sha1": selected, "studio": {"source_sha": "c".repeat(40)}, "edits": [
+            {"op": "auto", "params": {"version": 3}},
+            {"op": "studio", "params": {"render_sha": render}},
+            {"op": "flip", "params": {"dir": "h"}}
+        ]});
+        let provenance = meta["studio"].clone();
+        decorate_meta(&root, &mut meta);
+        assert_eq!(meta["studio_edit"]["index"], 1);
+        assert_eq!(
+            meta["studio_edit"]["tail_edits"],
+            json!([{"op":"flip","params":{"dir":"h"}}])
+        );
+        assert_eq!(meta["studio"], provenance);
+        assert!(!store::meta_path(&root, &render).exists());
+        assert!(!store::image_path(&root, &render, "png").exists());
+        meta["edits"] = json!([]);
+        decorate_meta(&root, &mut meta);
+        assert!(meta.get("studio_edit").is_none());
+        assert!(
+            asset_path(&root, &render).is_some(),
+            "undo keeps the saved bytes available"
+        );
+        assert!(asset_path(&root, "../invalid").is_none());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

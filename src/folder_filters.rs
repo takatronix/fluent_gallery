@@ -341,8 +341,9 @@ fn materialize_one(
             return Ok((cached_sha, true));
         }
     }
-    let image = image::open(path).map_err(|e| e.to_string())?;
-    let image = edits::apply(edits::apply(image, &previous), &json!([edit]));
+    let image = edits::load(root, sha, original["ext"].as_str().unwrap(), &previous)
+        .ok_or("source image or saved filter result missing")?;
+    let image = edits::apply(image, &json!([edit]));
     // Keep color PNGs consistent for consumers of baked Canny/grayscale results; retain alpha.
     let image = if image.color().has_alpha() {
         image
