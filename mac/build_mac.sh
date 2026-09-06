@@ -109,7 +109,12 @@ if [ -n "${SIGN:-}" ]; then
   codesign --force --options runtime --timestamp --sign "$SIGN" "$APP"
   codesign --verify --deep --strict "$APP" && echo "署名OK"
 else
-  echo "(SIGN 未指定: 未署名。配布するには Developer ID で署名+notarize が必要)"
+  # 未署名のままだと本体だけ linker の ad-hoc 署名で Resources を封印していない=署名が「壊れている」扱いになり、
+  # ダウンロードした人に「壊れているため開けません。ゴミ箱に入れる必要があります」が出る(2026-09-06 実害)。
+  # 束ごと ad-hoc 署名して整合を取る。Gatekeeper は通らないが「開発元を確認できない」止まりになり、
+  # システム設定 → プライバシーとセキュリティ → 「このまま開く」か xattr -dr com.apple.quarantine で開ける
+  codesign --force --deep --sign - "$APP" && codesign --verify --deep --strict "$APP" && echo "ad-hoc 署名OK(整合のみ)"
+  echo "(SIGN 未指定: Developer ID 署名なし。配布するには Developer ID Application で署名+notarize が必要)"
 fi
 
 step "DMG $DMG"
