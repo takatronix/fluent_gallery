@@ -34,6 +34,8 @@ static TOTAL_MB: AtomicUsize = AtomicUsize::new(0);
 pub fn enc_path(root: &Path) -> PathBuf { root.join("engine/models").join(ENC_FILE) }
 pub fn dec_path(root: &Path) -> PathBuf { root.join("engine/models").join(DEC_FILE) }
 pub fn present(root: &Path) -> bool { enc_path(root).exists() && dec_path(root).exists() }
+/// もうメモリに載っているか(載って初めて mem を消費する)
+pub fn loaded() -> bool { ENC.get().map(|o| o.is_some()).unwrap_or(false) }
 
 pub fn status(root: &Path) -> Value {
     json!({

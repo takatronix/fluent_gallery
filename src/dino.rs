@@ -39,6 +39,8 @@ static TOTAL_MB: AtomicUsize = AtomicUsize::new(0);
 pub fn model_path(root: &Path) -> PathBuf { root.join("engine/models").join(MODEL_FILE) }
 pub fn tok_path(root: &Path) -> PathBuf { root.join("engine/models").join(TOK_FILE) }
 pub fn present(root: &Path) -> bool { model_path(root).exists() && tok_path(root).exists() }
+/// もうメモリに載っているか
+pub fn loaded() -> bool { SESS.get().map(|o| o.is_some()).unwrap_or(false) }
 
 pub fn status(root: &Path) -> Value {
     json!({
