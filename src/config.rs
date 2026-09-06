@@ -14,7 +14,7 @@ pub fn defaults() -> Value {
     json!({
         "keys": {"anthropic": "", "openai": "", "openrouter": "", "xai": "", "pexels": "", "pixabay": "", "civitai": ""},
         "roles": {"judge": ""},                       // 目利きの既定モデル(空=claude-sonnet-5)。フォルダ設定が優先
-        "gen": {"base": "", "port": 8092, "size": "1024x1024", "steps": 0, "model": "flux2-klein-4b", "preview": true}, // base=別マシンの sd-server(空=内蔵)。steps 0=モデルの既定。preview=途中経過(sd-cli)
+        "gen": {"base": "", "port": 8092, "size": "1024x1024", "steps": 0, "model": "flux2-klein-4b", "preview": true, "offload": "auto"}, // base=別マシンの sd-server(空=内蔵)。steps 0=モデルの既定。preview=途中経過(sd-cli)。offload=auto|on|off(--offload-to-cpu)
         "vlm": {"base": ""},                          // 別マシンの llama-server / OpenAI 互換 VLM(空=内蔵)
         "tools": {"sd_server": "", "llama_server": ""}, // バイナリの手動指定(空=自動検出)
         "autopilot": {"interval_min": 30, "groom": true}, // ♻見回りの周期 / 属性・マスクの自動お手入れ

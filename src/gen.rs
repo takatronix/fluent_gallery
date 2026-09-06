@@ -160,40 +160,98 @@ pub fn external_base() -> Option<String> {
     crate::config::env_or("FG_GEN_BASE", "gen.base").map(|s| s.trim_end_matches('/').to_string())
 }
 pub fn preview_on() -> bool { crate::config::get_bool("gen.preview", true) }
+/// 生成時の省メモリ計画。CUDA(Linux)で空き VRAM を実測し、必要量から段階的に付ける(docs/gen-design.md §6)。
+/// 設定 gen.offload: "auto"(空き VRAM で判定・既定) / "on"(常に --offload-to-cpu) / "off"(何もしない)。
+/// Mac は統合メモリなので auto では常に何もしない。
+#[derive(Default, Clone)]
+pub struct MemPlan {
+    pub offload: bool,    // --offload-to-cpu: 重みを RAM に置き、必要な層だけ VRAM へ
+    pub vae_tiling: bool, // --vae-tiling: VAE デコードをタイル分割(計算バッファを頭打ちに)
+    pub note: String,     // ログ/UI 用: 選んだモードと、載らない時の提案(量子化↓→解像度↓→外部API)
+}
+impl MemPlan {
+    /// sd-cli / sd-server どちらにも渡せる追加フラグ
+    pub fn flags(&self) -> Vec<&'static str> {
+        let mut v = Vec::new();
+        if self.offload { v.push("--offload-to-cpu"); }
+        if self.vae_tiling { v.push("--vae-tiling"); }
+        v
+    }
+    /// 省メモリの最大構成(OOM 検出後の 1 回だけの再試行用)
+    pub fn max() -> Self { MemPlan { offload: true, vae_tiling: true, note: "OOM 検出 → 最大構成で再試行".into() } }
+}
 
-/// VAE デコードの計算バッファ(MiB)。画素数にきれいに比例する。実測 1024² で 6658MiB(docs/gen-cuda-notes.md §2)
-fn vae_buffer_mb(w: u32, h: u32) -> u64 { 6658 * (w as u64 * h as u64) / (1024 * 1024) }
-/// --vae-tiling を付けたときの VAE 計算バッファの頭打ち(解像度に依らない。実測 約1.8GB)
-const TILED_VAE_MB: u64 = 1843;
+/// VAE デコードの計算バッファ(4090, flux2-vae 実測): 1024² で約 6658MiB、面積に比例して増える
+const VAE_BUF_MIB_1MP: f64 = 6658.0;
+/// --vae-tiling を付けた時の VAE 側の頭打ち(解像度にほぼ依らない概算)
+const VAE_TILING_MIB: f64 = 1800.0;
+/// --offload-to-cpu 時に拡散本体の他へ要る VRAM 余白(概算)
+const OFFLOAD_EXTRA_MIB: f64 = 1500.0;
 
-/// 空きVRAM(MiB)。複数GPUなら一番少ない物に合わせる。
-/// Mac は統合メモリで VRAM の区別が無いので None(=引数を足さない=従来どおり)
-fn free_vram_mb() -> Option<u64> {
-    if cfg!(target_os = "macos") { return None; }
+/// nvidia-smi で空き VRAM(MiB)。複数 GPU なら最大の空きを返す。取れなければ None
+fn free_vram_mib() -> Option<u64> {
     let out = std::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"]).output().ok()?;
+        .args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"])
+        .output().ok()?;
     if !out.status.success() { return None; }
-    String::from_utf8_lossy(&out.stdout).lines().filter_map(|l| l.trim().parse::<u64>().ok()).min()
+    String::from_utf8_lossy(&out.stdout).lines()
+        .filter_map(|l| l.trim().parse::<u64>().ok()).max()
 }
 
-/// 空きVRAMに収まる中で一番速い引数を選ぶ(docs/gen-cuda-notes.md §4)。
-/// tiling は無料ではない(512²で1.67倍・768²で1.46倍遅い)ので、入るなら付けない。
-/// 逆に付けないと 1024² は VAE デコードで 6.5GB を一括要求して落ちる ―― しかもサンプリング成功後に落ちるので
-/// 描けた絵を捨てて failed になる。offload は更に 1.44 倍遅いが、VRAM をほぼ使わない最後の砦。
-fn memory_args(s: &ModelSpec, w: u32, h: u32) -> Vec<String> {
-    let Some(free) = free_vram_mb() else { return vec![] };
-    let weights = s.files.iter().map(|f| f.bytes).sum::<u64>() >> 20;
-    let usable = free * 9 / 10; // 安全率。他プロセスが後から VRAM を取りに来る
-    if weights + vae_buffer_mb(w, h) <= usable { return vec![]; }
-    if weights + TILED_VAE_MB <= usable { return vec!["--vae-tiling".into()]; }
-    vec!["--vae-tiling".into(), "--offload-to-cpu".into()]
+/// 設定 gen.size("1024x1024")を (W, H) に。壊れていれば 1024²
+pub fn default_wh() -> (u32, u32) {
+    crate::config::get_str("gen.size")
+        .and_then(|s| { let (a, b) = s.split_once('x')?; Some((a.trim().parse().ok()?, b.trim().parse().ok()?)) })
+        .unwrap_or((1024, 1024))
 }
-/// 内蔵 sd-server は常駐で解像度を選べないので、設定の既定サイズで判定する
-fn server_memory_args(s: &ModelSpec) -> Vec<String> {
-    let size = crate::config::value("gen.size");
-    let (w, h) = size.as_str().and_then(|t| t.split_once('x'))
-        .and_then(|(a, b)| Some((a.trim().parse().ok()?, b.trim().parse().ok()?))).unwrap_or((1024, 1024));
-    memory_args(s, w, h)
+
+/// 空き VRAM と必要量から省メモリ計画を決める(docs/gen-design.md §6 の判定式、安全率 0.9)。
+/// vram が入る→素のまま(最速) / tiling が入る→--vae-tiling / offload が入る→--offload-to-cpu+--vae-tiling /
+/// どれも入らない→最大構成で試しつつ「量子化↓→解像度↓→外部API」を note で提案。
+pub fn mem_plan(s: &ModelSpec, w: u32, h: u32) -> MemPlan {
+    match crate::config::get_str("gen.offload").as_deref() {
+        Some("off") => return MemPlan::default(),
+        Some("on")  => return MemPlan { offload: true, vae_tiling: false, note: "offload(設定=常に)".into() },
+        _ => {} // "auto" もしくは未設定
+    }
+    if !cfg!(target_os = "linux") { return MemPlan::default(); } // Mac(統合メモリ)は不要
+    let weights = (s.files.iter().map(|f| f.bytes).sum::<u64>() >> 20) as f64;
+    let free = match free_vram_mib() {
+        Some(m) => m as f64,
+        None => return MemPlan { // 空きが読めない: 旧来のサイズ基準の保険(≒12GB 超は offload)
+            offload: weights > 11_444.0, vae_tiling: false,
+            note: "nvidia-smi 不在: モデルサイズ基準の保険".into() },
+    };
+    let safe = free * 0.9; // 安全率
+    let diff = (s.files.iter().find(|f| f.role == "diff").map(|f| f.bytes).unwrap_or(0) >> 20) as f64;
+    let vae = VAE_BUF_MIB_1MP * (w as f64 * h as f64) / (1024.0 * 1024.0);
+    if weights + vae <= safe {
+        MemPlan { offload: false, vae_tiling: false,
+            note: format!("vram モード(空き {free:.0} ≥ 必要 {:.0} MiB)", weights + vae) }
+    } else if weights + VAE_TILING_MIB <= safe {
+        MemPlan { offload: false, vae_tiling: true,
+            note: format!("tiling モード(VAE {vae:.0}MiB を --vae-tiling で頭打ち。空き {free:.0}MiB)") }
+    } else if diff + OFFLOAD_EXTRA_MIB <= safe {
+        MemPlan { offload: true, vae_tiling: true,
+            note: format!("offload モード(重みを RAM へ退避。空き {free:.0}MiB)") }
+    } else {
+        MemPlan { offload: true, vae_tiling: true,
+            note: format!("空き VRAM {free:.0}MiB では不足ぎみ。量子化↓→解像度↓→外部API を検討(最大構成で試行)") }
+    }
+}
+
+/// sd.cpp の VRAM 不足エラー(拡散本体 or VAE 計算バッファの cudaMalloc 失敗)をログ末尾から判定
+pub fn is_oom(log_tail: &str) -> bool {
+    log_tail.contains("cudaMalloc failed: out of memory")
+        || log_tail.contains("failed to allocate the compute buffer")
+        || log_tail.contains("alloc_tensor_range: failed to allocate")
+}
+
+/// engine/sd-server.log の末尾を見て OOM か判定(sd-server 経由の "no results" の理由分け用)
+pub fn is_oom_from_log(root: &Path) -> bool {
+    std::fs::read(root.join("engine/sd-server.log")).ok()
+        .map(|b| { let n = b.len().saturating_sub(8000); is_oom(&String::from_utf8_lossy(&b[n..])) })
+        .unwrap_or(false)
 }
 
 fn find_bin(root: &Path, name: &str, env: &str, cfg: &str) -> Option<PathBuf> {
@@ -310,7 +368,10 @@ pub async fn start_server(root: &Path, client: &reqwest::Client, st: &GenState, 
             role_path(root, s, "diff").unwrap().display(), role_path(root, s, "vae").unwrap().display(), role_path(root, s, "llm").unwrap().display());
         if let Some(mm) = role_path(root, s, "mmproj") { args += &format!(" --llm_vision \"{}\"", mm.display()); }
         if s.flow_shift > 0.0 { args += &format!(" --flow-shift {}", s.flow_shift); }
-        for a in server_memory_args(s) { args += &format!(" {a}"); }
+        let (dw, dh) = default_wh(); // 常駐サーバは設定サイズを前提に省メモリ計画を決める
+        let plan = mem_plan(s, dw, dh);
+        for f in plan.flags() { args += " "; args += f; }
+        if !plan.note.is_empty() { println!("🧠 sd-server 省メモリ: {}", plan.note); }
         let sh = format!(
             "\"{}\" {} --lora-model-dir \"{}\" --diffusion-fa --listen-ip 127.0.0.1 --listen-port {} >> \"{}\" 2>&1 & pid=$!; while kill -0 {} 2>/dev/null; do sleep 3; done; kill $pid 2>/dev/null",
             bin.display(), args, lora_dir(root).display(), port(), log.display(), parent);
@@ -426,7 +487,11 @@ async fn generate_cli(root: &Path, cli: &Path, s: &ModelSpec, job: &GenJob, refs
         .arg("--sampling-method").arg("euler").arg("--diffusion-fa").arg("-s").arg(job.seed.to_string())
         .arg("-o").arg(&out);
     if s.flow_shift > 0.0 { c.arg("--flow-shift").arg(s.flow_shift.to_string()); }
-    for a in memory_args(s, job.w, job.h) { c.arg(a); }
+    { // 1枚ごとの解像度で省メモリ計画(常駐サーバ側と同じ mem_plan。旧 offload_for は mem_plan に統合)
+        let plan = mem_plan(s, job.w, job.h);
+        for f in plan.flags() { c.arg(f); }
+        if !plan.note.is_empty() { println!("🧠 sd-cli 省メモリ: {}", plan.note); }
+    }
     if preview_on() { c.arg("--preview").arg("proj").arg("--preview-path").arg(&prev).arg("--preview-interval").arg("1"); }
     for r in refs { c.arg("-r").arg(r); }
     c.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
@@ -456,6 +521,7 @@ async fn generate_cli(root: &Path, cli: &Path, s: &ModelSpec, job: &GenJob, refs
         }
     }
     let status = child.wait().await.map_err(|e| e.to_string())?;
+    let _ = std::fs::write(root.join("engine/sd-cli.log"), &tail); // 直近 1 枚の stderr 末尾(失敗時の原因と進捗書式の確認用)
     if stop.load(Relaxed) { return Err("stopped".into()); }
     if !status.success() {
         let t = String::from_utf8_lossy(&tail);

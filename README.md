@@ -57,7 +57,7 @@ cargo build --release --no-default-features --features metal,store  # Mac・ス�
 
 生成フォルダはローカルでは `sd-cli`(stable-diffusion.cpp の公式リリース、MIT)を 1 枚ごとに起動する(途中経過が出せ、待機中はメモリを持たない)。別マシンの `sd-server` も使える(設定の接続先)。Mac の .app は `mac/build_mac.sh` が `Resources/sd/` に同梱する。
 開発時は `engine/bin/sd-server`(+ `libstable-diffusion.dylib`)を置くか `FG_SD_SERVER=パス`。モデル 3 本(klein 4B Q8_0 / FLUX.2 VAE / Qwen3-4B、計 7.1GB)は
-AI配役の「取得」または `POST /api/gen/pull` で `engine/models/` に初回 DL。Linux/CUDA は `cmake -DSD_CUDA=ON` で自前ビルド。
+AI配役の「取得」または `POST /api/gen/pull` で `engine/models/` に初回 DL。Linux/CUDA は `deploy.sh` が `tools/build_sdcpp.sh` で自前ビルドして `engine/bin/` に置く(`SD_BACKEND=VULKAN` で代替可)。
 別マシンの sd-server を使うなら `FG_GEN_BASE=http://host:8092`。API: `POST /api/gen {album,n}` / `GET /api/gen/status` / `POST /api/gen/stop` / `POST /api/gen/plan` / `GET /api/gen/engine`。
 
 ### Mac 販売ビルド(.app / .dmg)
