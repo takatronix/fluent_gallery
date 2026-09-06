@@ -43,6 +43,7 @@ struct App {
     enrich: Arc<enrich::EnrichState>,
     crawl: Arc<crawl::CrawlState>,
     crawl_queue: Mutex<Vec<CrawlIn>>, // 順番待ち(同時1本=VLM直列の現実に合わせ、弾かず並ばせる)
+    gen_queue: Mutex<Vec<GenIn>>,     // 生成の順番待ち(同時1本のエンジンを弾かず並ばせる。「実行中です」で止めない)
     gen: Arc<gen::GenState>, // AI生成フォルダ(sd-server 子プロセス+ジョブ状態、docs/gen-design.md)
     lora: Arc<lora::LoraState>, // LoRA 棚の取り込み/試し描きの進捗
     llm: Arc<llm::LlmState>,
@@ -1657,6 +1658,8 @@ async fn api_albums(State(app): S) -> Json<Value> {
     let running = app.crawl.alive.load(Relaxed);
     let running_album = app.crawl.album.lock().unwrap().clone();
     let gen_running = app.gen.alive.load(Relaxed);
+    let gen_q = gen_queue_names(app);
+    let crawl_q: Vec<String> = app.crawl_queue.lock().unwrap().iter().map(|c| album_slug(&c.album)).collect();
     let gen_album = app.gen.album.lock().unwrap().clone();
     // 件数の高速路: フォルダの大半はsource条件だけなので source→枚数 を1クエリで引く。
     // 従来の「フォルダごとに query_shas で全sha取得→len」は19フォルダで1.2秒＝UIもっさりの主因(2026-09-03)
@@ -1688,6 +1691,8 @@ async fn api_albums(State(app): S) -> Json<Value> {
         let gen_on = gen_running && a["name"] == json!(gen_album.clone());
         a["running"] = json!((running && a["name"] == json!(running_album.clone())) || gen_on);
         if gen_on { a["running_kind"] = json!("gen"); }
+        if let Some(pos) = gen_q.iter().position(|n| a["name"] == json!(n.clone())) { a["queued"] = json!(pos + 1); a["queued_kind"] = json!("gen"); }
+        if let Some(pos) = crawl_q.iter().position(|n| a["name"] == json!(n.clone())) { a["queued"] = json!(pos + 1); a["queued_kind"] = json!("crawl"); }
         out.push(a);
     }
     Json(json!(out))
@@ -1727,6 +1732,7 @@ fn album_busy(app: &App, name: &str) -> bool {
     let running = app.crawl.alive.load(Relaxed) && album_slug(&app.crawl.album.lock().unwrap()) == slug;
     let generating = app.gen.alive.load(Relaxed) && album_slug(&app.gen.album.lock().unwrap()) == slug;
     running || generating || app.crawl_queue.lock().unwrap().iter().any(|c| album_slug(&c.album) == slug)
+        || app.gen_queue.lock().unwrap().iter().any(|g| album_slug(&g.album) == slug)
 }
 fn err_json(code: StatusCode, msg: &str) -> axum::response::Response {
     (code, Json(json!({"detail": msg}))).into_response()
@@ -2686,10 +2692,12 @@ async fn api_activity(State(app): S) -> Json<Value> {
     let p = &app.ingest;
     let mut crawl = app.crawl.status();
     crawl["queue"] = json!(app.crawl_queue.lock().unwrap().iter().map(|c| album_slug(&c.album)).collect::<Vec<_>>());
+    let mut gen = app.gen.status();
+    gen["queue"] = json!(gen_queue_names(app));
     Json(json!({
         "ai": ai_status(app).await,
         "crawl": crawl,
-        "gen": app.gen.status(),
+        "gen": gen,
         "lora": app.lora.status(),
         "enrich": app.enrich.status(),
         "llm": app.llm.status(&app.root),
@@ -2772,11 +2780,13 @@ fn start_gen(app: &'static App, album: &str, n: usize, minutes: u64) -> Result<S
     let Some(rec) = rec else {
         return Err((StatusCode::NOT_FOUND, format!("フォルダ{slug}が見つかりません")));
     };
-    let goal = rec["goal"].as_str().unwrap_or("").to_string();
-    if goal.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "作りたい物(目標)が空です".into()));
-    }
     let recipe = &rec["recipe"];
+    // 目標が空でも参照があれば「参照の被写体のバリエーション」を既定の目標にする(右クリック「似た画像を作る」直後は目標が空で、
+    // 以前は「今すぐ1回作る」が押せなかった)
+    let refs = build_ref_pool(app, recipe);
+    let Some(goal) = gen::effective_goal(rec["goal"].as_str().unwrap_or(""), !refs.is_empty()) else {
+        return Err((StatusCode::BAD_REQUEST, "作りたい物(目標)が空です(作る物を書くか、参照画像を足してください)".into()));
+    };
     let size_s = recipe["size"].as_str().map(String::from).or_else(|| config::get_str("gen.size")).unwrap_or_else(|| "1024x1024".into());
     let (w, h) = size_s.split_once('x')
         .and_then(|(a, b)| Some((a.trim().parse::<u32>().ok()?, b.trim().parse::<u32>().ok()?)))
@@ -2788,7 +2798,6 @@ fn start_gen(app: &'static App, album: &str, n: usize, minutes: u64) -> Result<S
     // (共通の1個で全モデルを上書きすると、蒸留モデル向けの少ない値で非蒸留モデルが崩れる)
     let steps = recipe["steps"].as_u64().filter(|v| *v > 0)
         .unwrap_or_else(|| config::get_u64(&format!("gen.model_steps.{model}"), 0)).clamp(0, 50) as u32; // 0=モデルの既定
-    let refs = build_ref_pool(app, &recipe);
     // LoRA(G4): recipe.lora = [{file(stem), scale}]。棚に実在し、親モデルが選んだモデルに合う物だけ(klein 用を Qwen に着せない)
     let mut dropped_lora: Vec<String> = vec![];
     let lora_list: Vec<(String, f32)> = recipe["lora"].as_array().map(|a| a.iter().filter_map(|x| {
@@ -2816,15 +2825,37 @@ fn start_gen(app: &'static App, album: &str, n: usize, minutes: u64) -> Result<S
 static LAST_DROPPED_LORA: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 async fn api_gen(State(app): S, Json(g): Json<GenIn>) -> impl IntoResponse {
+    // 実行中なら弾かずに順番待ちへ(収集と同じ。同じフォルダの重複は上書き)。番人が終わり次第 5 秒以内に次を始める
+    if app.gen.alive.load(Relaxed) {
+        let mut q = app.gen_queue.lock().unwrap();
+        let slug = album_slug(&g.album);
+        if album_slug(&app.gen.album.lock().unwrap()) == slug {
+            return (StatusCode::CONFLICT, Json(json!({"detail": "このフォルダはいま生成中です"}))).into_response();
+        }
+        q.retain(|x| album_slug(&x.album) != slug);
+        q.push(g);
+        return Json(json!({"ok": true, "queued": true, "position": q.len(),
+                           "now": app.gen.album.lock().unwrap().clone(), "note": "いまの生成が終わったら自動で始まります"})).into_response();
+    }
     match start_gen(app, &g.album, g.n, g.minutes) {
         Ok(slug) => Json(json!({"ok": true, "album": slug, "dropped_lora": LAST_DROPPED_LORA.lock().unwrap().clone()})).into_response(),
         Err((code, msg)) => (code, Json(json!({"detail": msg}))).into_response(),
     }
 }
+fn gen_queue_names(app: &App) -> Vec<String> { app.gen_queue.lock().unwrap().iter().map(|g| album_slug(&g.album)).collect() }
 async fn api_gen_status(State(app): S) -> Json<Value> {
     let mut s = app.gen.status();
     s["engine"] = gen::engine_status(&app.root, &app.gen);
+    s["queue"] = json!(gen_queue_names(app));
     Json(s)
+}
+/// 順番待ちから外す(実行中の物は /api/gen/stop)
+async fn api_gen_queue_del(State(app): S, AxPath(name): AxPath<String>) -> Json<Value> {
+    let slug = album_slug(&name);
+    let mut q = app.gen_queue.lock().unwrap();
+    let before = q.len();
+    q.retain(|x| album_slug(&x.album) != slug);
+    Json(json!({"ok": true, "removed": before - q.len(), "queue": q.iter().map(|g| album_slug(&g.album)).collect::<Vec<_>>()}))
 }
 async fn api_gen_stop(State(app): S) -> Json<Value> {
     app.gen.stop.store(true, Relaxed);
@@ -2875,22 +2906,24 @@ async fn api_gen_plan(State(app): S, Json(g): Json<GenPlanIn>) -> impl IntoRespo
         used = gen::load_ledger(&app.root, &slug)["prompts"].as_array()
             .map(|a| a.iter().filter_map(|p| p["text"].as_str().map(String::from)).collect()).unwrap_or_default();
     }
-    if goal.trim().is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({"detail": "作りたい物(目標)をください"}))).into_response();
-    }
     // 参照とモデルもフォルダから拾って、本番と同じ条件で下見する(以前は参照抜きだったので「犬の参照なのに人が出る」下見になっていた)
-    let (mut ref_notes, mut refs_attached) = (vec![], false);
+    let (mut ref_notes, mut refs_attached, mut has_refs) = (vec![], false, false);
     if !g.album.is_empty() {
         let slug = album_slug(&g.album);
         if let Some(rec) = load_albums(&app.root).into_iter().find(|a| a["name"] == json!(slug.clone())) {
             let recipe = rec["recipe"].clone();
             let model = recipe["model"].as_str().filter(|m| gen::MODELS.iter().any(|s| s.id == *m)).map(String::from).unwrap_or_else(gen::default_model_id);
             let pool = build_ref_pool(app, &recipe);
-            if !pool.is_empty() { vlm_wake(app).await; }
+            has_refs = !pool.is_empty();
+            if has_refs { vlm_wake(app).await; }
             ref_notes = gen::resolve_ref_notes(&app.root, &app.http, &pool.notes).await;
             refs_attached = gen::spec(&model).refs && !pool.is_empty();
         }
     }
+    // 目標が空でも参照があれば既定の目標(start_gen と同じ)
+    let Some(goal) = gen::effective_goal(&goal, has_refs) else {
+        return (StatusCode::BAD_REQUEST, Json(json!({"detail": "作りたい物(目標)をください(参照画像を足すだけでも可)"}))).into_response();
+    };
     let prompts = gen::plan(&app.root, &app.http, &app.llm, &goal, &used, g.n.clamp(1, 24), &ref_notes, refs_attached, &[]).await;
     Json(json!({"goal": goal, "prompts": prompts, "refs": ref_notes, "refs_attached": refs_attached})).into_response()
 }
@@ -3894,6 +3927,7 @@ async fn main() {
         enrich: Arc::new(enrich::EnrichState::default()),
         crawl: Arc::new(crawl::CrawlState::default()),
         crawl_queue: Mutex::new(Vec::new()),
+        gen_queue: Mutex::new(Vec::new()),
         gen: Arc::new(gen::GenState::default()),
         lora: Arc::new(lora::LoraState::default()),
         llm: Arc::new(llm::LlmState::default()),
@@ -3939,6 +3973,7 @@ async fn main() {
         .route("/api/crawl/stop", post(api_crawl_stop))
         .route("/api/crawl/ledger/clear", post(api_ledger_clear))
         .route("/api/gen", post(api_gen))
+        .route("/api/gen/queue/{name}", delete(api_gen_queue_del))
         .route("/api/gen/status", get(api_gen_status))
         .route("/api/gen/stop", post(api_gen_stop))
         .route("/api/gen/plan", post(api_gen_plan))
@@ -4042,6 +4077,23 @@ async fn main() {
             if let Some(c) = next {
                 if let Ok(slug) = start_crawl(app, &c.album, c.n, c.minutes, c.min_quality) {
                     println!("⏭ 順番待ちから収集開始: {slug}");
+                }
+            }
+        }
+    });
+    // 生成キューの番人: 走ってる生成が終わったら順番待ちの次を自動で始める(収集と同じ 5 秒間隔)
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            if app.gen.alive.load(Relaxed) { continue; }
+            let next = {
+                let mut q = app.gen_queue.lock().unwrap();
+                if q.is_empty() { None } else { Some(q.remove(0)) } // 先入れ先出し
+            };
+            if let Some(g) = next {
+                match start_gen(app, &g.album, g.n, g.minutes) {
+                    Ok(slug) => println!("⏭ 順番待ちから生成開始: {slug}"),
+                    Err((_, e)) => println!("⏭ 順番待ちの生成を開始できず({}): {e}", g.album),
                 }
             }
         }

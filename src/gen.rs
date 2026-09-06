@@ -67,6 +67,15 @@ pub const MODELS: &[ModelSpec] = &[
     },
 ];
 pub const DEFAULT_MODEL: &str = "flux2-klein-4b";
+
+/// 参照だけあって目標が空のときの既定の目標(右クリック「似た画像を作る」直後はこの状態)。
+/// 計画 LLM は GOAL を英語化するので日本語でよい
+pub const REF_ONLY_GOAL: &str = "参照画像と同じ被写体(同じ個体・見た目・色・画風)のまま、場面・ポーズ・構図・光・季節を変えたバリエーション";
+/// 実際に使う目標。空なら参照がある時だけ既定(REF_ONLY_GOAL)、参照も無ければ None(=入力を求める)
+pub fn effective_goal(goal: &str, has_refs: bool) -> Option<String> {
+    let g = goal.trim();
+    if !g.is_empty() { Some(g.to_string()) } else if has_refs { Some(REF_ONLY_GOAL.to_string()) } else { None }
+}
 pub const DEFAULT_PORT: u16 = 8092;
 const PHASH_NEAR: u32 = 4; // 生成物同士の近重複(同じ seed 近傍・同じ構図)はこれ以下で捨てる
 
@@ -803,6 +812,7 @@ pub async fn run(
     let started = std::time::Instant::now();
     let set_last = |m: String| *st.last.lock().unwrap() = m;
     let s = spec(&model_id);
+    let goal = effective_goal(&goal, !refs.is_empty()).unwrap_or(goal); // 参照だけで目標が空 → 既定の目標
     *st.model.lock().unwrap() = s.id.into();
     // プロバイダ: 外部 sd-server > ローカル sd-cli(途中経過あり) > 同梱 sd-server
     let external = external_base();
@@ -970,12 +980,18 @@ pub async fn run(
                     Err(e) => { set_last(format!("目利き不可({e}) — 近重複だけで収蔵")); ("none", 0) }
                 }
             } else { ("none", 0) };
-            let extra = json!({
-                "rights": format!("generated:{}", s.license),
-                "gen": {"provider": provider, "model": s.id, "file": role_path(&root, s, "diff").and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())),
+            let gen_info = json!({"provider": provider, "model": s.id, "file": role_path(&root, s, "diff").and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())),
                         "prompt": prompt, "seed": job.seed, "steps": job.steps, "cfg": s.cfg, "w": job.w, "h": job.h,
                         "refs": ref_shas, "lora": lora.iter().map(|(f, s)| json!({"file": f, "scale": s})).collect::<Vec<_>>(),
-                        "secs": (secs * 10.0).round() / 10.0, "gate": gate, "quality": quality, "album": album},
+                        "secs": (secs * 10.0).round() / 10.0, "gate": gate, "quality": quality, "album": album});
+            // 来歴は画像ファイル自体にも埋める(iTXt "parameters"=A1111/ComfyUI 互換の1行, "fluent_gallery"=JSON)。
+            // 書き出し・ダウンロード後も「どのモデルで何のプロンプトか」が残る。sha1 は埋めた後のバイト列で取る
+            let params = format!("{}\nSteps: {}, Sampler: euler, CFG scale: {}, Seed: {}, Size: {}x{}, Model: {}, Software: Fluent Gallery",
+                prompt, job.steps, s.cfg, job.seed, job.w, job.h, s.id);
+            let png = store::png_with_text(&png, &[("parameters", &params), ("fluent_gallery", &json!({"origin": "synthetic", "gen": &gen_info}).to_string())]);
+            let extra = json!({
+                "rights": format!("generated:{}", s.license),
+                "gen": gen_info,
                 "cost": {"usd": 0.0, "by": provider},
                 "quality": if quality > 0 { json!(quality) } else { Value::Null },
             });

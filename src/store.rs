@@ -447,6 +447,88 @@ fn process_one(root: &Path, f: &Path, source: &str, origin: &str, mv: bool) -> O
     Some(m)
 }
 
+/// PNG に文字列メタデータ(iTXt, UTF-8)を埋める。生成物のプロンプト/モデル/seed を画像ファイル自体に残し、
+/// 書き出し・ダウンロード後も A1111/ComfyUI/Civitai 等の "parameters" 読みで見えるようにする。
+/// 同じキーワードの既存 tEXt/iTXt/zTXt(sd.cpp が書くもの等)は置き換える。PNG でなければそのまま返す
+pub fn png_with_text(png: &[u8], entries: &[(&str, &str)]) -> Vec<u8> {
+    const SIG: &[u8] = b"\x89PNG\r\n\x1a\n";
+    if png.len() < 8 + 25 || &png[..8] != SIG { return png.to_vec(); }
+    fn crc32(data: &[u8]) -> u32 {
+        let mut c = 0xFFFF_FFFFu32;
+        for &b in data {
+            c ^= b as u32;
+            for _ in 0..8 { c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 }; }
+        }
+        !c
+    }
+    fn chunk(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut v = Vec::with_capacity(body.len() + 12);
+        v.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        v.extend_from_slice(kind);
+        v.extend_from_slice(body);
+        let mut c = kind.to_vec();
+        c.extend_from_slice(body);
+        v.extend_from_slice(&crc32(&c).to_be_bytes());
+        v
+    }
+    let mut out = Vec::with_capacity(png.len() + 2048);
+    out.extend_from_slice(SIG);
+    let (mut i, mut inserted) = (8usize, false);
+    while i + 12 <= png.len() {
+        let n = u32::from_be_bytes([png[i], png[i + 1], png[i + 2], png[i + 3]]) as usize;
+        let end = i + 12 + n;
+        if end > png.len() { break; }
+        let kind = &png[i + 4..i + 8];
+        let body = &png[i + 8..i + 8 + n];
+        let same_key = matches!(kind, b"tEXt" | b"iTXt" | b"zTXt") && {
+            let kw = body.split(|b| *b == 0).next().unwrap_or(&[]);
+            entries.iter().any(|(k, _)| k.as_bytes() == kw)
+        };
+        if !same_key { out.extend_from_slice(&png[i..end]); }
+        if !inserted && kind == b"IHDR" {
+            for (k, v) in entries {
+                // iTXt = keyword \0 圧縮フラグ(0) 圧縮方式(0) 言語タグ \0 翻訳キーワード \0 本文(UTF-8)
+                let mut b = Vec::with_capacity(k.len() + v.len() + 5);
+                b.extend_from_slice(k.as_bytes());
+                b.extend_from_slice(&[0, 0, 0, 0, 0]);
+                b.extend_from_slice(v.as_bytes());
+                out.extend_from_slice(&chunk(b"iTXt", &b));
+            }
+            inserted = true;
+        }
+        i = end;
+    }
+    if !inserted { return png.to_vec(); }
+    out
+}
+
+/// PNG の文字列メタデータ(tEXt/iTXt)を {keyword: text} で読む(zTXt は圧縮なので省略)。取込時の来歴復元・検証用
+pub fn png_text(png: &[u8]) -> Vec<(String, String)> {
+    let mut v = vec![];
+    if png.len() < 8 || &png[..8] != b"\x89PNG\r\n\x1a\n" { return v; }
+    let mut i = 8usize;
+    while i + 12 <= png.len() {
+        let n = u32::from_be_bytes([png[i], png[i + 1], png[i + 2], png[i + 3]]) as usize;
+        let end = i + 12 + n;
+        if end > png.len() { break; }
+        let (kind, body) = (&png[i + 4..i + 8], &png[i + 8..i + 8 + n]);
+        if kind == b"IDAT" { break; }
+        if let Some(z) = body.iter().position(|b| *b == 0) {
+            let kw = String::from_utf8_lossy(&body[..z]).into_owned();
+            if kind == b"tEXt" { v.push((kw, String::from_utf8_lossy(&body[z + 1..]).into_owned())); }
+            else if kind == b"iTXt" && body.len() > z + 3 && body[z + 1] == 0 {
+                // 言語タグと翻訳キーワードの 2 つの \0 を飛ばす
+                let rest = &body[z + 3..];
+                let mut it = rest.splitn(3, |b| *b == 0);
+                let (_lang, _tr, text) = (it.next(), it.next(), it.next().unwrap_or(&[]));
+                v.push((kw, String::from_utf8_lossy(text).into_owned()));
+            }
+        }
+        i = end;
+    }
+    v
+}
+
 /// 検査済みバイト列の収蔵(クローラ等の入り口)。extraはサイドカーに合流(rights/crawl来歴/cost等)。
 /// 返り値: Ok(sha1) / Err("dup") / Err("bad")
 pub fn ingest_bytes(
@@ -478,6 +560,18 @@ pub fn ingest_bytes(
     if let (Some(base), Some(ex)) = (m.as_object_mut(), extra.as_object()) {
         for (k, v) in ex {
             base.insert(k.clone(), v.clone());
+        }
+    }
+    // 生成物を書き出して別の所から取り込み直しても来歴が戻るように、PNG の iTXt "fluent_gallery"(gen.rs が埋める)を読む
+    if ext == "png" && m.get("gen").is_none() {
+        if let Some((_, t)) = png_text(data).into_iter().find(|(k, _)| k == "fluent_gallery") {
+            if let Ok(v) = serde_json::from_str::<Value>(&t) {
+                if v["gen"].is_object() {
+                    m["gen"] = v["gen"].clone();
+                    m["origin"] = json!("synthetic");
+                    if m.get("rights").is_none() { m["rights"] = json!("generated"); }
+                }
+            }
         }
     }
     save_meta(root, &m).map_err(|_| "bad")?;

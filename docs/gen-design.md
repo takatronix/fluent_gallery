@@ -333,12 +333,17 @@ pub trait Provider { fn caps(&self) -> Caps /* refs, lora, models */; async fn g
         "recipe_hash":"…","plan_id":"…","secs":9.8,"gate":"vlm"},
  "cost":{"usd":0,"by":"builtin"}}
 ```
+同じ `gen` 来歴は **PNG 自体にも埋める**(2026-09-06〜): iTXt `parameters`(A1111/ComfyUI/Civitai が読む 1 行: prompt + Steps/Sampler/CFG/Seed/Size/Model)と
+iTXt `fluent_gallery`(上の gen を JSON で)。sha1 は埋めた後のバイト列で取るので、書き出し→別の場所→取り込み直しでも
+`store::ingest_bytes` が `fluent_gallery` チャンクから来歴を復元する。UI ではライトボックスの情報カード(モデル・seed・steps・プロンプト、クリックでコピー)。
+
 **台帳** `store/gen_ledger/<album>.json`: `{prompts:[{text, used, ok, ng}], recipe_history:[…3], failures:[…]}`。
 索引: `images` に列は足さない(`origin`/`source` で引ける)。gen 来歴はサイドカー正本、必要なら `gen_model` 列だけ後で。
 
 **API(収集と対称)**
 ```
-POST /api/gen              {album, n?, minutes?}        ▶(順番待ちは crawl_queue と同じ 1 本直列)
+POST /api/gen              {album, n?, minutes?}        ▶ 実行中なら {queued, position, now} で順番待ち(gen_queue、crawl と同じ 1 本直列・番人が 5 秒以内に次を開始)
+DELETE /api/gen/queue/{album}                           順番待ちから外す(albums の queued/queued_kind、status.queue に出る)
 GET  /api/gen/status                                    GenState(alive, planned, generated, rejected, ingested, secs_per, last, recent, provider, model)
 POST /api/gen/stop
 POST /api/gen/plan         {album|recipe, n}            計画だけ返す(UI の「どんなプロンプトになるか」プレビュー、MCP)
