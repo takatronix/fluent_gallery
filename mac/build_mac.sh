@@ -48,7 +48,7 @@ sign_bundle() {
 # dmg は自前(Tauri の bundle_dmg.sh は Finder を AppleScript で操作するので無人実行だと失敗し、rw.dmg をマウントしたまま残す)
 make_dmg() {
   local app="$1" dmg="$2" stage; stage=$(mktemp -d)
-  cp -R "$app" "$stage/"; ln -s /Applications "$stage/Applications"
+  cp -R "$app" "$stage/Fluent Gallery.app"; ln -s /Applications "$stage/Applications" # dmg の中では表示名(dist は FluentGallery.app)
   [ -f "$ROOT/mac/README-install.txt" ] && cp "$ROOT/mac/README-install.txt" "$stage/はじめに読んでください.txt"
   rm -f "$dmg"; hdiutil create -quiet -volname "Fluent Gallery" -srcfolder "$stage" -ov -format UDZO "$dmg"; rm -rf "$stage"
 }
