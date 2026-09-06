@@ -197,6 +197,11 @@
   /* フォルダパネルは1行に畳む(サムネの場所を食わない)。⌄で展開 */
   #viewhead .details { display:none; }
   #viewhead.open .details { display:block; }
+  .folder-filter { margin-top:10px; padding-top:10px; border-top:1px solid var(--hair); }
+  .folder-filter .filter-row { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+  #folder_filter_text { flex:1; min-width:180px; }
+  #folder_filter_status { margin-top:5px; font-size:11px; color:var(--dim); overflow-wrap:anywhere; }
+  .folder-filter button { min-height:32px; white-space:nowrap; }
   /* 取り込みは呼んだ時だけの中央オーバーレイ(画面に居座らない) */
   #ovl { position:fixed; inset:0; background:#00000090; z-index:18; display:none;
          align-items:center; justify-content:center; backdrop-filter:blur(4px); }
@@ -689,6 +694,7 @@
         oninput="edLive()"><span class="val" id="edv_temperature">0</span></div>
     <div class="row" id="edfilters"></div>
     <div class="row" id="edactions"></div>
+    <div class="row"><span id="edstatus" role="status" aria-live="polite"></span></div>
     <div class="row"><span id="edhist"></span></div>
   </div>
   <div id="lbmeta" onclick="event.stopPropagation()"></div>
@@ -1254,7 +1260,7 @@ function ctxItems(row, kind, key) {
     rename,
     {icon: 'plus', label: 'この中に新規フォルダ', run: () => newInFolder((a?.folder ? a.folder + '/' : '') + key)},
     {icon: 'copy', label: 'レシピごと複製', run: () => copyAlbum(key)},
-    {icon: 'box', label: 'zipで書き出し', run: () => exportCriteria({...(a?.criteria || {})}, key)},
+    {icon: 'box', label: 'zipで書き出し', run: () => exportCriteria({...(a?.display_criteria || a?.criteria || {})}, key)},
     ...(inGroup ? [toTop] : []),
     {icon: 'x', label: 'フォルダを削除', danger: true, run: () => delAlbum(key)},
     {hint: '合流は、フォルダを別のフォルダへドラッグ'},
@@ -1415,6 +1421,8 @@ function renderViewhead() {
     h.style.display = 'block';
     if (loc.type === 'new') h.classList.add('open'); // 新規は設定を書く場なので展開
     h.innerHTML = folderHeadHtml(a, loc.type === 'new');
+    if (loc.type !== 'new') h.insertAdjacentHTML('beforeend', folderFilterHtml(a));
+    if (a.filter_job) { folderFilterWatched.add(a.name); watchFolderFilter(); }
     return;
   }
   if (loc.type === 'dataset') {
@@ -2157,7 +2165,7 @@ function engPick() {
 }
 function openFolder(name) {
   const a = albumsCache.find(x => x.name === name); if (!a) return;
-  go({type: 'folder', key: name, criteria: {...a.criteria}});
+  go({type: 'folder', key: name, criteria: {...(a.display_criteria || a.criteria)}});
 }
 // 親フォルダは＋を押した場所で決まる(名前欄にパスを書かせない 2026-09-03指示)
 let newParent = '';
@@ -2380,6 +2388,129 @@ async function loadAlbums() {
   try { albumsCache = await j('/api/albums'); renderSide(); } catch (e) {}
 }
 
+// フォルダの言語フィルタ。完成した画像集合に切り替えるだけなので閲覧中の計算はゼロ。
+const folderFilterDrafts = new Map(), folderFilterRequests = new Map(), folderFilterMessages = new Map();
+const folderFilterWatched = new Set();
+let folderFilterTimer = null, folderFilterPolling = false;
+const FOLDER_FILTER_RANDOM = ['境界線だけにして', '鉛筆画にして', 'モノクロでコントラストを上げて',
+  'セピアで少し明るくして', 'レトロにして', '映画風にして', '鮮やかにして', '少しぼかして暖色にして', 'ポスタライズして'];
+function folderFilterHtml(a) {
+  const text = folderFilterDrafts.get(a.name) ?? a.filter_job?.edit?.prompt ?? a.filter?.edit?.prompt ?? '';
+  const busy = folderFilterRequests.has(a.name) || !!a.filter_job;
+  const msg = folderFilterMessages.get(a.name) || a.filter_error || (a.filter_job ? '加工中… 完了すると表示が切り替わります' :
+    a.filter ? `${a.filter.edit?.label || a.filter.edit?.prompt || 'フィルタ'} · 加工済み画像を表示中` : 'フォルダの画像をまとめて加工・保存します。リセットで元画像に戻ります。');
+  return `<div class="folder-filter"><div class="filter-row">
+    <input id="folder_filter_text" aria-label="フォルダへのフィルタ指示" maxlength="500" value="${esc(text)}"
+      placeholder="例：境界線だけにして / 少し明るくして"
+      oninput="folderFilterDrafts.set(loc.key,this.value)"
+      onkeydown="if(event.key==='Enter'&&!event.isComposing&&event.keyCode!==229){event.preventDefault();folderFilterApply()}">
+    <button id="folder_filter_apply" class="pri" onclick="folderFilterApply()" ${busy ? 'disabled' : ''}>${ic('wand', 12)} フォルダに適用</button>
+    <button id="folder_filter_random" onclick="folderFilterRandom()" ${busy ? 'disabled' : ''} title="ランダムなフィルタをフォルダ全体に適用">🎲 ランダム</button>
+    <button id="folder_filter_reset" onclick="folderFilterReset()" title="処理を取り消し、元画像の表示に戻す">${ic('undo', 12)} リセット</button>
+    ${a.filter_job ? '<button class="ghost" onclick="folderFilterStop()">停止</button>' : ''}
+    </div><div id="folder_filter_status" role="status" aria-live="polite">${esc(msg)}</div></div>`;
+}
+function folderFilterUpdate(name, message) {
+  folderFilterMessages.set(name, message);
+  if (loc.type !== 'folder' || loc.key !== name) return;
+  if ($('folder_filter_status')) $('folder_filter_status').textContent = message;
+  const busy = folderFilterRequests.has(name) || !!albumsCache.find(a => a.name === name)?.filter_job;
+  for (const id of ['folder_filter_apply', 'folder_filter_random']) if ($(id)) $(id).disabled = busy;
+}
+async function folderFilterApply(instruction) {
+  const name = loc.type === 'folder' ? loc.key : null; if (!name) return;
+  if (folderFilterRequests.has(name) || albumsCache.find(a => a.name === name)?.filter_job) return;
+  const text = (instruction ?? $('folder_filter_text')?.value ?? '').trim();
+  if (!text) { $('folder_filter_text')?.focus(); return folderFilterUpdate(name, 'フィルタの指示を入力してください'); }
+  if (/^(リセット|元に戻す|元画像に戻して|reset)[。！!\s]*$/i.test(text)) return folderFilterReset();
+  folderFilterDrafts.set(name, text);
+  if ($('folder_filter_text')) $('folder_filter_text').value = text;
+  const request = new AbortController();
+  folderFilterRequests.set(name, request);
+  folderFilterUpdate(name, '指示を読み取っています…');
+  try {
+    const plan = await j('/api/filters/plan', {method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({text}), signal:request.signal});
+    if (folderFilterRequests.get(name) !== request) return;
+    // 送信済みの開始要求は完了を待つ。abortだけではサーバの開始処理を取り消せない。
+    request.submission = j(`/api/albums/${encodeURIComponent(name)}/filter`, {method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({edit:plan.edit})});
+    const r = await request.submission;
+    if (folderFilterRequests.get(name) !== request) return;
+    const album = albumsCache.find(a => a.name === name);
+    if (album) album.filter_job = {set_id:r.set_id, edit:plan.edit};
+    folderFilterWatched.add(name);
+    folderFilterUpdate(name, `${plan.edit.label || text} · 加工中…`);
+    if (loc.type === 'folder' && loc.key === name) renderViewhead();
+    watchFolderFilter();
+  } catch (e) {
+    if (e.name !== 'AbortError') folderFilterUpdate(name, '適用できませんでした: ' + e.message);
+  } finally {
+    if (folderFilterRequests.get(name) === request) {
+      folderFilterRequests.delete(name);
+      folderFilterUpdate(name, folderFilterMessages.get(name) || '');
+    }
+  }
+}
+function folderFilterRandom() {
+  const previous = folderFilterDrafts.get(loc.key) || '';
+  const choices = FOLDER_FILTER_RANDOM.filter(t => t !== previous);
+  return folderFilterApply(choices[Math.floor(Math.random() * choices.length)]);
+}
+async function folderFilterReset() {
+  const name = loc.type === 'folder' ? loc.key : null; if (!name) return;
+  const previous = folderFilterRequests.get(name);
+  if (previous && !previous.submission) previous.abort();
+  const request = new AbortController(); folderFilterRequests.set(name, request);
+  folderFilterUpdate(name, '元画像に戻しています…');
+  folderFilterDrafts.delete(name);
+  try {
+    if (previous?.submission) await previous.submission.catch(() => {});
+    const album = await j(`/api/albums/${encodeURIComponent(name)}/filter/reset`, {method:'POST'});
+    const i = albumsCache.findIndex(a => a.name === name); if (i >= 0) albumsCache[i] = album;
+    folderFilterMessages.set(name, '元画像に戻しました');
+    await loadAlbums();
+    if (loc.type === 'folder' && loc.key === name) { loc.criteria = {...album.criteria}; renderViewhead(); await reload(true); }
+  } catch (e) { folderFilterUpdate(name, 'リセットできませんでした: ' + e.message); }
+  finally {
+    if (folderFilterRequests.get(name) === request) folderFilterRequests.delete(name);
+    folderFilterUpdate(name, folderFilterMessages.get(name) || '');
+  }
+}
+async function folderFilterStop() {
+  try { await j('/api/filters/stop', {method:'POST'}); folderFilterUpdate(loc.key, '現在の1枚が終わり次第停止します…'); }
+  catch (e) { folderFilterUpdate(loc.key, e.message); }
+}
+function watchFolderFilter() {
+  if (folderFilterTimer || folderFilterPolling) return;
+  folderFilterTimer = setTimeout(pollFolderFilter, 500);
+}
+async function pollFolderFilter() {
+  folderFilterTimer = null; folderFilterPolling = true;
+  let again = false;
+  try {
+    const pending = [...new Set([...folderFilterWatched, ...albumsCache.filter(a => a.filter_job).map(a => a.name)])];
+    const state = await j('/api/filters/status');
+    if (state.running || state.committing) {
+      again = true;
+      if (state.album) folderFilterUpdate(state.album,
+        `${state.stop_requested ? '停止待ち' : '加工・保存中'} ${state.done || 0} / ${state.total || 0}枚` +
+        (state.cached ? ` · 保存済み ${state.cached}枚を再利用` : '') + (state.errors ? ` · 失敗 ${state.errors}枚` : ''));
+    } else if (pending.length) {
+      await loadAlbums();
+      for (const name of pending) {
+        folderFilterWatched.delete(name);
+        const a = albumsCache.find(a => a.name === name); if (!a) continue;
+        folderFilterMessages.set(name, a.filter_error || (a.filter ? `加工済み ${a.count || 0}枚を表示中 · 保存・書き出しにも使えます` : '元画像を表示中'));
+        if (loc.type === 'folder' && loc.key === name) {
+          loc.criteria = {...(a.display_criteria || a.criteria)}; renderViewhead(); await reload(true);
+        }
+      }
+    }
+  } catch (e) { again = albumsCache.some(a => a.filter_job); }
+  finally { folderFilterPolling = false; if (again) watchFolderFilter(); }
+}
+
 // ================= データ読み込み+グリッド =================
 // 前回このフォルダを開いた時刻を、サイドバーの新着件数に使う
 let seenMap = JSON.parse(localStorage.getItem('fg_seen') || '{}');
@@ -2389,7 +2520,13 @@ function seenKey(a) { return a ? 'src:' + (a.criteria?.source || a.name) : 'src:
 // 状態: gen(世代=画像が変わるたび++、遅延応答は世代不一致で全部捨てる) / tier(手元の最良: thumb→pv→full、render=編集焼き)
 // サイズ規則: 通常=ビューポートへアスペクトフィット(小原本も拡大)、編集レンダ=自然寸法(クロップで比率が変わるため)
 const lbView = {
-  gen: 0, sha: null, tier: null, edited: false,
+  gen: 0, sha: null, tier: null, edited: false, comparing: false,
+  cancelPending() {
+    ++this.gen;
+    if (this._probe) { this._probe.onload = this._probe.onerror = null; this._probe.src = ''; this._probe = null; }
+    if (this._full) { this._full.onload = this._full.onerror = null; this._full.src = ''; this._full = null; }
+    return this.gen;
+  },
   // 表示箱。nw/nh=0で解除(自然寸法モード)
   box(nw, nh) {
     const img = $('lbimg');
@@ -2410,13 +2547,27 @@ const lbView = {
     if (this.tier === 'render') return; // 編集レンダは自然寸法のまま
     if (img.naturalWidth) this.box(img.naturalWidth, img.naturalHeight);
   },
-  // 唯一のsrc書き込み口。デコード完了後に差し替える=空白フレームを出さない
-  async apply(gen, url, tier, nw, nh) {
-    if (gen !== this.gen) return;
+  async decoded(url) {
     const pre = new Image();
     pre.src = url;
-    try { if (pre.decode) await pre.decode(); } catch (e) {}
-    if (gen !== this.gen) return;
+    if (pre.decode) await pre.decode();
+    else if (!pre.complete) await new Promise((resolve, reject) => { pre.onload = resolve; pre.onerror = reject; });
+    if (!pre.naturalWidth) throw new Error('画像を読み込めませんでした');
+    return pre;
+  },
+  // 唯一のsrc書き込み口。デコード完了後に差し替える=空白フレームを出さない
+  async apply(gen, url, tier, nw, nh, reportError = false) {
+    if (gen !== this.gen) return false;
+    let pre;
+    try {
+      pre = await this.decoded(url);
+    } catch (e) {
+      if (gen === this.gen && reportError) throw new Error('画像を表示できませんでした。もう一度お試しください');
+      return false;
+    }
+    if (gen !== this.gen) return false;
+    const order = {thumb: 1, pv: 2, full: 3};
+    if (order[tier] && order[tier] < (order[this.tier] || 0)) return false;
     const img = $('lbimg');
     this.box(nw === undefined ? pre.naturalWidth : nw, nh === undefined ? pre.naturalHeight : nh);
     img.dataset.tier = tier;
@@ -2431,17 +2582,16 @@ const lbView = {
         full.onload = () => { if (gen === this.gen && !this.edited) this.apply(gen, full.src, 'full'); };
       }, 300);
     }
+    return true;
   },
   // 新しい画像: 箱は最初から最終サイズで確保し、サムネ→プレビュー→原寸を届いた順に同じ箱へ流し込む。
   // 押しっぱなし送り対策: 中間画像は120ms落ち着くまで一切読み込まず、進行中のDLは即中断
   // (中間の原寸DLが回線6本を塞ぎ「最初の画像が出続ける」実害 2026-09-03)
   show(it, dir, bust) {
-    const gen = ++this.gen;
-    this.sha = it.sha1; this.edited = false; this.tier = null;
+    const gen = this.cancelPending();
+    this.sha = it.sha1; this.edited = !!it.erev; this.comparing = false; this.tier = null;
     $('lbimg').dataset.tier = '';
     this.box(it.w, it.h);
-    if (this._probe) { this._probe.onload = this._probe.onerror = null; this._probe.src = ''; }
-    if (this._full) { this._full.onload = null; this._full.src = ''; }
     // サムネは常に即表示(30KB・グリッドでキャッシュ済み)=押しっぱなしでもパラパラ流れる
     this.apply(gen, tierUrl(it, 'thumb'), 'thumb', it.w, it.h);
     const start = () => {
@@ -2455,9 +2605,26 @@ const lbView = {
     if (!dir) start(); else setTimeout(start, 120);
   },
   // 編集/マスク焼きレンダ(自然寸法)
-  render(url) {
+  async render(url) {
     this.edited = true;
-    return this.apply(this.gen, url, 'render', 0, 0);
+    if (this.comparing) {
+      // 原本を押している間も補正画像の生成・デコード完了を待ち、離した時にすぐ表示する。
+      const gen = this.gen;
+      try { await this.decoded(url); }
+      catch (e) { if (gen === this.gen) throw new Error('画像を表示できませんでした。もう一度お試しください'); }
+      return false;
+    }
+    return this.apply(this.cancelPending(), url, 'render', 0, 0, true);
+  },
+  original(sha, comparing = false) {
+    this.sha = sha; this.edited = comparing; this.comparing = comparing; this.tier = null;
+    return this.apply(this.cancelPending(), '/img/' + sha, 'original', undefined, undefined, true);
+  },
+  compare(on, url) {
+    if (on === this.comparing) return Promise.resolve(false);
+    if (on) return this.original(this.sha, true);
+    this.comparing = false;
+    return url.startsWith('/render/') ? this.render(url) : this.original(this.sha);
   },
 };
 let rgen = 0; // reload世代: ナビ連打時に遅い古の応答が新しい場所を上書きする追い越し事故の防止
@@ -2537,9 +2704,9 @@ function itemAttrMask(it) {
     ((it.rights && it.rights !== 'unknown' ? 1 : 0) | (it.cost > 0 ? 2 : 0) | (it.nsfw === 0 ? 4 : 0));
 }
 function itemRightsClean(it) { return !!(itemAttrMask(it) & 1); }
-// SHA URLはブラウザが1年immutable cache。編集済みだけrevをキーに加え、全tierで共通化する。
+// 原本のo=2は、旧版が編集結果を上書きしていたブラウザキャッシュと分離する。編集済みは履歴rev。
 function tierUrl(it, tier, bust = false) {
-  const version = it.erev ? '?v=' + encodeURIComponent(it.erev) : bust ? '?t=' + Date.now() : '';
+  const version = it.erev ? '?v=' + encodeURIComponent(it.erev) : '?o=2' + (bust ? '&t=' + Date.now() : '');
   return `/${tier}/${it.sha1}${version}`;
 }
 // 最小表示はAPI 1ページ(最大200枚)を1枚のJPEG atlasとして共有する。
@@ -3398,7 +3565,7 @@ async function refreshFacets() {
 }
 
 // ================= ライトボックス(v2実証済み部品) =================
-let lbIdx = -1, lbMeta = null;
+let lbIdx = -1, lbMeta = null, lbContext = 0;
 $('lbbar').innerHTML = `
   <button class="ghost" onclick="lbGo(-1)" title="←キー / Dキー">${ic('chevL', 14)} 前 <span style="opacity:.5">(D)</span></button>
   <button class="ghost" onclick="lbGo(1)" title="→キー / Fキー">次 <span style="opacity:.5">(F)</span> ${ic('chevR', 14)}</button>
@@ -3416,7 +3583,7 @@ $('lbbar').innerHTML = `
   <button class="ghost" onclick="immToggle()" title="全画面 — UIを消して画像だけ(戻る: クリック/Space/Esc)">${ic('box', 13)} 全画面</button>
   <button class="ghost" id="lbsel" onclick="lbSel()" title="選択に加える (X)">${ic('circle', 13)} 選択</button>
   <button class="ghost" id="edcompare" style="display:none"
-    onpointerdown="edCompare(true)" onpointerup="edCompare(false)" onpointerleave="edCompare(false)"
+    onpointerdown="edCompare(true)" onpointerup="edCompare(false)" onpointerleave="edCompare(false)" onpointercancel="edCompare(false)"
     title="押している間だけ原本">${ic('eye', 13)} 原本</button>
   <button class="ghost" id="lbsegbtn" onclick="lbSegToggle()"
     title="マスク(内蔵SAM2)。ONにして画像をクリック/ドラッグすると切れる">${ic('smart', 13)} マスク</button>
@@ -3472,7 +3639,7 @@ function lbOpenSource() {
   if (u) window.open(u, '_blank', 'noopener');
 }
 $('edactions').innerHTML = `
-  <button onclick="edPush({op:'auto', params:{}})" title="WB+レベル+彩度の自動補正(非破壊)">${ic('spark', 13)} 自動</button>
+  <button id="edauto" onclick="edAuto()" title="色かぶり・明るさを自動補正(原本は保持)">${ic('spark', 13)} 自動</button>
   <button onclick="edPush({op:'rotate', params:{deg:270}})" title="左に90°(自然な方)">${ic('rotate', 13)} 回転</button>
   <button onclick="edPush({op:'flip', params:{dir:'h'}})">${ic('flip', 13)} 反転</button>
   <button id="cropbtn" onclick="cropToggle()" title="画像の上をドラッグで範囲指定→確定">✂ クロップ</button>
@@ -3499,27 +3666,9 @@ function lbSegToggle() {
   const sha = items[lbIdx]?.sha1;
   if (sha) lbCrossfade(lbUrl(sha, 1600));
 }
-// ふわっと切替: 新画像を先読み→旧画像を上に重ねてフェードアウト(ガクッと差し替えない)
+// マスク更新も同じ表示世代で管理し、遅い応答で別の画像を上書きしない。
 function lbCrossfade(src) {
-  const img = $('lbimg');
-  const pv = new Image();
-  pv.src = src;
-  const apply = () => {
-    if (!$('lb').classList.contains('show')) { img.src = src; return; }
-    const r = img.getBoundingClientRect();
-    if (!r.width) { img.src = src; return; }
-    const ghost = img.cloneNode();
-    Object.assign(ghost.style, {
-      position: 'fixed', left: r.left + 'px', top: r.top + 'px', width: r.width + 'px', height: r.height + 'px',
-      margin: 0, zIndex: 39, pointerEvents: 'none', maxWidth: 'none', maxHeight: 'none',
-      transition: 'opacity .38s ease',
-    });
-    document.body.appendChild(ghost);
-    img.src = src;
-    requestAnimationFrame(() => ghost.style.opacity = '0');
-    setTimeout(() => ghost.remove(), 420);
-  };
-  if (pv.complete) apply(); else { pv.onload = apply; pv.onerror = () => { img.src = src; }; }
+  return lbView.render(src).catch(e => toast('❌ ' + e.message));
 }
 async function segClear() {
   const sha = items[lbIdx]?.sha1; if (!sha) return;
@@ -3682,6 +3831,7 @@ function lbMorphOpen(sha) {
 function closeLb() {
   const lb = $('lb');
   if (!lb.classList.contains('show')) return;
+  ++lbContext; lbView.cancelPending(); lbView.comparing = false;
   clearFaceBoxes(); $('lbfacebox').style.display = 'none';
   // 開いた時の逆再生: 元のサムネが見えていればそこへ縮んで帰る
   const sha = items[lbIdx]?.sha1;
@@ -3730,8 +3880,10 @@ async function lbShow(i, dir) {
   { const fb = document.getElementById('lbfacebtn'); if (fb) fb.innerHTML = ic('bot', 13) + ' 顔ID'; } // ボタン表記も画像単位で戻す
   lbIdx = (i + items.length) % items.length;
   const sha = items[lbIdx].sha1;
+  const context = ++lbContext;
   setCur(lbIdx, {scroll: false}); // カーソルはLBの現在地に追従(閉じた時そこに居る)
   lbMeta = null; edReset(); zReset(); $('edcompare').style.display = 'none'; edHist([]); lbKeepBtn(); lbSelBtn();
+  edSyncStatus();
   $('lbinfo').style.display = 'none';
   $('lbsrcbtn').style.display = 'none';
   lbView.show(items[lbIdx], dir); // 表示はここに全部任せる(src/サイズを他で触らない)
@@ -3739,8 +3891,16 @@ async function lbShow(i, dir) {
     if (n) new Image().src = tierUrl(n, 'preview'); });
   $('lbmeta').innerHTML = `${lbIdx + 1} / ${items.length}`;
   try {
-    const m = await j('/api/meta/' + sha);
-    if (items[lbIdx]?.sha1 !== sha) return;
+    let m;
+    // 保存前に始まったメタ応答で、保存済みの履歴を巻き戻さない。
+    for (;;) {
+      const epoch = edEpoch.get(sha) || 0;
+      m = await j('/api/meta/' + sha);
+      if (context !== lbContext || items[lbIdx]?.sha1 !== sha) return;
+      if (epoch === (edEpoch.get(sha) || 0) && !edStates.get(sha)?.pending) break;
+      await edQueues.get(sha);
+      if (context !== lbContext) return;
+    }
     lbMeta = m;
     const eds = m.edits || [];
     $('edcompare').style.display = eds.length ? '' : 'none';
@@ -3750,9 +3910,12 @@ async function lbShow(i, dir) {
     $('segfix').style.display = lbSegOn ? 'flex' : 'none';
     $('lbsegbtn').style.display = ''; // マスクが無くてもONにすればその場で切れる
     // 編集レンダ/マスク焼きは自然寸法モードでlbViewへ(原寸昇格はlbView.showが担当済み)
-    if (lbSegOn && hasSeg) lbView.render(lbUrl(sha, 1600));
     edHist(eds);
-    if (eds.length) lbView.render(lbUrl(sha, 1600));
+    if (eds.length || (lbSegOn && hasSeg)) {
+      lbView.render(lbUrl(sha, 1600)).catch(e => {
+        if (context === lbContext) { $('edstatus').textContent = e.message; toast('❌ ' + e.message); }
+      });
+    }
     // 情報カード: 解像度/フォーマット/ライセンス/取得元(常時表示)
     {
       let src = `${esc(m.source || '不明')}`;
@@ -3973,52 +4136,87 @@ function edHist(list) {
     ? '履歴: ' + list.map(e => `<span class="tag">${ED_LABEL[e.op] || e.op}${e.op === 'filter' ? ' ' + (e.params?.name || '') : ''}</span>`).join('') + ' <span style="opacity:.6">(原本は不変・1手ずつ戻せます)</span>'
     : '<span style="opacity:.6">履歴なし = 原本そのまま</span>';
 }
-async function edMutate(body) {
-  const sha = items[lbIdx]?.sha1; if (!sha) return;
-  try {
-    const r = await j('/api/edits/' + sha, {method: 'PUT', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(body)});
-    if (items[lbIdx]?.sha1 !== sha) return;
-    lbMeta = {...(lbMeta || {}), sha1: sha, edits: r.edits, edits_rev: r.rev};
-    edReset(); edHist(r.edits);
-    $('edcompare').style.display = r.edits.length ? '' : 'none';
-    { // レンダ完成+デコード後に差し替え(直接src交換だと生成待ちの間imgが幅0に潰れて「消えた」ように見える)
-      const url = r.edits.length ? lbUrl(sha, 1600) : '/preview/' + sha + '?t=' + Date.now();
-      if (items[lbIdx]?.sha1 === sha) {
-        if (r.edits.length) lbView.render(url);
-        else lbView.show(items[lbIdx], 0, true); // 編集全解除→通常表示へ(キャッシュバスタ付き)
-      }
-    }
-    // グリッドのサムネも編集後の見た目に差し替え(サーバの焼き直しを少し待つ)
-    const it = items.find(x => x.sha1 === sha);
-    if (it) {
-      it.erev = r.edits.length ? r.rev : null;
-      // 現在のatlasは編集前画像を束ねた不変物。次の一覧reloadまではこの1枚だけmicroへ退避する。
-      it._atlas = null;
-      const im = document.querySelector('#c_' + sha + ' img');
-      if (im) setTimeout(() => {
-        const px = actualCellPx();
-        const tier = px <= LITE_CELL ? 'micro' : px > 300 ? 'preview' : 'thumb';
-        const url = tierUrl(it, tier, !it.erev);
-        const pre = new Image();
-        pre.onload = () => {
-          if (!document.contains(im) || im.parentElement?.id !== 'c_' + sha) return;
-          clearAtlasImage(im);
-          im.dataset.tier = tier;
-          im.src = url;
-        };
-        pre.src = url;
-      }, 800);
-    }
-  } catch (e) { toast('❌ ' + e.message); }
+const edQueues = new Map(), edEpoch = new Map(), edStates = new Map();
+function edSyncStatus() {
+  const state = edStates.get(items[lbIdx]?.sha1);
+  const busy = !!state?.pending;
+  $('edauto').disabled = busy;
+  $('edauto').setAttribute('aria-busy', String(busy));
+  $('editpanel').setAttribute('aria-busy', String(busy));
+  $('edstatus').textContent = busy ? (state.activeAuto ? '自動補正中…' : '画像を更新中…') : state?.message || '';
 }
-function edPush(edit) { edMutate({action: 'push', edit}); }
-function edUndo() { edMutate({action: 'pop'}); }
-function edClear() { edMutate({action: 'clear'}); }
+function edRefreshGrid(it) {
+  const sha = it.sha1, revision = it.erev;
+  it._atlas = null; // atlasは以前の見た目を束ねた不変画像なので、このセルは通常のサムネへ戻す。
+  const im = document.querySelector('#c_' + sha + ' img');
+  if (!im) return;
+  const px = actualCellPx();
+  const tier = px <= LITE_CELL ? 'micro' : px > 300 ? 'preview' : 'thumb';
+  const url = tierUrl(it, tier, !revision);
+  const pre = new Image();
+  pre.onload = () => {
+    if (it.erev !== revision || !document.contains(im) || im.parentElement?.id !== 'c_' + sha) return;
+    clearAtlasImage(im);
+    im.dataset.tier = tier;
+    im.src = url;
+  };
+  pre.src = url;
+}
+function edMutate(body) {
+  const item = items[lbIdx], sha = item?.sha1;
+  if (!sha) return Promise.resolve(false);
+  const context = lbContext;
+  const state = edStates.get(sha) || {pending: 0, message: '', activeAuto: false};
+  const isAuto = body.action === 'push' && body.edit?.op === 'auto';
+  state.pending++; state.activeAuto = isAuto; state.message = '';
+  edStates.set(sha, state);
+  edEpoch.set(sha, (edEpoch.get(sha) || 0) + 1);
+  edSyncStatus();
+  // 同じ画像の操作は、保存と表示まで完了した順に進める。別画像の編集は待たせない。
+  const task = (edQueues.get(sha) || Promise.resolve()).then(async () => {
+    state.activeAuto = isAuto;
+    if (items[lbIdx]?.sha1 === sha) edSyncStatus();
+    try {
+      const r = await j('/api/edits/' + sha, {method: 'PUT', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(body)});
+      // 送り中に完了した編集も一覧へ反映する。ライトボックスへの反映は開いた回を区別する。
+      item.erev = r.edits.length ? r.rev : null;
+      const it = items.find(x => x.sha1 === sha);
+      if (it) { it.erev = item.erev; edRefreshGrid(it); }
+      if (context === lbContext && items[lbIdx]?.sha1 === sha) {
+        lbMeta = {...(lbMeta || {}), sha1: sha, edits: r.edits, edits_rev: r.rev};
+        edReset(); edHist(r.edits);
+        $('edcompare').style.display = r.edits.length ? '' : 'none';
+        if (r.edits.length || (lbSegOn && lbMeta.seg?.shapes?.length)) await lbView.render(lbUrl(sha, 1600));
+        else await lbView.original(sha);
+      }
+      state.message = isAuto ? '自動補正しました' : body.action === 'clear' ? '原本に戻しました' : '画像を更新しました';
+      return true;
+    } catch (e) {
+      state.message = e.message;
+      toast('❌ ' + e.message);
+      return false;
+    } finally {
+      state.pending--;
+      if (items[lbIdx]?.sha1 === sha) edSyncStatus();
+    }
+  });
+  edQueues.set(sha, task);
+  task.finally(() => { if (edQueues.get(sha) === task) edQueues.delete(sha); });
+  return task;
+}
+function edPush(edit) { return edMutate({action: 'push', edit}); }
+function edAuto() {
+  const sha = items[lbIdx]?.sha1;
+  if (edStates.get(sha)?.pending) return edQueues.get(sha) || Promise.resolve(false);
+  return edPush({op: 'auto', params: {version: 2}});
+}
+function edUndo() { return edMutate({action: 'pop'}); }
+function edClear() { return edMutate({action: 'clear'}); }
 async function edApplyAdjust() {
   const v = edVals();
   if (!Object.keys(v).length) return toast('スライダを動かしてから適用');
-  edPush({op: 'adjust', params: v});
+  return edPush({op: 'adjust', params: v});
 }
 // ✂ クロップ: ドラッグで範囲→離した瞬間に確定(比率で送るので回転後でも正しい)
 let cropMode = false, cropStart = null, cropEnded = false; // cropEnded=確定直後のclickを1回飲む印
@@ -4060,8 +4258,11 @@ function cropUp(e) {
     fw: +fw.toFixed(4), fh: +fh.toFixed(4)}});
 }
 function edCompare(on) {
-  const sha = items[lbIdx]?.sha1; if (!sha) return;
-  $('lbimg').src = on ? '/preview/' + sha : lbUrl(sha, 1600);
+  const sha = items[lbIdx]?.sha1;
+  if (!sha) return Promise.resolve(false);
+  if (on) $('lbimg').style.filter = '';
+  else edLive();
+  return lbView.compare(on, lbUrl(sha, 1600)).catch(e => { toast('❌ ' + e.message); return false; });
 }
 
 // 種別の手動修正: クリックで 実写→イラスト→アニメ絵→3DCG を循環(人の判定が常に勝つ)
@@ -4679,6 +4880,7 @@ function watchCrawlPart(s) {
   } catch (e) {}
 }
 async function liveDrop(album, n, prefix = 'crawl:') {
+  if (loc.criteria?.filter_set) return; // 完成済み集合に未加工の新着を混ぜない
   const okHere = (loc.type === 'lib' && loc.key === 'all') ||
     (loc.type === 'folder' && loc.criteria.source === prefix + album) ||
     (loc.type === 'source' && loc.key === prefix + album);

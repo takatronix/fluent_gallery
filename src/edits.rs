@@ -1,6 +1,6 @@
 //! 非破壊調整 — 原本(sha1ファイル)は不変、エフェクトはサイドカーの edits 履歴スタック。
 //! 表示は store/renders/ のキャッシュ(全て再生成可能)、データセット書き出し時に焼き込み。
-//! フィルタ名は fluent_scene の FS_* に合わせる(grayscale/sepia/invert/posterize/vignette/sharpen/blur)。
+//! フィルタ名は fluent_scene の FS_* に合わせる(grayscale/sepia/invert/posterize/vignette/sharpen/blur/canny)。
 
 use image::DynamicImage;
 use serde_json::{json, Value};
@@ -99,75 +99,221 @@ fn filter(img: DynamicImage, pr: &Value) -> DynamicImage {
         }
         "sharpen" => DynamicImage::ImageRgb8(image::imageops::unsharpen(&img.into_rgb8(), 1.2, (12.0 * amt) as i32)),
         "blur" => DynamicImage::ImageRgb8(image::imageops::blur(&img.into_rgb8(), (3.0 * amt).max(0.3))),
+        "canny" => canny(img, pr),
         _ => img,
     }
 }
 
-/// ✨自動補正 — グレーワールドWB + ヒストグラム自動レベル(0.5%クリップ) + 微彩度。
-/// 内容依存だが決定的(同じ画像→同じ結果)なので履歴opとして安全。
-fn auto_enhance(img: DynamicImage) -> DynamicImage {
-    let rgb = img.to_rgb8();
-    let (w, h) = (rgb.width(), rgb.height());
-    let step = ((w as u64 * h as u64 / 100_000).max(1)) as usize; // 最大10万px標本
-    let (mut sr, mut sg, mut sb, mut n) = (0u64, 0u64, 0u64, 0u64);
-    let mut hist = [0u32; 256];
-    for (i, p) in rgb.pixels().enumerate() {
-        if i % step != 0 {
-            continue;
-        }
-        let [r, g, b] = p.0;
-        sr += r as u64;
-        sg += g as u64;
-        sb += b as u64;
-        let luma = (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32) as usize;
-        hist[luma.min(255)] += 1;
-        n += 1;
-    }
-    if n == 0 {
-        return img;
-    }
-    // WB: グレーワールドを「半分だけ」効かせる — 全開だと夕日・電球の意図した暖かさまで
-    // 中和して寒色に振る(「色温度が逆」事件)。小さいキャストは触らない
-    let (ar, ag, ab) = (sr as f32 / n as f32, sg as f32 / n as f32, sb as f32 / n as f32);
-    let soften = |g: f32| (1.0 + (g - 1.0) * 0.45).clamp(0.85, 1.2);
-    let (gr_raw, gb_raw) = (ag / ar.max(1.0), ag / ab.max(1.0));
-    let (gr, gb) = if (gr_raw - 1.0).abs() < 0.04 && (gb_raw - 1.0).abs() < 0.04 {
-        (1.0, 1.0)
-    } else {
-        (soften(gr_raw), soften(gb_raw))
+/// Canny: Gaussian → Sobel → 非極大抑制 → 二重閾値と8近傍ヒステリシス。
+/// low/high は8bit輝度のSobel勾配強度(0..1020、既定50/100)。逆順なら入れ替える。
+/// sigma はGaussianの標準偏差(0.3..5px、既定1.2)。黒背景に白い輪郭を返す。
+fn canny(img: DynamicImage, pr: &Value) -> DynamicImage {
+    let parameter = |name: &str, default: f64, min: f64, max: f64| {
+        pr[name].as_f64().filter(|v| v.is_finite()).unwrap_or(default).clamp(min, max) as f32
     };
-    // 自動レベル: 0.3%クリップ・70%がけ(全開ストレッチは白飛び/黒潰れを作る)
-    let clip = (n as u32) / 300;
-    let (mut lo, mut hi, mut acc) = (0usize, 255usize, 0u32);
-    for (i, c) in hist.iter().enumerate() {
-        acc += c;
-        if acc > clip {
-            lo = i;
-            break;
+    let low = parameter("low", 50.0, 0.0, 1020.0);
+    let high = parameter("high", 100.0, 0.0, 1020.0);
+    let (low, high) = (low.min(high), low.max(high));
+    let sigma = parameter("sigma", 1.2, 0.3, 5.0);
+    let gray = img.into_luma8();
+    let (width, height) = gray.dimensions();
+    let (w, h) = (width as usize, height as usize);
+    // 3×3の勾配を計算できない画像にも、同寸法の有効な輪郭画像を返す。
+    if w < 3 || h < 3 {
+        return DynamicImage::ImageLuma8(image::GrayImage::new(width, height));
+    }
+    let smooth = image::imageops::blur(&gray, sigma);
+    let pixels = smooth.as_raw();
+    let mut magnitude = vec![0.0f32; w * h];
+    let mut direction = vec![0u8; w * h];
+    for y in 1..h - 1 {
+        for x in 1..w - 1 {
+            let i = y * w + x;
+            let sample = |j: usize| pixels[j] as f32;
+            let gx = -sample(i - w - 1) + sample(i - w + 1)
+                - 2.0 * sample(i - 1) + 2.0 * sample(i + 1)
+                - sample(i + w - 1) + sample(i + w + 1);
+            let gy = -sample(i - w - 1) - 2.0 * sample(i - w) - sample(i - w + 1)
+                + sample(i + w - 1) + 2.0 * sample(i + w) + sample(i + w + 1);
+            magnitude[i] = gx.hypot(gy);
+            // 角度を0/45/90/135°へ量子化。atan2不要で高解像度画像にも対応する。
+            direction[i] = if gy.abs() <= gx.abs() * 0.414_213_57 {
+                0
+            } else if gy.abs() >= gx.abs() * 2.414_213_7 {
+                2
+            } else if gx * gy > 0.0 {
+                1
+            } else {
+                3
+            };
         }
     }
-    acc = 0;
-    for (i, c) in hist.iter().enumerate().rev() {
-        acc += c;
-        if acc > clip {
-            hi = i;
-            break;
+    let mut thin = vec![0.0f32; w * h];
+    for y in 1..h - 1 {
+        for x in 1..w - 1 {
+            let i = y * w + x;
+            let (before, after) = match direction[i] {
+                0 => (i - 1, i + 1),
+                1 => (i - w - 1, i + w + 1),
+                2 => (i - w, i + w),
+                _ => (i - w + 1, i + w - 1),
+            };
+            // 一方を厳密比較にして、同強度の二重線を1pxに抑える。
+            if magnitude[i] >= magnitude[before] && magnitude[i] > magnitude[after] {
+                thin[i] = magnitude[i];
+            }
         }
     }
-    let (lo, hi) = (lo as f32 / 255.0, (hi.max(lo + 8)) as f32 / 255.0);
-    let span = hi - lo;
-    let k = 0.7; // レベル補正の効かせ具合
-    map_px(img, move |r, g, b, _, _| {
-        let (r0, g0, b0) = (r * gr, g, b * gb);
-        let st = |v: f32| v + ((v - lo) / span - v) * k;
-        let (r, g, b) = (st(r0), st(g0), st(b0));
-        let luma = 0.299 * r + 0.587 * g + 0.114 * b;
-        let s = 1.05; // ほんの少しだけ彩度
-        [luma + (r - luma) * s, luma + (g - luma) * s, luma + (b - luma) * s]
-    })
+    drop(magnitude);
+    drop(direction);
+    let edges = canny_hysteresis(&thin, w, h, low, high);
+    DynamicImage::ImageLuma8(image::GrayImage::from_raw(width, height, edges).unwrap())
 }
 
-/// 履歴を順に適用(op: adjust / crop / rotate / flip / filter / auto)。
+/// 強い輪郭につながる弱い輪郭だけを残す。0強度は閾値0でも輪郭にしない。
+fn canny_hysteresis(magnitude: &[f32], w: usize, h: usize, low: f32, high: f32) -> Vec<u8> {
+    let mut edges = vec![0u8; magnitude.len()];
+    let mut pending = Vec::new();
+    for (i, &strength) in magnitude.iter().enumerate() {
+        if strength > 0.0 && strength >= high {
+            edges[i] = 255;
+            pending.push(i);
+        } else if strength > 0.0 && strength >= low {
+            edges[i] = 128;
+        }
+    }
+    while let Some(i) = pending.pop() {
+        let (x, y) = (i % w, i / w);
+        for ny in y.saturating_sub(1)..=(y + 1).min(h - 1) {
+            for nx in x.saturating_sub(1)..=(x + 1).min(w - 1) {
+                let neighbor = ny * w + nx;
+                if edges[neighbor] == 128 {
+                    edges[neighbor] = 255;
+                    pending.push(neighbor);
+                }
+            }
+        }
+    }
+    for value in &mut edges {
+        if *value != 255 {
+            *value = 0;
+        }
+    }
+    edges
+}
+
+/// 自動補正: 信頼できる低彩度部分から控えめにWBを推定し、露出を輝度で補正。
+/// 黒点/白点の強制ストレッチはしない。低コントラスト・単色画像はそのまま保つ。
+/// 同じ画像から必ず同じ結果を返し、透明部分は統計に含めずαも保持する。
+fn auto_enhance(img: DynamicImage) -> DynamicImage {
+    let mut rgba = img.to_rgba8();
+    let step = (rgba.as_raw().len() / 4).div_ceil(100_000).max(1);
+    let mut hist = [0u32; 256];
+    let mut neutral_sum = [[0.0f32; 3]; 8];
+    let mut neutral_count = [0u32; 8];
+    let mut n = 0u32;
+    let luma = |rgb: [f32; 3]| 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2];
+    for pixel in rgba.as_raw().chunks_exact(4).step_by(step) {
+        // 透明背景の隠れたRGB値や、ごく薄いエッジは露出/WBの根拠にしない。
+        if pixel[3] < 128 { continue; }
+        let rgb = [pixel[0] as f32, pixel[1] as f32, pixel[2] as f32];
+        let y = luma(rgb);
+        hist[y.round().clamp(0.0, 255.0) as usize] += 1;
+        n += 1;
+        let min = rgb.into_iter().fold(f32::INFINITY, f32::min);
+        let max = rgb.into_iter().fold(0.0f32, f32::max);
+        // 飽和色・暗部ノイズ・白飛びはホワイトバランス推定から除外する。
+        if y >= 40.0 && y <= 224.0 && min >= 24.0 && max <= 245.0
+            && (max - min) / max <= 0.25
+        {
+            let bin = y as usize / 32;
+            for c in 0..3 { neutral_sum[bin][c] += rgb[c] / y; }
+            neutral_count[bin] += 1;
+        }
+    }
+    if n < 16 { return img; }
+    let percentile = |fraction: f32| {
+        let rank = (n as f32 * fraction) as u32;
+        let mut sum = 0;
+        for (value, count) in hist.iter().enumerate() {
+            sum += count;
+            if sum > rank { return value as f32 / 255.0; }
+        }
+        1.0
+    };
+    let (lo, mid, hi) = (percentile(0.02), percentile(0.50), percentile(0.98));
+    // 単色、霧、背景等の狭い階調を無理に全レンジへ引き伸ばさない。
+    if hi - lo < 32.0 / 255.0 { return img; }
+
+    let mut wb = [1.0f32; 3];
+    let count: u32 = neutral_count.iter().sum();
+    if count >= (n / 10).max(16) {
+        let mut mean = [0.0f32; 3];
+        for bin in &neutral_sum {
+            for c in 0..3 { mean[c] += bin[c] / count as f32; }
+        }
+        // 明るさの違う少なくとも3群で色被りが一致したときだけ補正する。
+        // 被写体全体の平均を灰色と仮定すると、空・植物・夕景の色を壊してしまう。
+        let mut bins = 0;
+        let mut consistent = true;
+        for bin in 0..8 {
+            if neutral_count[bin] < (n / 200).max(4) { continue; }
+            bins += 1;
+            for c in 0..3 {
+                let ratio = neutral_sum[bin][c] / neutral_count[bin] as f32;
+                consistent &= (ratio - mean[c]).abs() <= 0.04;
+            }
+        }
+        if bins >= 3 && consistent && mean.iter().any(|v| (v - 1.0).abs() > 0.025) {
+            for c in 0..3 { wb[c] = (1.0 + (1.0 / mean[c] - 1.0) * 0.6).clamp(0.9, 1.12); }
+        }
+    }
+
+    // 正常な露出や、すでに黒から白まで使っている夜景/ハイキー画像には触らない。
+    // 暗い画像は最大約0.85段、明るすぎる画像は最大約0.4段に抑える。
+    let exposure = if mid < 0.36 && hi < 0.90 {
+        (0.36 * (1.0 - mid) / (0.64 * mid.max(0.01))).clamp(1.0, 1.8)
+    } else if mid > 0.72 && lo > 0.10 {
+        (0.72 * (1.0 - mid) / (0.28 * mid)).clamp(0.75, 1.0)
+    } else { 1.0 };
+    if wb == [1.0; 3] && exposure == 1.0 { return img; }
+
+    for pixel in rgba.pixels_mut() {
+        if pixel[3] == 0 { continue; }
+        let rgb = [pixel[0] as f32 / 255.0 * wb[0],
+                   pixel[1] as f32 / 255.0 * wb[1],
+                   pixel[2] as f32 / 255.0 * wb[2]];
+        let y = luma(rgb).clamp(0.0, 1.0);
+        // y' = gain*y / (1 + (gain-1)*y): 黒/白を固定した滑らかな単調曲線。
+        // RGB共通倍率と共通の上限制御で、色相変化とチャンネル別の白飛びを防ぐ。
+        let gain = exposure / (1.0 + (exposure - 1.0) * y);
+        let max = rgb.into_iter().fold(0.0f32, f32::max);
+        let gain = gain.min(1.0 / max.max(1e-6));
+        for c in 0..3 { pixel[c] = (rgb[c] * gain * 255.0).round().clamp(0.0, 255.0) as u8; }
+    }
+    if img.color().has_alpha() {
+        DynamicImage::ImageRgba8(rgba)
+    } else {
+        DynamicImage::ImageRgb8(DynamicImage::ImageRgba8(rgba).into_rgb8())
+    }
+}
+
+/// 言語指示1件を履歴1件として保存する。最大16個の色調操作のみ許可し、再帰はしない。
+/// 幾何操作はマスク座標の追従が必要なため、従来通り独立した履歴に保存する。
+fn pipeline(mut img: DynamicImage, pr: &Value) -> DynamicImage {
+    let Some(list) = pr["edits"].as_array() else { return img };
+    for edit in list.iter().take(16) {
+        img = match edit["op"].as_str().unwrap_or("") {
+            "filter" => filter(img, &edit["params"]),
+            "adjust" => adjust(img, &edit["params"]),
+            "auto" => auto_enhance(img),
+            _ => img,
+        };
+    }
+    img
+}
+
+/// 履歴を順に適用(op: adjust / crop / rotate / flip / filter / auto / pipeline)。
 pub fn apply(mut img: DynamicImage, edits: &Value) -> DynamicImage {
     let Some(list) = edits.as_array() else { return img };
     for e in list {
@@ -176,6 +322,7 @@ pub fn apply(mut img: DynamicImage, edits: &Value) -> DynamicImage {
             "adjust" => adjust(img, pr),
             "auto" => auto_enhance(img),
             "filter" => filter(img, pr),
+            "pipeline" => pipeline(img, pr),
             "rotate" => match pr["deg"].as_i64().unwrap_or(0).rem_euclid(360) {
                 90 => img.rotate90(),
                 180 => img.rotate180(),
@@ -382,6 +529,251 @@ pub fn render(root: &Path, sha1: &str, ext: &str, edits: &Value, w: u32, seg: Op
         .encode_image(&rgb)
         .ok()?;
     std::fs::create_dir_all(rp.parent()?).ok()?;
-    let _ = std::fs::write(&rp, buf.get_ref());
+    // A second display request must never read a partially encoded rendition.
+    static NEXT_WRITE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let serial = NEXT_WRITE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = rp.with_extension(format!("{}.{}.tmp", std::process::id(), serial));
+    if std::fs::write(&tmp, buf.get_ref()).is_ok() { let _ = std::fs::rename(&tmp, &rp); }
+    let _ = std::fs::remove_file(tmp);
     Some(buf.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::{GrayImage, Luma, Rgb, RgbImage};
+
+    fn gray_ramp(start: u8, end: u8) -> DynamicImage {
+        DynamicImage::ImageRgb8(RgbImage::from_fn(256, 4, |x, _| {
+            let value = start as u32 + x * (end - start) as u32 / 255;
+            Rgb([value as u8; 3])
+        }))
+    }
+
+    #[test]
+    fn auto_preserves_flat_images_and_intentional_low_contrast() {
+        for rgb in [[0, 0, 0], [32, 32, 32], [128, 128, 128], [255, 255, 255],
+                    [230, 180, 140], [250, 25, 10]] {
+            let input = DynamicImage::ImageRgb8(RgbImage::from_pixel(16, 16, Rgb(rgb)));
+            assert_eq!(auto_enhance(input.clone()).into_rgb8(), input.into_rgb8());
+        }
+        for (start, end) in [(25, 40), (115, 140), (235, 250)] {
+            let input = gray_ramp(start, end);
+            assert_eq!(auto_enhance(input.clone()).into_rgb8(), input.into_rgb8());
+        }
+    }
+
+    #[test]
+    fn auto_preserves_well_exposed_gray_ramp_and_full_range_scene() {
+        let input = gray_ramp(0, 255);
+        assert_eq!(auto_enhance(input.clone()).into_rgb8(), input.into_rgb8());
+        // A dark subject with real white highlights already uses the available dynamic range.
+        let input = DynamicImage::ImageRgb8(RgbImage::from_fn(100, 4, |x, _| {
+            Rgb([if x < 95 { 32 } else { 255 }; 3])
+        }));
+        assert_eq!(auto_enhance(input.clone()).into_rgb8(), input.into_rgb8());
+    }
+
+    #[test]
+    fn auto_lifts_underexposure_without_crushing_shadows_or_clipping_highlights() {
+        let input = gray_ramp(0, 160);
+        let output = auto_enhance(input.clone()).into_rgb8();
+        let middle = output.get_pixel(128, 0)[0];
+        assert!(middle > input.to_rgb8().get_pixel(128, 0)[0] + 8);
+        assert_eq!(output.get_pixel(0, 0).0, [0; 3]);
+        assert!(output.get_pixel(255, 0)[0] < 255);
+        let mut previous = 0;
+        for pixel in output.rows().next().unwrap() {
+            assert!(pixel[0] >= previous);
+            assert_eq!(pixel.0, [pixel[0]; 3]);
+            previous = pixel[0];
+        }
+        assert_eq!(auto_enhance(input.clone()).into_rgb8(), auto_enhance(input).into_rgb8());
+    }
+
+    #[test]
+    fn auto_recovers_bright_midtones_without_turning_white_gray() {
+        let input = gray_ramp(140, 255);
+        let output = auto_enhance(input.clone()).into_rgb8();
+        assert!(output.get_pixel(128, 0)[0] + 3 < input.to_rgb8().get_pixel(128, 0)[0]);
+        assert_eq!(output.get_pixel(255, 0).0, [255; 3]);
+        assert!(output.get_pixel(0, 0)[0] > 100);
+    }
+
+    #[test]
+    fn auto_keeps_hues_in_color_dominant_images() {
+        for color in [[255, 0, 0], [40, 220, 20], [15, 45, 230]] {
+            let input = DynamicImage::ImageRgb8(RgbImage::from_fn(256, 4, |x, _| {
+                let scale = (x + 1) as f32 / 256.0;
+                Rgb(color.map(|c| (c as f32 * scale).round() as u8))
+            }));
+            let original = input.to_rgb8();
+            let output = auto_enhance(input).into_rgb8();
+            for (before, after) in original.pixels().zip(output.pixels()) {
+                // A common RGB multiplier preserves normalized channel ratios within rounding.
+                let before_max = *before.0.iter().max().unwrap() as f32;
+                let after_max = *after.0.iter().max().unwrap() as f32;
+                for c in 0..3 {
+                    if before_max > 20.0 && after_max > 20.0 {
+                        assert!((before[c] as f32 / before_max - after[c] as f32 / after_max).abs() < 0.06);
+                    }
+                    if before[c] == 0 { assert_eq!(after[c], 0); }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn auto_corrects_consistent_neutral_cast_without_green_anchor() {
+        for cast in [[1.10, 1.0, 0.88], [0.94, 1.10, 0.94], [0.90, 1.0, 1.10]] {
+            let input = DynamicImage::ImageRgb8(RgbImage::from_fn(256, 4, |x, _| {
+                let level = 60.0 + x as f32 * 140.0 / 255.0;
+                Rgb(cast.map(|gain| (level * gain).round() as u8))
+            }));
+            let before = input.to_rgb8().get_pixel(160, 0).0;
+            let output = auto_enhance(input).into_rgb8();
+            let after = output.get_pixel(160, 0).0;
+            let spread = |rgb: [u8; 3]| *rgb.iter().max().unwrap() - *rgb.iter().min().unwrap();
+            assert!(spread(after) < spread(before) * 3 / 4, "cast {cast:?}: {before:?} -> {after:?}");
+        }
+    }
+
+    #[test]
+    fn auto_preserves_alpha_and_ignores_invisible_rgb_in_statistics() {
+        let visible = gray_ramp(0, 160).into_rgba8();
+        let input = image::RgbaImage::from_fn(256, 8, |x, y| {
+            if y < 4 { *visible.get_pixel(x, y) }
+            else { image::Rgba([255, 15, 220, 0]) }
+        });
+        let original = input.clone();
+        let output = auto_enhance(DynamicImage::ImageRgba8(input)).into_rgba8();
+        let expected = auto_enhance(DynamicImage::ImageRgba8(visible)).into_rgba8();
+        for (x, y, pixel) in output.enumerate_pixels() {
+            if y < 4 { assert_eq!(*pixel, *expected.get_pixel(x, y)); }
+            else { assert_eq!(*pixel, *original.get_pixel(x, y)); }
+        }
+        let input = image::RgbaImage::from_fn(256, 4, |x, _| {
+            let value = (x * 160 / 255) as u8;
+            image::Rgba([value, value, value, 128 + x as u8 / 2])
+        });
+        let original_alpha: Vec<u8> = input.pixels().map(|p| p[3]).collect();
+        let output = auto_enhance(DynamicImage::ImageRgba8(input)).into_rgba8();
+        assert!(output.get_pixel(128, 0)[0] > 80);
+        assert_eq!(output.pixels().map(|p| p[3]).collect::<Vec<_>>(), original_alpha);
+    }
+
+    #[test]
+    fn auto_handles_empty_tiny_and_fully_transparent_images() {
+        for (w, h) in [(0, 0), (0, 4), (1, 1), (2, 3), (16, 16)] {
+            let input = image::RgbaImage::from_pixel(w, h, image::Rgba([12, 200, 89, 0]));
+            assert_eq!(auto_enhance(DynamicImage::ImageRgba8(input.clone())).into_rgba8(), input);
+        }
+        let input = DynamicImage::ImageRgb8(RgbImage::from_pixel(1, 1, Rgb([128; 3])));
+        assert_eq!(auto_enhance(input.clone()).into_rgb8(), input.into_rgb8());
+    }
+
+    fn step_image(horizontal: bool, brightness: u8) -> DynamicImage {
+        DynamicImage::ImageLuma8(GrayImage::from_fn(32, 32, |x, y| {
+            Luma([if (if horizontal { y } else { x }) >= 16 { brightness } else { 0 }])
+        }))
+    }
+
+    #[test]
+    fn canny_constant_and_tiny_images_are_black() {
+        for (w, h) in [(0, 0), (0, 3), (1, 8), (8, 2), (16, 16)] {
+            for brightness in [0, 127, 255] {
+                let input = DynamicImage::ImageLuma8(GrayImage::from_pixel(w, h, Luma([brightness])));
+                let output = canny(input, &json!({"low": 0, "high": 0})).into_luma8();
+                assert_eq!(output.dimensions(), (w, h));
+                assert!(output.pixels().all(|p| p[0] == 0));
+            }
+        }
+    }
+
+    #[test]
+    fn canny_thins_horizontal_and_vertical_edges() {
+        for horizontal in [false, true] {
+            let output = canny(step_image(horizontal, 255), &json!({})).into_luma8();
+            for line in 1..31 {
+                let positions: Vec<u32> = (0..32).filter(|&position| {
+                    let (x, y) = if horizontal { (line, position) } else { (position, line) };
+                    output.get_pixel(x, y)[0] == 255
+                }).collect();
+                assert_eq!(positions.len(), 1, "each line should contain one edge: {positions:?}");
+                assert!((15..=16).contains(&positions[0]));
+            }
+            assert!(output.pixels().all(|p| p[0] == 0 || p[0] == 255));
+        }
+    }
+
+    #[test]
+    fn canny_thresholds_control_weak_edges_and_are_order_independent() {
+        let sensitive = canny(step_image(false, 32), &json!({"low": 5, "high": 20})).into_luma8();
+        assert!(sensitive.pixels().any(|p| p[0] == 255));
+        let insensitive = canny(step_image(false, 32), &json!({"low": 100, "high": 200})).into_luma8();
+        assert!(insensitive.pixels().all(|p| p[0] == 0));
+        let reversed = canny(step_image(false, 32), &json!({"low": 20, "high": 5})).into_luma8();
+        assert_eq!(sensitive, reversed);
+    }
+
+    #[test]
+    fn canny_clamps_parameters_and_falls_back_for_invalid_values() {
+        let clamped = canny(step_image(false, 255), &json!({"low": 0, "high": 1020, "sigma": 0.3})).into_luma8();
+        let excessive = canny(step_image(false, 255), &json!({"low": -100, "high": 99999, "sigma": -9})).into_luma8();
+        assert_eq!(clamped, excessive);
+        let defaults = canny(step_image(false, 255), &json!({})).into_luma8();
+        let invalid = canny(step_image(false, 255), &json!({"low": "bad", "high": null, "sigma": []})).into_luma8();
+        assert_eq!(defaults, invalid);
+    }
+
+    #[test]
+    fn canny_hysteresis_keeps_connected_weak_edges_only() {
+        let (w, h) = (8, 5);
+        let mut strengths = vec![0.0; w * h];
+        strengths[w + 1] = 120.0; // 強い輪郭
+        strengths[2 * w + 2] = 60.0; // 斜めに接続
+        strengths[3 * w + 3] = 60.0; // 間接的に接続
+        strengths[3 * w + 4] = 49.0; // low未満
+        strengths[w + 6] = 80.0; // 孤立した弱い輪郭
+        let output = canny_hysteresis(&strengths, w, h, 50.0, 100.0);
+        assert_eq!(output.iter().filter(|&&v| v == 255).count(), 3);
+        assert_eq!(output[3 * w + 3], 255);
+        assert_eq!(output[3 * w + 4], 0);
+        assert_eq!(output[w + 6], 0);
+
+        // 配列上の隣接で、行末と次の行頭を誤ってつながない。
+        let mut wrapped = vec![0.0; w * h];
+        wrapped[2 * w - 1] = 120.0;
+        wrapped[2 * w] = 80.0;
+        assert_eq!(canny_hysteresis(&wrapped, w, h, 50.0, 100.0)[2 * w], 0);
+    }
+
+    #[test]
+    fn pipeline_matches_sequential_operations_and_renders_canny() {
+        let input = step_image(false, 255);
+        let edits = json!([
+            {"op": "filter", "params": {"name": "canny"}},
+            {"op": "filter", "params": {"name": "invert"}},
+            {"op": "adjust", "params": {"exposure": -0.2}}
+        ]);
+        let expected = apply(input.clone(), &edits).into_rgb8();
+        let combined = json!([{"op": "pipeline", "params": {"edits": edits}}]);
+        assert_eq!(apply(input, &combined).into_rgb8(), expected);
+        assert!(expected.pixels().any(|p| p[0] == 0));
+        assert!(expected.pixels().any(|p| p[0] > 0));
+    }
+
+    #[test]
+    fn pipeline_ignores_nested_and_geometric_operations_and_is_bounded() {
+        let input = DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 2, Rgb([10, 20, 30])));
+        let unsupported = json!([{"op": "pipeline", "params": {"edits": [
+            {"op": "rotate", "params": {"deg": 90}},
+            {"op": "pipeline", "params": {"edits": [{"op": "filter", "params": {"name": "invert"}}]}}
+        ]}}]);
+        assert_eq!(apply(input.clone(), &unsupported).into_rgb8(), input.to_rgb8());
+        let mut operations = vec![json!({"op": "adjust", "params": {}}); 16];
+        operations.push(json!({"op": "filter", "params": {"name": "invert"}}));
+        let oversized = json!([{"op": "pipeline", "params": {"edits": operations}}]);
+        assert_eq!(apply(input.clone(), &oversized).into_rgb8(), input.into_rgb8());
+    }
 }

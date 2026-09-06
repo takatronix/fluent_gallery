@@ -19,6 +19,7 @@
 | **言葉で自動マスク** | 内蔵GroundingDINO tiny(int8・Apache-2.0・204MB)で「person. dog.」のような語から箱を出し、SAM2 が輪郭に仕上げる。フォルダの「マスク生成」で一括。**全部ローカル・API代ゼロ**、CPUで約3秒/枚 |
 | **似た画像** | CLIP埋め込みによる類似検索。似ている順の動的フォルダを作れる |
 | **非破壊編集** | 露出/コントラスト/彩度/色温度/回転/反転/クロップ/フィルタ。原本は不変、履歴スタックはサイドカーに |
+| **フォルダの言語フィルタ** | 「境界線だけにして」→Canny、「鉛筆画」「レトロ」「少し明るく」などをフォルダ全体へ。ランダム・リセットは各1ボタン。原寸PNGとサムネイルを一度だけ保存し、加工済み画像を通常の画像として表示・保存・出力。同じ加工は保存結果を再利用 |
 | **整理** | フォルダ/グループ/データセット/棚の名称変更(ダブルクリック or ✎)、D&Dで移動(同じ木の中だけ)、フォルダ同士の合流(確認ポップアップ付き・画像は消えない) |
 | **払い出し** | 選択やフィルタ結果を `store/datasets/<name>/` へsymlink+manifestで出荷。学習ツールにそのまま渡せる |
 | **AI 1st** | 全操作がAPI。MCPサーバ(`mcp/`)経由でAIが自律運用できる |
@@ -28,6 +29,10 @@
 ---
 
 ## 動かす
+
+フォルダを開き、上部のフィルタ指示欄に入力して **フォルダに適用**（またはEnter）。現在のフォルダの元画像をバックグラウンドで1枚ずつ加工し、全件保存後に加工済みの表示へ切り替えます。**ランダム**は別のフィルタを元画像から適用、**リセット**は元画像の表示に戻します。元画像と既存の個別編集は保持され、完成画像にはフィルタの再計算が要りません。処理後に追加した画像を含める場合は、もう一度適用してください（処理済みは再利用）。
+
+API: `POST /api/filters/plan {text}` → `{edit}`、`POST /api/albums/{name}/filter {edit}`、`GET /api/filters/status`、`POST /api/filters/stop`、`POST /api/albums/{name}/filter/reset`。アルバムの `criteria` は元画像、`display_criteria` は加工済み集合。加工画像の来歴は `filter_source_sha` / `filter_recipe` に保存します。
 
 ```bash
 # ビルド(このマシンはBINDGEN/RUSTFLAGSが必須 — build.shが面倒を見る)
@@ -134,6 +139,8 @@ fluent_gallery (Rust, axum, 単一バイナリ, :8790)
 
 ```bash
 node tests/ui_regression.js   # 単体実行(サーバ稼働中に)
+FG_URL=http://127.0.0.1:18890 node tests/auto_adjust.js  # 隔離ストアで自動補正・原本保持・表示競合を検証
+FG_URL=http://127.0.0.1:18890 node tests/edit_metadata_race.js  # ローカル模擬VLMで分類待ち中の編集保持を検証
 node tests/thumbnail_perf.js  # 1920x1080・DPR1で縮小 + 1万件往復scrollの性能予算
 PERF_DPR=2 node tests/thumbnail_perf.js  # Retina相当
 ```

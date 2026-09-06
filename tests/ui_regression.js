@@ -806,7 +806,7 @@ const check = (name, ok, detail = '') => {
       await mp.evaluate(() => clearSel());
     }
 
-    // フォルダの操作列も1段で横へ逃がし、設定を開いても画像領域を残す。
+    // 操作列は1段。常時使える言語フィルタ欄も含め、全ボタンと画像領域を残す。
     await mp.evaluate(() => {
       openFolder('_uitest_b');
       $('viewhead').classList.remove('open');
@@ -818,9 +818,17 @@ const check = (name, ok, detail = '') => {
         row.scrollLeft = row.scrollWidth;
         const last = row.lastElementChild?.getBoundingClientRect(), rr = row.getBoundingClientRect();
         const hr = h.getBoundingClientRect(), gr = g.getBoundingClientRect();
+        const filter = h.querySelector('.folder-filter')?.getBoundingClientRect();
+        const filterControlsReachable = ['folder_filter_text', 'folder_filter_apply', 'folder_filter_random', 'folder_filter_reset']
+          .every(id => {
+            const r = $(id)?.getBoundingClientRect();
+            return r && r.width > 0 && r.height > 0 && r.left >= hr.left && r.right <= hr.right + 1 &&
+              r.top >= hr.top && r.bottom <= hr.bottom + 1;
+          });
         return {head:{top:hr.top,bottom:hr.bottom,height:hr.height,scrollHeight:h.scrollHeight,clientHeight:h.clientHeight,
           scrollWidth:h.scrollWidth,clientWidth:h.clientWidth},
           grid:{top:gr.top,bottom:gr.bottom,height:gr.height}, rowVertical:row.scrollHeight > row.clientHeight + 2,
+          filterHeight:filter?.height || 0, filterControlsReachable,
           lastReachable:!last || (last.left >= rr.left - 1 && last.right <= rr.right + 1),
           overflowY:getComputedStyle(h).overflowY};
       };
@@ -831,7 +839,8 @@ const check = (name, ok, detail = '') => {
       return {closed, open:measure()};
     });
     const maxOpen = Math.min(spec.height * .55, 420) + 2;
-    check(`${spec.name}フォルダ見出し(閉/展開/到達可能)`, folderHead.closed.head.height <= 72 &&
+    check(`${spec.name}フォルダ見出し(閉/展開/到達可能)`, folderHead.closed.head.height <= 72 + folderHead.closed.filterHeight &&
+      folderHead.closed.filterControlsReachable && folderHead.closed.grid.height >= spec.height * .25 &&
       !folderHead.closed.rowVertical && folderHead.closed.lastReachable &&
       folderHead.open.head.height <= maxOpen && folderHead.open.head.bottom <= spec.height + 1 &&
       folderHead.open.head.scrollWidth <= folderHead.open.head.clientWidth + 2 &&

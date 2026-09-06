@@ -4,6 +4,8 @@
 
 mod crawl;
 mod edits;
+mod filter_commands;
+mod folder_filters;
 mod config;
 mod enrich;
 mod gen;
@@ -41,6 +43,8 @@ struct App {
     root: PathBuf,
     ingest: Arc<store::Progress>,
     ingest_label: Mutex<String>,
+    folder_filter: Arc<folder_filters::FolderFilterState>,
+    folder_filter_owner: Mutex<Option<(String, String)>>,
     enrich: Arc<enrich::EnrichState>,
     crawl: Arc<crawl::CrawlState>,
     crawl_queue: Mutex<Vec<CrawlIn>>, // 順番待ち(同時1本=VLM直列の現実に合わせ、弾かず並ばせる)
@@ -93,6 +97,8 @@ struct Q {
     #[serde(default)] sem: String, // CLIP テキスト意味検索(英語)。空でも q が 0 件なら自動でこちらに落ちる
     #[serde(default)] tag: String,
     #[serde(default)] source: String,
+    #[serde(default)] filter_set: String, // 焼き込み済み画像の集合。閲覧時にはフィルタ計算しない
+    #[serde(default)] exclude_filtered: bool,
     #[serde(default)] origin: String,
     #[serde(default)] vlm_: String,
     #[serde(default)] scene: String,
@@ -256,6 +262,11 @@ fn prepare_grid_atlas(root: &Path, items: &[Value]) -> Option<Value> {
 fn build_where(q: &Q) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
     let mut wh: Vec<String> = vec!["1=1".into()];
     let mut args: Vec<Box<dyn rusqlite::ToSql>> = vec![];
+    if !q.filter_set.is_empty() {
+        wh.push("sha1 IN (SELECT sha1 FROM filter_members WHERE set_id=?)".into());
+        args.push(Box::new(q.filter_set.clone()));
+    }
+    if q.exclude_filtered { wh.push("(source IS NULL OR source NOT LIKE 'filter:%')".into()); }
     if !q.source.is_empty() {
         wh.push("source LIKE ?".into());
         args.push(Box::new(format!("{}%", q.source)));
@@ -714,8 +725,57 @@ async fn api_images_shas(State(app): S, Query(q): Query<Q>) -> Json<Value> {
     Json(json!({"total": shas.len(), "shas": shas}))
 }
 
-async fn thumb(State(app): S, AxPath(sha1): AxPath<String>) -> impl IntoResponse {
+#[derive(Deserialize, Default)]
+struct ImageRevision { #[serde(default)] v: String }
+
+// All display sizes of an edit share one 1600px rendition. A thumbnail request cannot
+// race the editor and independently reprocess the full original under the same revision.
+fn edit_preview_bytes(root: &Path, sha: &str, ext: &str, history: &Value, width: u32) -> Option<Vec<u8>> {
+    let revision = edits::rev(history);
+    let path = edits::render_path(root, sha, &revision, width, false);
+    if let Ok(bytes) = std::fs::read(&path) { return Some(bytes); }
+    type RenderLock = std::sync::Weak<Mutex<()>>;
+    static LOCKS: std::sync::OnceLock<Mutex<std::collections::HashMap<PathBuf, RenderLock>>> = std::sync::OnceLock::new();
+    let base_path = edits::render_path(root, sha, &revision, 1600, false);
+    let lock = {
+        let mut locks = LOCKS.get_or_init(Default::default).lock().unwrap();
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(&base_path).and_then(std::sync::Weak::upgrade) { lock }
+        else {
+            let lock = Arc::new(Mutex::new(()));
+            locks.insert(base_path, Arc::downgrade(&lock));
+            lock
+        }
+    };
+    let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+    if let Ok(bytes) = std::fs::read(&path) { return Some(bytes); }
+    let base = edits::render(root, sha, ext, history, 1600, None)?;
+    if width == 1600 { return Some(base); }
+    let image = image::load_from_memory(&base).ok()?.thumbnail(width, width).into_rgb8();
+    let mut bytes = Vec::new();
+    let quality = if width <= 120 { 72 } else if width <= 360 { 82 } else { 88 };
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, quality).encode_image(&image).ok()?;
+    atomic_publish(&path, &bytes).ok()?;
+    Some(bytes)
+}
+
+async fn edited_tier(app: &'static App, sha: String, revision: String, width: u32) -> axum::response::Response {
+    let Some(meta) = store::load_meta(&app.root, &sha) else { return StatusCode::NOT_FOUND.into_response() };
+    let history = meta.get("edits").cloned().unwrap_or_else(|| json!([]));
+    if revision != edits::rev(&history) {
+        return (StatusCode::CONFLICT, [(header::CACHE_CONTROL, "no-store")], "編集内容が更新されました").into_response();
+    }
+    let root = app.root.clone();
+    let ext = meta["ext"].as_str().unwrap_or("png").to_string();
+    match tokio::task::spawn_blocking(move || edit_preview_bytes(&root, &sha, &ext, &history, width)).await.ok().flatten() {
+        Some(bytes) => ([(header::CONTENT_TYPE, "image/jpeg"), (header::CACHE_CONTROL, IMMUTABLE)], bytes).into_response(),
+        None => (StatusCode::NOT_FOUND, [(header::CACHE_CONTROL, "no-store")]).into_response(),
+    }
+}
+
+async fn thumb(State(app): S, AxPath(sha1): AxPath<String>, Query(q): Query<ImageRevision>) -> impl IntoResponse {
     app.touch_ui();
+    if !q.v.is_empty() { return edited_tier(app, sha1, q.v, 360).await; }
     let jpg = store::thumb_path(&app.root, &sha1);
     if let Ok(b) = std::fs::read(&jpg) {
         return ([(header::CONTENT_TYPE, "image/jpeg"), (header::CACHE_CONTROL, IMMUTABLE)], b).into_response();
@@ -786,8 +846,9 @@ fn embed_backfill(root: &std::path::Path, batch: usize) -> usize {
 /// マイクロ段(120px) — 俯瞰表示用。360サムネを更に縮めてデコード費を1/10にする
 /// (小セルで360を1500枚デコードするとブラウザが止まる問題の根治 2026-09-03)。
 /// 基本はingest時焼き+backfill済みでhitする。missは非常用でsingle-flight(同一SHAの同時生成を1回に)。
-async fn micro(State(app): S, AxPath(sha1): AxPath<String>) -> impl IntoResponse {
+async fn micro(State(app): S, AxPath(sha1): AxPath<String>, Query(q): Query<ImageRevision>) -> impl IntoResponse {
     app.touch_ui();
+    if !q.v.is_empty() { return edited_tier(app, sha1, q.v, 120).await; }
     let p = store::micro_path(&app.root, &sha1);
     if let Ok(b) = std::fs::read(&p) {
         return ([(header::CONTENT_TYPE, "image/jpeg"), (header::CACHE_CONTROL, IMMUTABLE)], b).into_response();
@@ -972,22 +1033,73 @@ async fn api_edits_get(State(app): S, AxPath(sha1): AxPath<String>) -> impl Into
 }
 
 #[derive(Deserialize)]
+struct FilterInstruction { text: String }
+
+async fn plan_filter(app: &App, text: &str) -> Result<Value, String> {
+    let text = text.trim();
+    if text.is_empty() || text.chars().count() > 500 {
+        return Err("フィルタの指示を1〜500文字で入力してください".into());
+    }
+    if let Some(edit) = filter_commands::parse(text) {
+        return filter_commands::validate(&edit);
+    }
+    // 日常の指示はローカル辞書で即時変換。未知の表現だけ取得済みの内蔵LLMに相談する。
+    if !llm::model_path(&app.root).exists() {
+        return Err("指示を解釈できませんでした。「境界線だけにして」「モノクロ」「明るくして」などを試してください".into());
+    }
+    let reply = tokio::time::timeout(std::time::Duration::from_secs(45),
+        llm::chat(&app.root, &app.http, &app.llm, filter_commands::SYSTEM_PROMPT, text, 600))
+        .await.map_err(|_| "指示の解釈がタイムアウトしました。短い表現で試してください".to_string())??;
+    let parsed = reply.find('{').zip(reply.rfind('}'))
+        .and_then(|(a, b)| serde_json::from_str::<Value>(&reply[a..=b]).ok())
+        .ok_or_else(|| "指示をフィルタに変換できませんでした".to_string())?;
+    let mut edit = filter_commands::validate(&parsed)?;
+    edit["prompt"] = json!(text);
+    Ok(edit)
+}
+
+async fn api_filter_plan(State(app): S, Json(n): Json<FilterInstruction>) -> impl IntoResponse {
+    match plan_filter(app, &n.text).await {
+        Ok(edit) => Json(json!({"edit": edit})).into_response(),
+        Err(e) => err_json(StatusCode::BAD_REQUEST, &e),
+    }
+}
+
+#[derive(Deserialize)]
 struct EditIn {
     action: String, // push | pop | clear
     #[serde(default)] edit: Value,
 }
 
 async fn api_edits_put(State(app): S, AxPath(sha1): AxPath<String>, Json(e): Json<EditIn>) -> impl IntoResponse {
+    // Serialize the short read-modify-write with enrichment/segmentation commits.
+    let db = app.db.lock().unwrap();
     let Some(mut m) = store::load_meta(&app.root, &sha1) else {
         return StatusCode::NOT_FOUND.into_response();
     };
     let mut list = m.get("edits").and_then(|v| v.as_array().cloned()).unwrap_or_default();
+    let legacy_thumbs = !list.is_empty() && m["original_thumbs"] != true;
     match e.action.as_str() {
         "push" => {
             if e.edit["op"].as_str().is_none() {
                 return (StatusCode::BAD_REQUEST, Json(json!({"detail": "edit.op がありません"}))).into_response();
             }
             let mut ed = e.edit;
+            if ed["op"] == "auto" {
+                // Auto is a correction, not an accumulating effect. Repeated clicks leave
+                // the same one-step result; old repeated auto entries are collapsed once.
+                if list.last().is_some_and(|last| last["op"] == "auto" && last["params"]["version"] == 2) {
+                    return Json(json!({"edits": list, "rev": edits::rev(&json!(list))})).into_response();
+                }
+                while list.last().is_some_and(|last| last["op"] == "auto") { list.pop(); }
+                ed["params"] = json!({"version": 2});
+            }
+            if ed["op"] == "pipeline" {
+                ed = match filter_commands::validate(&ed) {
+                    Ok(ed) => ed,
+                    Err(e) => return err_json(StatusCode::BAD_REQUEST, &e),
+                };
+            }
             ed["ts"] = json!(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64());
             list.push(ed);
         }
@@ -996,27 +1108,18 @@ async fn api_edits_put(State(app): S, AxPath(sha1): AxPath<String>, Json(e): Jso
         _ => return (StatusCode::BAD_REQUEST, Json(json!({"detail": "action は push/pop/clear"}))).into_response(),
     }
     m["edits"] = json!(list);
+    m["original_thumbs"] = json!(true);
     if store::save_meta(&app.root, &m).is_err() {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
-    edits::clear_renders(&app.root, &sha1); // 履歴が変わればレンダは捨てる(全て再生成可能)
-    store::index_meta(&app.db.lock().unwrap(), &m); // erev(サムネ版)を索引へ
-    // サムネ/プレビューも編集後の見た目に焼き直す(グリッドが原本のままにならないように)
-    {
-        let root = app.root.clone();
-        let sha = sha1.clone();
-        let ext = m["ext"].as_str().unwrap_or("jpg").to_string();
-        let ed = m["edits"].clone();
-        tokio::task::spawn_blocking(move || {
-            if let Some(pv) = edits::render(&root, &sha, &ext, &ed, 1080, None) {
-                let _ = std::fs::write(store::preview_path(&root, &sha), &pv);
-                if let Ok(img) = image::load_from_memory(&pv) {
-                    // 360だけ書き換えると小型グリッドが編集前のmicroを出し続ける。
-                    // 共通helperで360+120を同じrevの見た目へ同時更新する。
-                    store::write_thumbs(&root, &sha, &img);
-                }
-            }
-        });
+    // Revision-keyed renditions can be reused by undo; the cache janitor removes old files.
+    store::index_meta(&db, &m); // erev(サムネ版)を索引へ
+    // Old builds overwrote these original URLs with edited pixels. Discard that legacy
+    // cache once; new edits only write their own revision paths, never original thumbnails.
+    if legacy_thumbs {
+        for path in [store::thumb_path(&app.root, &sha1), store::micro_path(&app.root, &sha1), store::preview_path(&app.root, &sha1)] {
+            let _ = std::fs::remove_file(path);
+        }
     }
     let e = m["edits"].clone();
     Json(json!({"edits": e, "rev": edits::rev(&e)})).into_response()
@@ -1025,33 +1128,40 @@ async fn api_edits_put(State(app): S, AxPath(sha1): AxPath<String>, Json(e): Jso
 #[derive(Deserialize)]
 struct RenderQ {
     #[serde(default)] w: u32,
-    #[serde(default)] v: String, // クライアントがrevをURLに入れてキャッシュを効かせる(サーバは常に現行revで応える)
+    #[serde(default)] v: String, // 指定revのみ応答。空/旧クライアントの0は現行版を再検証して読む。
     #[serde(default)] seg: String, // "1"=マスク輪郭を焼いて返す
 }
 
 async fn render_img(State(app): S, AxPath(sha1): AxPath<String>, Query(rq): Query<RenderQ>) -> impl IntoResponse {
-    let _ = &rq.v;
     let Some(m) = store::load_meta(&app.root, &sha1) else {
         return StatusCode::NOT_FOUND.into_response();
     };
     let e = m.get("edits").cloned().unwrap_or_else(|| json!([]));
+    let versioned = !rq.v.is_empty() && rq.v != "0";
+    if versioned && rq.v != edits::rev(&e) {
+        return (StatusCode::CONFLICT, [(header::CACHE_CONTROL, "no-store")], "編集内容が更新されました").into_response();
+    }
     let ext = m["ext"].as_str().unwrap_or("png").to_string();
     let seg_shapes = (rq.seg == "1").then(|| m["seg"]["shapes"].clone()).filter(|s| s.is_array());
+    let cache_control = if versioned { IMMUTABLE } else { "no-cache" };
     // 履歴なし・原寸要求・マスク無しなら原本をそのまま(コピーゼロ)
     if e.as_array().map(|a| a.is_empty()).unwrap_or(true) && rq.w == 0 && seg_shapes.is_none() {
         return match std::fs::read(store::image_path(&app.root, &sha1, &ext)) {
-            Ok(b) => ([(header::CONTENT_TYPE, mime(&ext)), (header::CACHE_CONTROL, IMMUTABLE)], b).into_response(),
+            Ok(b) => ([(header::CONTENT_TYPE, mime(&ext)), (header::CACHE_CONTROL, cache_control)], b).into_response(),
             Err(_) => StatusCode::NOT_FOUND.into_response(),
         };
     }
     let root = app.root.clone();
     let w = rq.w;
-    let out = tokio::task::spawn_blocking(move || edits::render(&root, &sha1, &ext, &e, w, seg_shapes.as_ref()))
+    let out = tokio::task::spawn_blocking(move || {
+        if w > 0 && w <= 1600 && seg_shapes.is_none() { edit_preview_bytes(&root, &sha1, &ext, &e, w) }
+        else { edits::render(&root, &sha1, &ext, &e, w, seg_shapes.as_ref()) }
+    })
         .await
         .ok()
         .flatten();
     match out {
-        Some(b) => ([(header::CONTENT_TYPE, "image/jpeg"), (header::CACHE_CONTROL, IMMUTABLE)], b).into_response(),
+        Some(b) => ([(header::CONTENT_TYPE, "image/jpeg"), (header::CACHE_CONTROL, cache_control)], b).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -1081,7 +1191,8 @@ async fn cutout(State(app): S, AxPath(sha1): AxPath<String>) -> impl IntoRespons
 }
 
 /// preview段(長辺1080) — ライトボックスを待たせない中間サムネ。ingest時に焼き、無ければその場生成。
-async fn preview(State(app): S, AxPath(sha1): AxPath<String>) -> impl IntoResponse {
+async fn preview(State(app): S, AxPath(sha1): AxPath<String>, Query(q): Query<ImageRevision>) -> impl IntoResponse {
+    if !q.v.is_empty() { return edited_tier(app, sha1, q.v, 1080).await; }
     let p = store::preview_path(&app.root, &sha1);
     if let Ok(b) = std::fs::read(&p) {
         return ([(header::CONTENT_TYPE, "image/jpeg"), (header::CACHE_CONTROL, IMMUTABLE)], b).into_response();
@@ -1626,6 +1737,7 @@ struct AlbumIn {
 }
 
 async fn api_album_make(State(app): S, Json(a): Json<AlbumIn>) -> impl IntoResponse {
+    let _owner = app.folder_filter_owner.lock().unwrap();
     let slug = album_slug(&a.name);
     let dir = album_dir(&app.root);
     // 上書き保存なので、UI の部分更新(自動保存・スイッチ)が送ってこない項目は既存から引き継ぐ
@@ -1645,6 +1757,12 @@ async fn api_album_make(State(app): S, Json(a): Json<AlbumIn>) -> impl IntoRespo
             .unwrap_or_else(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64())});
     if let Some(lr) = prev.as_ref().map(|p| p["last_run"].clone()).filter(|v| v.is_object()) {
         rec["last_run"] = lr; // 直近の成績も消さない
+    }
+    for key in ["filter", "filter_job", "filter_error", "filter_epoch", "display_criteria"] {
+        if let Some(v) = prev.as_ref().and_then(|p| p.get(key)) { rec[key] = v.clone(); }
+    }
+    if prev.as_ref().is_some_and(|p| p["criteria"]["exclude_filtered"] == true) {
+        rec["criteria"]["exclude_filtered"] = json!(true);
     }
     let _ = std::fs::create_dir_all(&dir);
     if std::fs::write(dir.join(format!("{slug}.json")), serde_json::to_string_pretty(&rec).unwrap()).is_err() {
@@ -1673,7 +1791,13 @@ async fn api_albums(State(app): S) -> Json<Value> {
             .unwrap_or_default()
     };
     for mut a in load_albums(&app.root) {
-        // criteriaがsourceのみ(他キーは空)なら高速路、複雑な条件だけ従来の全評価
+        if let Some(set) = a["display_criteria"]["filter_set"].as_str() {
+            let count: i64 = app.db.lock().unwrap().query_row(
+                "SELECT COUNT(*) FROM images WHERE sha1 IN (SELECT sha1 FROM filter_members WHERE set_id=?1)",
+                [set], |r| r.get(0)).unwrap_or(0);
+            a["count"] = json!(count);
+        } else {
+        // 元画像の除外条件が増えても件数はCOUNTだけで取り、全SHA配列を作らない。
         let simple_src = a["criteria"].as_object().and_then(|o| {
             let others_empty = o.iter().all(|(k, v)| k == "source" || v.as_str().map(|s| s.is_empty()).unwrap_or(false));
             match (others_empty, o.get("source").and_then(|v| v.as_str())) {
@@ -1684,7 +1808,12 @@ async fn api_albums(State(app): S) -> Json<Value> {
         if let Some(s) = simple_src {
             a["count"] = json!(src_counts.get(&s).copied().unwrap_or(0));
         } else if let Ok(q) = serde_json::from_value::<Q>(a["criteria"].clone()) {
-            a["count"] = json!(query_shas(app, &q).len());
+            let (cond, args) = build_where(&q);
+            let params: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
+            let count: i64 = app.db.lock().unwrap().query_row(&format!("SELECT COUNT(*) FROM images WHERE {cond}"),
+                params.as_slice(), |r| r.get(0)).unwrap_or(0);
+            a["count"] = json!(count);
+        }
         }
         let gen_on = gen_running && a["name"] == json!(gen_album.clone());
         a["running"] = json!((running && a["name"] == json!(running_album.clone())) || gen_on);
@@ -1695,6 +1824,10 @@ async fn api_albums(State(app): S) -> Json<Value> {
 }
 
 async fn api_album_del(State(app): S, AxPath(name): AxPath<String>) -> impl IntoResponse {
+    let owner = app.folder_filter_owner.lock().unwrap();
+    if owner.as_ref().is_some_and(|(a, _)| a == &album_slug(&name)) {
+        app.folder_filter.stop();
+    }
     let p = album_dir(&app.root).join(format!("{}.json", album_slug(&name)));
     if !p.exists() {
         return StatusCode::NOT_FOUND.into_response();
@@ -1719,6 +1852,119 @@ fn save_album(root: &std::path::Path, rec: &Value) -> bool {
     !name.is_empty()
         && std::fs::write(album_path(root, name), serde_json::to_string_pretty(rec).unwrap()).is_ok()
 }
+
+#[derive(Deserialize)]
+struct FolderFilterIn { edit: Value }
+
+async fn api_folder_filter(State(app): S, AxPath(name): AxPath<String>, Json(input): Json<FolderFilterIn>) -> impl IntoResponse {
+    let slug = album_slug(&name);
+    let Some(album) = load_album(&app.root, &slug) else {
+        return err_json(StatusCode::NOT_FOUND, "フォルダが見つかりません");
+    };
+    let epoch = album["filter_epoch"].as_u64().unwrap_or(0);
+    let edit = match filter_commands::validate(&input.edit) {
+        Ok(e) => e, Err(e) => return err_json(StatusCode::BAD_REQUEST, &e),
+    };
+    let mut q = match serde_json::from_value::<Q>(album["criteria"].clone()) {
+        Ok(q) => q, Err(_) => return err_json(StatusCode::BAD_REQUEST, "フォルダの条件を読み取れません"),
+    };
+    if app.folder_filter_owner.lock().unwrap().is_some() {
+        return err_json(StatusCode::CONFLICT, "別のフィルタ処理中です。完了を待つか停止してください");
+    }
+    let exclude = !q.source.starts_with("filter:") && q.filter_set.is_empty();
+    q.exclude_filtered |= exclude;
+    let shas = tokio::task::spawn_blocking(move || {
+        // 表示の類似検索と同じ集合。similar/semを通常条件として無視して全件加工しない。
+        if !q.similar.is_empty() { return similar_ranked(app, &q.similar, 4000); }
+        let found = query_shas(app, &q);
+        let sem = if !q.sem.is_empty() { &q.sem } else if found.is_empty() && onnx::text_present(&app.root) { &q.q } else { "" };
+        if !sem.is_empty() {
+            return onnx::embed_text(&app.root, sem).map(|e| ranked_by_emb(app, &e, 400)).unwrap_or_default();
+        }
+        found
+    }).await.unwrap_or_default();
+    let mut owner = app.folder_filter_owner.lock().unwrap();
+    if owner.is_some() { return err_json(StatusCode::CONFLICT, "別のフィルタ処理中です"); }
+    let Some(mut album) = load_album(&app.root, &slug) else {
+        return err_json(StatusCode::NOT_FOUND, "フォルダが見つかりません");
+    };
+    if album["filter_epoch"].as_u64().unwrap_or(0) != epoch {
+        return err_json(StatusCode::CONFLICT, "フィルタ設定が変更されました。必要ならもう一度適用してください");
+    }
+    album["filter_epoch"] = json!(epoch + 1);
+    if exclude { album["criteria"]["exclude_filtered"] = json!(true); }
+    if shas.is_empty() { return err_json(StatusCode::BAD_REQUEST, "このフォルダに加工する画像がありません"); }
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let set_id = hex::encode(Sha1::digest(format!("{slug}:{stamp}").as_bytes()));
+    album["filter_job"] = json!({"set_id": set_id, "edit": edit, "total": shas.len()});
+    album.as_object_mut().unwrap().remove("filter_error");
+    if !save_album(&app.root, &album) {
+        return err_json(StatusCode::INTERNAL_SERVER_ERROR, "フィルタ設定を保存できませんでした");
+    }
+    if let Err(e) = app.folder_filter.start(app.root.clone(), shas, edit.clone(), set_id.clone(), format!("filter:{set_id}")) {
+        album.as_object_mut().unwrap().remove("filter_job");
+        save_album(&app.root, &album);
+        return err_json(StatusCode::CONFLICT, &e);
+    }
+    *owner = Some((slug.clone(), set_id.clone()));
+    let response = json!({"set_id": set_id, "album": slug, "edit": edit});
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let status = app.folder_filter.status();
+            if status["running"].as_bool().unwrap_or(false) { continue; }
+            let mut owner = app.folder_filter_owner.lock().unwrap();
+            if let Some(mut latest) = load_album(&app.root, &slug) {
+                // リセットやフォルダ削除後に、遅れて届く完了で表示を戻さない。
+                if latest["filter_job"]["set_id"] == json!(set_id) {
+                    let complete = status["errors"].as_u64() == Some(0)
+                        && status["done"] == status["total"] && status["stop_requested"] != true;
+                    if complete {
+                        latest["display_criteria"] = json!({"filter_set": set_id});
+                        latest["filter"] = json!({"set_id": set_id, "edit": edit, "count": status["done"]});
+                    } else {
+                        latest["filter_error"] = json!(if status["stop_requested"] == true {
+                            "処理を停止しました。表示は変更していません".to_string()
+                        } else { format!("加工に失敗した画像があります。表示は変更していません: {}", status["last"].as_str().unwrap_or("")) });
+                    }
+                    latest.as_object_mut().unwrap().remove("filter_job");
+                    if !save_album(&app.root, &latest) { eprintln!("folder filter: failed to save album {slug}"); }
+                }
+            }
+            *owner = None;
+            break;
+        }
+    });
+    Json(response).into_response()
+}
+
+async fn api_folder_filter_reset(State(app): S, AxPath(name): AxPath<String>) -> impl IntoResponse {
+    let slug = album_slug(&name);
+    let owner = app.folder_filter_owner.lock().unwrap();
+    let Some(mut album) = load_album(&app.root, &slug) else {
+        return err_json(StatusCode::NOT_FOUND, "フォルダが見つかりません");
+    };
+    album["filter_epoch"] = json!(album["filter_epoch"].as_u64().unwrap_or(0) + 1);
+    if owner.as_ref().is_some_and(|(name, _)| name == &slug) { app.folder_filter.stop(); }
+    for key in ["filter", "filter_job", "filter_error", "display_criteria"] {
+        album.as_object_mut().unwrap().remove(key);
+    }
+    if !save_album(&app.root, &album) { return err_json(StatusCode::INTERNAL_SERVER_ERROR, "リセットを保存できませんでした"); }
+    Json(album).into_response()
+}
+
+async fn api_folder_filter_status(State(app): S) -> impl IntoResponse {
+    let mut status = app.folder_filter.status();
+    let owner = app.folder_filter_owner.lock().unwrap();
+    status["album"] = json!(owner.as_ref().map(|(a, _)| a));
+    status["committing"] = json!(owner.is_some());
+    Json(status)
+}
+
+async fn api_folder_filter_stop(State(app): S) -> impl IntoResponse {
+    app.folder_filter.stop();
+    Json(json!({"ok": true}))
+}
 fn ledger_file(root: &std::path::Path, name: &str) -> PathBuf {
     root.join("store/crawl").join(format!("{}.ledger.json", album_slug(name)))
 }
@@ -1728,6 +1974,7 @@ fn album_busy(app: &App, name: &str) -> bool {
     let running = app.crawl.alive.load(Relaxed) && album_slug(&app.crawl.album.lock().unwrap()) == slug;
     let generating = app.gen.alive.load(Relaxed) && album_slug(&app.gen.album.lock().unwrap()) == slug;
     running || generating || app.crawl_queue.lock().unwrap().iter().any(|c| album_slug(&c.album) == slug)
+        || app.folder_filter_owner.lock().unwrap().as_ref().is_some_and(|(a, _)| a == &slug)
 }
 fn err_json(code: StatusCode, msg: &str) -> axum::response::Response {
     (code, Json(json!({"detail": msg}))).into_response()
@@ -1811,6 +2058,7 @@ struct AlbumMoveIn { #[serde(default)] folder: String }
 
 /// D&D: フォルダをグループへ入れる/外へ出す(folderは表示上の棚だけ。中身は動かない)
 async fn api_album_move(State(app): S, AxPath(name): AxPath<String>, Json(p): Json<AlbumMoveIn>) -> impl IntoResponse {
+    let _owner = app.folder_filter_owner.lock().unwrap();
     let slug = album_slug(&name);
     let mut rec = match load_album(&app.root, &slug) {
         Some(r) => r,
@@ -1829,6 +2077,7 @@ struct FolderRenameIn { from: String, #[serde(default)] to: String, #[serde(defa
 
 /// グループ(ツリーの中間ノード)の改名と移動。実体は各フォルダのfolderパスの前方一致置換
 async fn api_folder_rename(State(app): S, Json(p): Json<FolderRenameIn>) -> impl IntoResponse {
+    let _owner = app.folder_filter_owner.lock().unwrap();
     let from = folder_norm(&p.from);
     let to = folder_norm(&p.to);
     if from.is_empty() {
@@ -2268,7 +2517,7 @@ struct SegRefineIn {
 
 /// クリック/範囲から内蔵SAM2でマスクを切る。画像の埋め込みは sha1 で使い回すので2回目以降は速い
 async fn api_seg_refine(State(app): S, Json(s): Json<SegRefineIn>) -> impl IntoResponse {
-    let Some(mut m) = store::load_meta(&app.root, &s.sha1) else {
+    let Some(m) = store::load_meta(&app.root, &s.sha1) else {
         return StatusCode::NOT_FOUND.into_response();
     };
     if s.points.is_empty() && s.box_.is_none() {
@@ -2303,13 +2552,19 @@ async fn api_seg_refine(State(app): S, Json(s): Json<SegRefineIn>) -> impl IntoR
     if shapes.is_empty() {
         return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({"detail": "そこには物体を見つけられませんでした"}))).into_response();
     }
+    // 推論中の編集を保持し、編集APIと同じロックの中で最新メタへマスクだけを追加する。
+    let db = app.db.lock().unwrap();
+    let Some(mut m) = store::load_meta(&app.root, &s.sha1) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
     let mut cur: Vec<Value> = if s.replace { vec![] } else { m["seg"]["shapes"].as_array().cloned().unwrap_or_default() };
     cur.extend(shapes);
     m["seg"] = json!({"prompt": cls, "model": "sam2-hiera-tiny", "shapes": cur,
         "ts": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64()});
     if store::save_meta(&app.root, &m).is_ok() {
-        store::index_meta(&app.db.lock().unwrap(), &m);
+        store::index_meta(&db, &m);
     }
+    drop(db);
     edits::clear_renders(&app.root, &s.sha1);
     Json(m).into_response()
 }
@@ -2361,7 +2616,7 @@ async fn api_seg_auto(State(app): S, Json(q): Json<SegAutoIn>) -> impl IntoRespo
     let done = tokio::task::spawn_blocking(move || {
         let mut ok = 0usize;
         for sha in shas {
-            let Some(mut m) = store::load_meta(&root, &sha) else { continue };
+            let Some(m) = store::load_meta(&root, &sha) else { continue };
             let ext = m["ext"].as_str().unwrap_or("jpg").to_string();
             let Ok(img) = image::open(store::image_path(&root, &sha, &ext)) else { continue };
             let Some(dets) = dino::detect(&root, &img, &labels, dino::BOX_THR) else { continue };
@@ -2375,11 +2630,14 @@ async fn api_seg_auto(State(app): S, Json(q): Json<SegAutoIn>) -> impl IntoRespo
             }
             sam::forget(&sha); // 次の画像のために埋め込みを抱え込まない
             if shapes.is_empty() { continue; }
+            let db = app.db.lock().unwrap();
+            let Some(mut m) = store::load_meta(&root, &sha) else { continue };
             m["seg"] = json!({"prompt": labels.join(". "), "model": "grounding-dino+sam2", "shapes": shapes,
                 "ts": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64()});
             if store::save_meta(&root, &m).is_ok() {
-                store::index_meta(&app.db.lock().unwrap(), &m);
+                store::index_meta(&db, &m);
             }
+            drop(db);
             edits::clear_renders(&root, &sha);
             ok += 1;
         }
@@ -2788,7 +3046,7 @@ fn build_ref_pool(app: &'static App, recipe: &Value) -> gen::RefPool {
                 "folder" => {
                     let name = r["album"].as_str().unwrap_or("");
                     let shas = albums.iter().find(|a| a["name"] == json!(name))
-                        .and_then(|a| serde_json::from_value::<Q>(a["criteria"].clone()).ok())
+                        .and_then(|a| serde_json::from_value::<Q>(a.get("display_criteria").unwrap_or(&a["criteria"]).clone()).ok())
                         .map(|q| query_shas(app, &q)).unwrap_or_default();
                     (format!("folder '{name}'"), shas)
                 }
@@ -3180,6 +3438,9 @@ async fn api_prune(State(app): S, Json(p): Json<PruneIn>) -> impl IntoResponse {
     for a in load_albums(&app.root) {
         if let Ok(q) = serde_json::from_value::<Q>(a["criteria"].clone()) {
             protected.extend(query_shas(app, &q));
+        }
+        if let Some(criteria) = a.get("display_criteria") {
+            if let Ok(q) = serde_json::from_value::<Q>(criteria.clone()) { protected.extend(query_shas(app, &q)); }
         }
     }
     let db = app.db.lock().unwrap();
@@ -3641,18 +3902,21 @@ async fn api_enrich(State(app): S, Json(e): Json<EnrichIn>) -> impl IntoResponse
                 break;
             }
             st.wait_if_yielding().await; // ユーザーが待ってる仕事(開いた画像の判定等)に道を譲る
-            let Some(mut m) = store::load_meta(&app.root, &sha1) else { continue };
+            let Some(m) = store::load_meta(&app.root, &sha1) else { continue };
             let path = store::image_path(&app.root, &sha1, m["ext"].as_str().unwrap_or("png"));
             match enrich::describe(&client, &path, &backend).await {
                 Ok(v) => {
+                    let db = app.db.lock().unwrap();
+                    let Some(mut m) = store::load_meta(&app.root, &sha1) else { continue };
                     m["vlm"] = json!({
                         "model": if backend == "builtin" { enrich::builtin_label() } else { backend.clone() },
                         "ts": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64(),
                         "caption": v["caption"], "tags": v["tags"], "attrs": v["attrs"],
                     });
                     if store::save_meta(&app.root, &m).is_ok() {
-                        store::index_meta(&app.db.lock().unwrap(), &m);
+                        store::index_meta(&db, &m);
                     }
+                    drop(db);
                     *st.last.lock().unwrap() = v["caption"].as_str().unwrap_or("").chars().take(80).collect();
                 }
                 Err(err) => {
@@ -3676,7 +3940,7 @@ struct EnrichOneIn {
 }
 
 async fn api_enrich_one(State(app): S, Json(e): Json<EnrichOneIn>) -> impl IntoResponse {
-    let Some(mut m) = store::load_meta(&app.root, &e.sha1) else {
+    let Some(m) = store::load_meta(&app.root, &e.sha1) else {
         return StatusCode::NOT_FOUND.into_response();
     };
     if m["vlm"].is_object() {
@@ -3695,14 +3959,20 @@ async fn api_enrich_one(State(app): S, Json(e): Json<EnrichOneIn>) -> impl IntoR
     let path = store::image_path(&app.root, &e.sha1, m["ext"].as_str().unwrap_or("png"));
     match enrich::describe(&app.http, &path, &backend).await {
         Ok(v) => {
+            // 画像判定の完了待ちに確定した色調整・クロップ・お気に入りを巻き戻さない。
+            let db = app.db.lock().unwrap();
+            let Some(mut m) = store::load_meta(&app.root, &e.sha1) else {
+                return StatusCode::NOT_FOUND.into_response();
+            };
             m["vlm"] = json!({
                 "model": if backend == "builtin" { enrich::builtin_label() } else { backend },
                 "ts": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64(),
                 "caption": v["caption"], "tags": v["tags"], "attrs": v["attrs"],
             });
             if store::save_meta(&app.root, &m).is_ok() {
-                store::index_meta(&app.db.lock().unwrap(), &m);
+                store::index_meta(&db, &m);
             }
+            drop(db);
             Json(m).into_response()
         }
         Err(err) => (StatusCode::BAD_GATEWAY, Json(json!({"detail": err}))).into_response(),
@@ -3941,11 +4211,22 @@ async fn main() {
     config::init(&root); // 設定の正本(store/config.json)を読む。以後 config::get_* で参照
     let db = Connection::open(root.join("store/index.sqlite")).expect("index.sqlite");
     store::ensure_schema(&db);
+    folder_filters::ensure_schema(&db).expect("filter schema");
+    folder_filters::restore_members(&root, &db).expect("filter manifests");
+    for mut album in load_albums(&root) {
+        if album.get("filter_job").is_some() {
+            album.as_object_mut().unwrap().remove("filter_job");
+            album["filter_error"] = json!("前回の処理が中断しました。もう一度適用すると保存済みの結果を再利用します");
+            save_album(&root, &album);
+        }
+    }
     let app: &'static App = Box::leak(Box::new(App {
         db: Mutex::new(db),
         root,
         ingest: Arc::new(store::Progress::default()),
         ingest_label: Mutex::new(String::new()),
+        folder_filter: Arc::new(folder_filters::FolderFilterState::default()),
+        folder_filter_owner: Mutex::new(None),
         enrich: Arc::new(enrich::EnrichState::default()),
         crawl: Arc::new(crawl::CrawlState::default()),
         crawl_queue: Mutex::new(Vec::new()),
@@ -3976,6 +4257,11 @@ async fn main() {
         .route("/preview/{sha1}", get(preview))
         .route("/render/{sha1}", get(render_img))
         .route("/api/edits/{sha1}", get(api_edits_get).put(api_edits_put))
+        .route("/api/filters/plan", post(api_filter_plan))
+        .route("/api/filters/status", get(api_folder_filter_status))
+        .route("/api/filters/stop", post(api_folder_filter_stop))
+        .route("/api/albums/{name}/filter", post(api_folder_filter))
+        .route("/api/albums/{name}/filter/reset", post(api_folder_filter_reset))
         .route("/api/keep", post(api_keep))
         .route("/api/trash", post(api_trash).get(api_trash_list))
         .route("/api/trash/restore", post(api_trash_restore))

@@ -670,9 +670,17 @@ pub async fn plan(root: &Path, client: &reqwest::Client, llm_st: &llm::LlmState,
                 ref_notes.iter().enumerate().map(|(i, c)| format!("- [REF{}] {}", i + 1, c)).collect::<Vec<_>>().join("\n"))
     } else {
         format!("REFERENCE IMAGES will be attached to the image model for every generation:\n{}\n\
-                 Therefore write EDIT INSTRUCTIONS, not scene descriptions: each prompt must keep the main subject of the reference \
-                 (same identity, breed, face, clothing, colors, materials) and change what the goal asks (scene, pose, lighting, \
-                 composition, season, weather, background). Start each with an imperative such as 'Keep the same ... from the reference image and place it ...'. \
+                 Therefore write EDIT INSTRUCTIONS, not scene descriptions. Keep the main subject of the reference \
+                 (same identity, breed, face) and change ONLY what the goal asks — nothing else. Read the goal and decide:\n\
+                 (a) the goal asks for a NEW SCENE (place, background, season, weather, lighting, pose, composition): \
+                 vary those, and KEEP the art style of the reference. A photo stays a photograph. \
+                 Never turn it into an illustration, anime, line art or painting unless the goal says so.\n\
+                 (b) the goal asks for a NEW ART STYLE or MEDIUM (anime, illustration, watercolor, oil painting, pixel art, \
+                 3D render, line art, sketch): THE NEW STYLE WINS. Do not keep the photographic colors, textures or materials, \
+                 do not add photo wording, and describe how the style looks (e.g. 'cel shading, clean bold line art, flat colors'). \
+                 KEEP the pose, hairstyle, clothing shape, background and framing of the reference — do not move the subject somewhere else.\n\
+                 (c) the goal asks for both: do both. If the goal asks for neither, keep everything and vary only the scene.\n\
+                 Start each with an imperative such as 'Keep the same ... from the reference image and ...'. \
                  Never describe the subject as something else.\n",
                 ref_notes.iter().enumerate().map(|(i, c)| format!("- [REF{}] {}", i + 1, c)).collect::<Vec<_>>().join("\n"))
     };
@@ -685,8 +693,12 @@ pub async fn plan(root: &Path, client: &reqwest::Client, llm_st: &llm::LlmState,
          - Each prompt is ONE sentence, concrete and visual. Vary them strongly: individual/variant of the subject, \
            composition (close-up to wide), viewpoint (eye level / top-down / low angle), lighting (day, night, backlight, artificial), \
            background/place, season/weather, action.\n\
+         - EXCEPTION: if the goal is a conversion of the reference (e.g. \"make this photo anime\", \"turn it into a watercolor\"), \
+           do NOT vary the scene at all. Write the same conversion instruction {n} times, changing only small wording of how the \
+           style looks. The point is {n} attempts at the same conversion, not {n} different pictures.\n\
          - If the goal wants photos (or does not say) and no LoRA is attached, use 'photorealistic photograph' wording and end with 'sharp focus, natural colors'. \
-           If the goal explicitly wants illustration/anime/painting/sprite sheet/pixel art etc., use exactly that wording instead.\n\
+           If the goal asks for illustration/anime/painting/sprite sheet/pixel art etc., use exactly that wording instead and \
+           NEVER add 'photorealistic photograph' or 'sharp focus, natural colors' — those fight the style the goal asked for.\n\
          - Never name real people, brands, or copyrighted characters. People are unspecified people.\n\
          - Keep every constraint written in the goal (e.g. 'no people', 'must show the whole body').\n\
          {}\
