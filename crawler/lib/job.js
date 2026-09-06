@@ -208,6 +208,12 @@ class Job {
     const pageUrl = normalizeUrl(inv.url) || item.url;
     this.visited.add(pageUrl);
     this.current = { url: pageUrl, title: inv.title };
+    if (item.depth === 0 && !this.topicTerms) {
+      // 開始ページの題と h1 = いま居る節の主題(「Saturn - NASA Science」→ saturn)。goal が別言語でも話題を外さない手がかり
+      const t = terms(`${inv.title.replace(/^\s*(Category|File|Portal|Wikipedia|Commons|Tag|Topic|カテゴリ)\s*[:：]\s*/i, '').split(/[|\-–—:：]/)[0]} ${inv.headings[0] || ''}`).filter((w) => w.length >= 3 && !/^(wikimedia|commons|category|wiki|nasa|science|home|page)$/i.test(w));
+      this.topicTerms = t.slice(0, 6);
+      this.log({ t: now(), topic_terms: this.topicTerms });
+    }
     this.imagesSeen += inv.images.length;
     // 部品検出: このページで見た画像 URL を数える(1 ページ 1 回)
     const seenHere = new Set();
@@ -250,7 +256,7 @@ class Job {
       if (j) continue;
       const depth = item.depth + 1;
       if (depth > L.max_depth) { this.skippedDepth++; continue; }
-      const sc = scoreLink(lk, this.goalTerms, depth, { startUrl: this.input.url });
+      const sc = scoreLink(lk, this.goalTerms, depth, { startUrl: this.input.url, topicTerms: this.topicTerms || [] });
       if (sc.score < LINK_THRESHOLD) continue;
       const offsite = !sameSite(lk.href, this.input.url);
       if (this.push(lk.href, depth, sc.score, sc.why, offsite)) { added++; if (nextLog.length < 8) nextLog.push({ url: lk.href, score: Math.round(sc.score * 100) / 100, why: sc.why, text: lk.text.slice(0, 40) }); }

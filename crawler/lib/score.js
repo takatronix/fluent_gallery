@@ -121,6 +121,8 @@ function scoreLink(lk, goalTerms, depth, opts) {
   let s = 0.5 * rel;
   const why = [];
   if (rel > 0.3) why.push(`goal 語一致 ${rel.toFixed(2)}`);
+  const topic = opts.topicTerms && opts.topicTerms.length ? clamp(textScore(`${lk.text} ${lk.imgAlt} ${lk.title} ${urlWords}`, opts.topicTerms), 0, 1) : 0;
+  if (topic > 0) { s += 0.3 * topic; why.push(`節の主題 ${topic.toFixed(2)}`); }
   if (lk.relNext) { s += 0.45; why.push('ページ送り'); }
   else if (PAGINATION.test(lk.href)) { s += 0.25; why.push('ページ番号'); }
   if (GALLERY_WORD.test(lk.href) || GALLERY_WORD.test(lk.text)) { s += 0.22; why.push('gallery/photos 系'); }
@@ -130,9 +132,15 @@ function scoreLink(lk, goalTerms, depth, opts) {
   if (lk.inMain) { s += 0.1; why.push('本文内'); }
   try {
     const sp = new URL(opts.startUrl).pathname.replace(/\/$/, ''), lp = new URL(lk.href).pathname;
-    if (sp.length > 1 && lp.startsWith(sp + '/') ) { s += 0.2; why.push('同じ節の下'); }
+    if (sp.length > 1 && lp.startsWith(sp + '/')) { s += 0.2; why.push('同じ節の下'); }
   } catch {}
-  if (lk.chrome) { s -= 0.35; why.push('nav/footer'); }
+  let sameSection = false;
+  try {
+    const sp = new URL(opts.startUrl).pathname.replace(/\/$/, ''), lp = new URL(lk.href).pathname;
+    sameSection = sp.length > 1 && lp.startsWith(sp + '/');
+  } catch {}
+  // 節の中のサブナビ(Saturn › Facts/Moons/Rings)は人が押す物。サイト全体の nav/footer だけ減点する
+  if (lk.chrome) { if (sameSection) { s -= 0.05; why.push('節内ナビ'); } else { s -= 0.35; why.push('nav/footer'); } }
   if (lk.generic) { s -= 0.5; why.push('定型リンク'); }
   if (!sameSite(lk.href, opts.startUrl)) { s -= 0.4; why.push('別サイト'); }
   else { try { if (new URL(lk.href).hostname !== new URL(opts.startUrl).hostname) { s -= 0.15; why.push('別ホスト'); } } catch {} }
