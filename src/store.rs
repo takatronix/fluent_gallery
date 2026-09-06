@@ -64,7 +64,7 @@ pub fn ensure_schema(db: &Connection) {
     let _ = db.execute("ALTER TABLE images ADD COLUMN framing TEXT", []); // closeup/upper_body/full_body/wide(LoRA選別)
     let _ = db.execute("ALTER TABLE images ADD COLUMN watermark INT", []); // 透かし/ロゴ/焼き込み文字(クロールゴミの主犯)
     let _ = db.execute("ALTER TABLE images ADD COLUMN animal TEXT", []); // 動物種(dog/cat/bird…/none)。品種はtagsへ(shiba inu等)
-    let _ = db.execute("ALTER TABLE images ADD COLUMN seg INT", []); // マスク有無(gdino2seg、shapes>0)
+    let _ = db.execute("ALTER TABLE images ADD COLUMN seg INT", []); // マスク有無(shapes>0)
     let _ = db.execute("ALTER TABLE images ADD COLUMN erev TEXT", []); // 編集rev(サムネURLのキャッシュバスタ。編集無し=NULL)
 }
 

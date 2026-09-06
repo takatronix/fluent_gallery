@@ -16,7 +16,6 @@ mod samples;
 mod urlimport;
 mod onnx;
 mod vlm;
-mod seg;
 mod store;
 
 use axum::{
@@ -46,7 +45,6 @@ struct App {
     lora: Arc<lora::LoraState>, // LoRA 棚の取り込み/試し描きの進捗
     llm: Arc<llm::LlmState>,
     vlm: Arc<vlm::VlmState>, // 内蔵VLM(llama-server 子プロセス)
-    seg: Arc<seg::SegState>,
     http: reqwest::Client,
     ui_hot: std::sync::atomic::AtomicU64, // 最後にUIが画像/一覧を要求したunix秒(backfillの遠慮判断)
     micro_inflight: Mutex<std::collections::HashSet<String>>, // /micro miss生成のsingle-flight
@@ -494,7 +492,7 @@ async fn api_images(State(app): S, Query(q): Query<Q>) -> Json<Value> {
 
 async fn api_facets(State(app): S) -> Json<Value> {
     // 2.5秒TTLキャッシュ: 全画像のGROUP BY×15本で1.8秒かかり、2秒ポーラーと重なって
-    // dbロック渋滞→UI全体もっさりの主因だった(ml-hub metrics-poll-hangと同じ病 2026-09-03)
+    // dbロック渋滞→UI全体もっさりの主因だった(過去に踏んだ metrics ポーリング詰まりと同じ病 2026-09-03)
     static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<(std::time::Instant, Value)>>> = std::sync::OnceLock::new();
     let cache = CACHE.get_or_init(|| std::sync::Mutex::new(None));
     if let Some((t, v)) = cache.lock().unwrap().as_ref() {
@@ -2253,162 +2251,6 @@ fn store_hamming(a: &str, b: &str) -> u32 {
     }
 }
 
-// ---------- 自動セグメント(フォルダは目標=クラスを知っている) ----------
-
-#[derive(Deserialize)]
-struct SegIn {
-    #[serde(default)] album: String,
-    #[serde(default)] shas: Vec<String>,
-    #[serde(default)] prompt: String, // 空=goalから内蔵LLMが検出クラス語を抽出
-}
-
-async fn api_seg(State(app): S, Json(s): Json<SegIn>) -> impl IntoResponse {
-    if app.seg.alive.load(Relaxed) {
-        return (StatusCode::CONFLICT, Json(json!({"detail": "マスク生成が実行中です"}))).into_response();
-    }
-    let mut prompt = s.prompt.trim().to_string();
-    let shas = if !s.shas.is_empty() {
-        s.shas
-    } else if !s.album.is_empty() {
-        let slug = album_slug(&s.album);
-        let Some(rec) = load_albums(&app.root).into_iter().find(|a| a["name"] == json!(slug.clone())) else {
-            return (StatusCode::NOT_FOUND, Json(json!({"detail": "アルバムが見つかりません"}))).into_response();
-        };
-        if prompt.is_empty() {
-            let goal = rec["goal"].as_str().unwrap_or(&slug).to_string();
-            // 目標文→検出クラス語(英語1-3語)。内蔵LLMなので$0
-            prompt = llm::chat(&app.root, &app.http, &app.llm,
-                "Reply with ONLY 1-3 short English object class words, comma separated. No other text.",
-                &format!("画像内で検出したい対象物を英語クラス語で。目標:「{goal}」"), 60)
-                .await
-                .ok()
-                .map(|t| t.trim().trim_matches(['`', '"', '。', '.']).to_string())
-                .filter(|t| !t.is_empty() && t.len() < 80)
-                .unwrap_or_else(|| slug.clone());
-        }
-        serde_json::from_value::<Q>(rec["criteria"].clone()).map(|q| query_shas(app, &q)).unwrap_or_default()
-    } else {
-        return (StatusCode::BAD_REQUEST, Json(json!({"detail": "album か shas をください"}))).into_response();
-    };
-    if shas.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({"detail": "対象画像がありません"}))).into_response();
-    }
-    if prompt.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({"detail": "promptが決められません"}))).into_response();
-    }
-    let st = app.seg.clone();
-    st.alive.store(true, Relaxed);
-    st.stop.store(false, Relaxed);
-    tokio::spawn(seg::run(app.root.clone(), app.http.clone(), st, shas, prompt.clone()));
-    Json(json!({"ok": true, "prompt": prompt})).into_response()
-}
-
-/// 遅延マスク: 開いた1枚に無ければその場で切る(対象語は属性から自動: 動物→その動物、人→person)
-#[derive(Deserialize)]
-struct SegOneIn {
-    sha1: String,
-    #[serde(default)] prompt: String,
-}
-
-async fn api_seg_one(State(app): S, Json(s): Json<SegOneIn>) -> impl IntoResponse {
-    let Some(mut m) = store::load_meta(&app.root, &s.sha1) else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    if m["seg"].is_object() && s.prompt.is_empty() {
-        return Json(m).into_response(); // もう切ってある
-    }
-    let prompt = if !s.prompt.trim().is_empty() {
-        s.prompt.trim().to_string()
-    } else {
-        let a = &m["vlm"]["attrs"];
-        let animal = a["animal"].as_str().unwrap_or("");
-        let subject = a["subject"].as_str().unwrap_or("");
-        if !animal.is_empty() && animal != "none" {
-            animal.to_string()
-        } else if subject == "person" || subject == "face" {
-            "person".to_string()
-        } else if !subject.is_empty() && !["other", "text", "abstract"].contains(&subject) {
-            subject.to_string()
-        } else {
-            return Json(json!({"skipped": true, "reason": "対象語を決められません(属性が無い/曖昧)"})).into_response();
-        }
-    };
-    let ext = m["ext"].as_str().unwrap_or("jpg").to_string();
-    let Ok(bytes) = std::fs::read(store::image_path(&app.root, &s.sha1, &ext)) else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    match seg::seg_one(&app.http, &bytes, &prompt).await {
-        Ok(shapes) => {
-            m["seg"] = json!({"prompt": prompt, "model": "gdino2seg", "shapes": shapes,
-                "ts": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64()});
-            if store::save_meta(&app.root, &m).is_ok() {
-                store::index_meta(&app.db.lock().unwrap(), &m);
-            }
-            edits::clear_renders(&app.root, &s.sha1);
-            Json(m).into_response()
-        }
-        Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({"detail": e}))).into_response(),
-    }
-}
-
-#[derive(Deserialize)]
-struct SegRefineIn {
-    sha1: String,
-    #[serde(default)] points: Vec<Vec<f64>>, // 正規化0-1 [[x,y],..] クリック点
-    #[serde(default)] labels: Vec<i64>,      // 1=前景 / 0=背景(右クリック除外)
-    #[serde(default, rename = "box")] box_: Option<Vec<f64>>, // 正規化 [x1,y1,x2,y2] 範囲選択
-    #[serde(default)] cls: String,
-    #[serde(default)] replace: bool, // true=全置換 / false=既存マスクに追加
-}
-
-/// クリック/範囲選択でマスクを切り直す(ml-hub SAM2直叩き)。ml-hubアノテエディタ相当のUX
-async fn api_seg_refine(State(app): S, Json(s): Json<SegRefineIn>) -> impl IntoResponse {
-    let Some(mut m) = store::load_meta(&app.root, &s.sha1) else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    if s.points.is_empty() && s.box_.is_none() {
-        return (StatusCode::BAD_REQUEST, Json(json!({"detail": "pointsかboxが必要です"}))).into_response();
-    }
-    let ext = m["ext"].as_str().unwrap_or("jpg").to_string();
-    let Ok(bytes) = std::fs::read(store::image_path(&app.root, &s.sha1, &ext)) else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    let cls = if s.cls.trim().is_empty() {
-        // クラス未指定は既存マスクのクラス→無ければ属性から
-        m["seg"]["shapes"][0]["cls"].as_str()
-            .or(m["vlm"]["attrs"]["subject"].as_str())
-            .unwrap_or("object")
-            .to_string()
-    } else {
-        s.cls.trim().to_string()
-    };
-    match seg::sam_refine(&app.http, &bytes, &s.points, &s.labels, s.box_.as_deref(), &cls).await {
-        Ok(shapes) if !shapes.is_empty() => {
-            let mut cur: Vec<Value> = if s.replace {
-                vec![]
-            } else {
-                m["seg"]["shapes"].as_array().cloned().unwrap_or_default()
-            };
-            cur.extend(shapes);
-            let prompt = m["seg"]["prompt"].as_str().unwrap_or(&cls).to_string();
-            m["seg"] = json!({"prompt": prompt, "model": "sam2:manual", "shapes": cur,
-                "ts": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64()});
-            if store::save_meta(&app.root, &m).is_ok() {
-                store::index_meta(&app.db.lock().unwrap(), &m);
-            }
-            edits::clear_renders(&app.root, &s.sha1);
-            Json(m).into_response()
-        }
-        Ok(_) => (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({"detail": "そこには物体を見つけられませんでした"}))).into_response(),
-        Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({"detail": e}))).into_response(),
-    }
-}
-
-async fn api_seg_stop(State(app): S) -> Json<Value> {
-    app.seg.stop.store(true, Relaxed);
-    Json(json!({"ok": true}))
-}
-
 // ---------- 内蔵LLM(本当の内蔵: llama.cpp直リンク・GGUF自動DL・API代ゼロ) ----------
 
 async fn api_llm_status(State(app): S) -> Json<Value> {
@@ -2442,7 +2284,7 @@ async fn api_llm_test(State(app): S, Json(t): Json<LlmTestIn>) -> impl IntoRespo
     }
 }
 
-/// GPU/RAM実測。nvidia-smi連打はml-hubでUIを殺した前科があるので3秒TTLキャッシュ必須
+/// GPU/RAM実測。nvidia-smi連打は過去にUIを殺した前科があるので3秒TTLキャッシュ必須
 fn sys_stats() -> Value {
     use std::sync::OnceLock;
     use std::time::{Duration, Instant};
@@ -2547,7 +2389,7 @@ fn mac_stats() -> (Value, Value, Value) {
 }
 
 /// AI稼働状況の一枚板 — どのAIが今なにをしてるかを1回で返す(UIサイドバー常設パネル用)
-/// 内蔵/外部AIの準備状況(UIの「AI配役」とサイドバー用)。ollama/ml-hub への接続確認があるので10秒キャッシュ
+/// 内蔵/外部AIの準備状況(UIの「AI配役」とサイドバー用)。ollama への接続確認があるので10秒キャッシュ
 async fn ai_status(app: &'static App) -> Value {
     static CACHE: Mutex<Option<(std::time::Instant, Value)>> = Mutex::new(None);
     if let Some((t, v)) = CACHE.lock().unwrap().as_ref() {
@@ -2559,12 +2401,7 @@ async fn ai_status(app: &'static App) -> Value {
         let c = app.http.clone();
         async move { c.get(url).timeout(std::time::Duration::from_secs(1)).send().await.ok() }
     };
-    // ml-hub は :7000 だが、Mac では AirPlay(ControlCenter)も :7000 を掴むので OpenAPI に annotation があるかで判定
-    let (ollama, seg) = tokio::join!(probe(format!("{}/api/tags", enrich::OLLAMA)), probe("http://127.0.0.1:7000/openapi.json".into()));
-    let seg_ok = match seg {
-        Some(r) if r.status().is_success() => r.text().await.map(|t| t.contains("annotation")).unwrap_or(false),
-        _ => false,
-    };
+    let ollama = probe(format!("{}/api/tags", enrich::OLLAMA)).await;
     let local_vlm = enrich::local_vlm_ok(&app.http).await || vlm::health(&app.http).await;
     let vlm_reachable = local_vlm || ollama.is_some();
     let vlm_present = if local_vlm { true } else { match ollama {
@@ -2573,13 +2410,12 @@ async fn ai_status(app: &'static App) -> Value {
             .unwrap_or(false),
         None => false,
     } };
-    let key = |k: &str| enrich::mlhub_key(k).is_some();
+    let key = |k: &str| enrich::api_key(k).is_some();
     let v = json!({
         "llm": app.llm.status(&app.root),
         "clip": onnx::status(&app.root),
         "vlm": {"backend": if local_vlm { "llama-server" } else { "ollama" }, "model": if local_vlm { vlm::MODEL_FILE } else { enrich::BUILTIN_MODEL },
                 "reachable": vlm_reachable, "present": vlm_present || vlm::models_present(&app.root), "local": vlm::status(&app.root, &app.vlm)},
-        "seg": {"backend": "ml-hub", "reachable": seg_ok},
         "gen": gen::engine_status(&app.root, &app.gen),
         "faceid": faceid_status(),
         "store": cfg!(feature = "store"),
@@ -2653,7 +2489,6 @@ async fn api_activity(State(app): S) -> Json<Value> {
         "lora": app.lora.status(),
         "enrich": app.enrich.status(),
         "llm": app.llm.status(&app.root),
-        "seg": app.seg.status(),
         "ingest": {
             "alive": p.alive.load(Relaxed), "done": p.done.load(Relaxed), "total": p.total.load(Relaxed),
             "label": app.ingest_label.lock().unwrap().clone(),
@@ -2694,9 +2529,12 @@ fn start_gen(app: &'static App, album: &str, n: usize, minutes: u64) -> Result<S
         .and_then(|(a, b)| Some((a.trim().parse::<u32>().ok()?, b.trim().parse::<u32>().ok()?)))
         .unwrap_or((1024, 1024));
     let snap = |v: u32| (v.clamp(512, 1536) / 64) * 64; // 潜在空間の都合で 64 の倍数
-    let steps = recipe["steps"].as_u64().filter(|v| *v > 0).unwrap_or_else(|| config::get_u64("gen.steps", 0)).clamp(0, 50) as u32; // 0=モデルの既定
     let min_quality = rec["agent"]["min_quality"].as_i64().unwrap_or(5).clamp(1, 10);
     let model = recipe["model"].as_str().filter(|m| gen::MODELS.iter().any(|s| s.id == *m)).map(String::from).unwrap_or_else(gen::default_model_id);
+    // ステップ数の正解はモデルごとに違う。フォルダの指定 → モデルごとの設定 → 出荷時の既定 の順
+    // (共通の1個で全モデルを上書きすると、蒸留モデル向けの少ない値で非蒸留モデルが崩れる)
+    let steps = recipe["steps"].as_u64().filter(|v| *v > 0)
+        .unwrap_or_else(|| config::get_u64(&format!("gen.model_steps.{model}"), 0)).clamp(0, 50) as u32; // 0=モデルの既定
     // 参照(G2): recipe.refs = [{kind:"image", sha} | {kind:"folder", album, k} | {kind:"dataset", name, k}]
     let mut refs = gen::RefPool::default();
     if let Some(arr) = recipe["refs"].as_array() {
@@ -2941,13 +2779,11 @@ async fn lora_preview_img(State(app): S, AxPath((name, i)): AxPath<(String, Stri
 // ---------- 設定画面(docs/gen-design.md §8.1): 正本 store/config.json、行ごとに自動保存 ----------
 
 async fn api_settings_get(State(app): S) -> Json<Value> {
-    let home = std::env::var("HOME").unwrap_or_default();
     Json(json!({
         "config": config::masked(), "defaults": config::defaults(),
         "path": std::fs::canonicalize(config::path()).unwrap_or_else(|_| config::path()).display().to_string(),
         "root": std::fs::canonicalize(&app.root).unwrap_or(app.root.clone()).display().to_string(),
         "env": config::env_overrides(),
-        "legacy_file": std::path::Path::new(&home).join("ml-hub/config/settings.json").exists(),
         "log": app.root.join("fluent_gallery.log").display().to_string(),
         "version": env!("CARGO_PKG_VERSION"),
         "features": {"faceid": cfg!(feature = "faceid"), "store": cfg!(feature = "store"), "metal": cfg!(feature = "metal"), "cuda": cfg!(feature = "cuda")},
@@ -3511,7 +3347,7 @@ async fn api_enrich(State(app): S, Json(e): Json<EnrichIn>) -> impl IntoResponse
             vlm_wake(app).await;
             if let Err(err) = enrich::ensure_builtin(&client).await {
                 // 最低保証: ローカルVLMが動かない環境ではGPT APIに自動フォールバック
-                if enrich::mlhub_key("openai_api_key").is_some() {
+                if enrich::api_key("openai_api_key").is_some() {
                     *st.last.lock().unwrap() = format!("内蔵VLM不可({err}) → GPTにフォールバック");
                     *st.backend.lock().unwrap() = "gpt(fallback)".into();
                     backend = "gpt".into();
@@ -3572,7 +3408,7 @@ async fn api_enrich_one(State(app): S, Json(e): Json<EnrichOneIn>) -> impl IntoR
     let mut backend = e.backend;
     if backend == "builtin" { vlm_wake(app).await; }
     if backend == "builtin" && enrich::ensure_builtin(&app.http).await.is_err() {
-        if enrich::mlhub_key("openai_api_key").is_some() {
+        if enrich::api_key("openai_api_key").is_some() {
             backend = "gpt".into(); // 最低保証
         } else {
             return (StatusCode::BAD_GATEWAY, Json(json!({"detail": "VLM不可(内蔵なし・キーなし)"}))).into_response();
@@ -3838,7 +3674,6 @@ async fn main() {
         lora: Arc::new(lora::LoraState::default()),
         llm: Arc::new(llm::LlmState::default()),
         vlm: Arc::new(vlm::VlmState::default()),
-        seg: Arc::new(seg::SegState::default()),
         http: reqwest::Client::new(),
         ui_hot: std::sync::atomic::AtomicU64::new(0),
         micro_inflight: Mutex::new(std::collections::HashSet::new()),
@@ -3916,13 +3751,9 @@ async fn main() {
         .route("/api/enrich", post(api_enrich))
         .route("/api/enrich/one", post(api_enrich_one))
         .route("/api/meta/patch", post(api_meta_patch))
-        .route("/api/seg", post(api_seg))
-        .route("/api/seg/one", post(api_seg_one))
-        .route("/api/seg/refine", post(api_seg_refine))
         .route("/micro/{sha1}", get(micro))
         .route("/atlas/{key}", get(atlas))
         .route("/cutout/{sha1}", get(cutout))
-        .route("/api/seg/stop", post(api_seg_stop))
         .route("/api/enrich/status", get(api_enrich_status))
         .route("/api/enrich/stop", post(api_enrich_stop))
         .route("/api/genvar", post(api_genvar))
@@ -4041,11 +3872,10 @@ async fn main() {
             }
         });
     }
-    // 自動お手入れ常駐: 取り込まれた画像へ (1)VLM情報(enrich) (2)マスク(gdino2seg) を人手なしで付ける
+    // 自動お手入れ常駐: 取り込まれた画像へ VLM情報(enrich)を人手なしで付ける
     // (2026-09-03指示「取り込んだら、マスクと情報取得は自動で」)。収集中は内蔵VLMを取り合うので待つ。
-    // 1tick=1仕事(enrich優先→次tickでマスク)・マスクは15分に1回まで(ml-hub側サービス停止時の連打防止)
+    // 1tick=1仕事(属性付けを優先)
     tokio::spawn(async move {
-        let mut last_seg = std::time::Instant::now() - std::time::Duration::from_secs(3600);
         tokio::time::sleep(std::time::Duration::from_secs(90)).await;
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(180)).await;
@@ -4053,7 +3883,7 @@ async fn main() {
                 app.set_worker("groom", false, "OFF(設定)".into());
                 continue;
             }
-            if app.crawl.alive.load(Relaxed) || app.enrich.alive.load(Relaxed) || app.seg.alive.load(Relaxed) {
+            if app.crawl.alive.load(Relaxed) || app.enrich.alive.load(Relaxed) {
                 continue;
             }
             let missing: i64 = {
@@ -4077,35 +3907,6 @@ async fn main() {
                 continue;
             }
             app.set_worker("groom", false, "見回り済".into());
-            if last_seg.elapsed().as_secs() < 900 {
-                continue;
-            }
-            // マスク: AIフォルダ(goal持ち)のsourceで未マスクを探し、1フォルダだけ依頼(seg::runは同お題済みをスキップ)
-            for a in load_albums(&app.root) {
-                if a["goal"].as_str().unwrap_or("").is_empty() {
-                    continue;
-                }
-                let src = a["criteria"]["source"].as_str().unwrap_or("").to_string();
-                if src.is_empty() {
-                    continue;
-                }
-                let n: i64 = {
-                    let db = app.db.lock().unwrap();
-                    db.query_row("SELECT COUNT(*) FROM images WHERE source=?1 AND (seg IS NULL OR seg=0)",
-                                 [&src], |r| r.get(0))
-                        .unwrap_or(0)
-                };
-                if n > 0 {
-                    let name = a["name"].as_str().unwrap_or("").to_string();
-                    println!("🤖 自動マスク開始: {name} (未マスク{n})");
-                    last_seg = std::time::Instant::now();
-                    let _ = app.http.post(format!("http://127.0.0.1:{}/api/seg", BIND_PORT.load(Relaxed)))
-                        .json(&json!({"album": name}))
-                        .send()
-                        .await;
-                    break;
-                }
-            }
         }
     });
     // オートパイロット: ♻自動ONのAIフォルダを30分毎に見回り、目標枚数に足りなければ補充クロール。

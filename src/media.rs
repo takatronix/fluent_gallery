@@ -1,4 +1,4 @@
-//! 動画取り込み — ffmpegで1秒1フレーム抽出。ml-hubの教訓を移植:
+//! 動画取り込み — ffmpegで1秒1フレーム抽出。過去プロジェクトの教訓を移植:
 //! HDR動画(PQ/HLG)を素朴に8bit化すると白飛びする→ffprobeで検出してzscaleトーンマップ。
 //! 「無駄なフレームは入れない」= 直前の採用フレームとpHashがほぼ同じならスキップ(静止場面の連写防止)。
 
@@ -42,8 +42,8 @@ pub fn extract_frames(scratch: &Path, data: &[u8], fps: f32) -> Result<Vec<Vec<u
     let _ = std::fs::remove_dir_all(&out_dir);
     std::fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
     let vf = if is_hdr(&vid) {
-        // HDR→SDR: リニア化→hableトーンマップ→bt709(ml-hub video_frames.pyの芯)
-        // npl=203: BT.2408のHLG基準白アンカー。100だと明るすぎ/1000だと暗く平坦(ml-hub実測 2026-08)
+        // HDR→SDR: リニア化→hableトーンマップ→bt709(実戦済みのトーンマップ手順)
+        // npl=203: BT.2408のHLG基準白アンカー。100だと明るすぎ/1000だと暗く平坦(実測 2026-08)
         format!("fps={fps},zscale=transfer=linear:npl=203,tonemap=hable,zscale=transfer=bt709:matrix=bt709:primaries=bt709")
     } else {
         format!("fps={fps}")

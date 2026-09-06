@@ -28,7 +28,7 @@ pub async fn local_vlm_ok(client: &reqwest::Client) -> bool {
 pub async fn any_vlm_available(client: &reqwest::Client) -> bool {
     if local_vlm_ok(client).await { return true; }
     if client.get(format!("{OLLAMA}/api/tags")).timeout(std::time::Duration::from_secs(1)).send().await.map(|r| r.status().is_success()).unwrap_or(false) { return true; }
-    mlhub_key("openai_api_key").is_some()
+    api_key("openai_api_key").is_some()
 }
 /// OpenAI 互換 chat/completions に画像+プロンプトを投げて JSON を返す(llama-server / LM Studio / vLLM 共通)
 /// 属性付け JSON の形(llama-server の json_schema 制約用)。列挙値は PROMPT と同じ。
@@ -136,15 +136,9 @@ impl EnrichState {
     }
 }
 
-/// 設定値の取り出し(名前は旧 ml-hub settings.json の流儀のまま)。正本は store/config.json(config.rs)、無ければ旧ファイル
-pub fn mlhub_key(name: &str) -> Option<String> {
-    if let Some(k) = name.strip_suffix("_api_key") {
-        return crate::config::key(k);
-    }
-    if name == "gallery_judge_model" {
-        return crate::config::get_str("roles.judge").or_else(|| crate::config::legacy(name));
-    }
-    crate::config::legacy(name)
+/// API キーの取り出し。正本は store/config.json(config.rs)
+pub fn api_key(name: &str) -> Option<String> {
+    crate::config::key(name.strip_suffix("_api_key").unwrap_or(name))
 }
 
 fn parse_json(text: &str) -> Option<Value> {
@@ -214,7 +208,7 @@ pub async fn describe(client: &reqwest::Client, img: &Path, backend: &str) -> Re
             }
             .await,
             "claude" => async {
-                let key = mlhub_key("anthropic_api_key").ok_or("anthropic_api_key未設定")?;
+                let key = api_key("anthropic_api_key").ok_or("anthropic_api_key未設定")?;
                 let media = if img.extension().and_then(|e| e.to_str()) == Some("png") {
                     "image/png"
                 } else {
@@ -244,7 +238,7 @@ pub async fn describe(client: &reqwest::Client, img: &Path, backend: &str) -> Re
             }
             .await,
             "gpt" => async {
-                let key = mlhub_key("openai_api_key").ok_or("openai_api_key未設定")?;
+                let key = api_key("openai_api_key").ok_or("openai_api_key未設定")?;
                 let v: Value = client
                     .post("https://api.openai.com/v1/chat/completions")
                     .bearer_auth(key)

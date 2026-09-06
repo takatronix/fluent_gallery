@@ -95,6 +95,8 @@
   .chip:hover { color:var(--tx); border-color:#3a3d4a; }
   .chip.on { color:var(--tx); border-color:var(--acc); background:var(--acc-soft); }
   .chip small { opacity:.6; margin-left:3px; }
+  .settabs { display:flex; gap:6px; flex-wrap:wrap; margin:2px 0 14px; }
+  .settabs .chip { font-size:12px; padding:5px 14px; cursor:pointer; }
   .sub { font-size:11.5px; color:var(--faint); }
 
   /* ---- ビューヘッダ(今いる場所の説明+操作) ---- */
@@ -652,11 +654,9 @@
   <img id="lbimg" title="クリック=戻る / ダブルクリック=拡大 / ホイール=ズーム">
   <div id="lbbar" onclick="event.stopPropagation()"></div>
   <div id="segfix" onclick="event.stopPropagation()" style="display:none; gap:6px; align-items:center; padding:8px 4px 0; cursor:default">
-    <input id="seg_prompt" type="text" placeholder="対象語を変える(例: face, dog)" style="width:200px">
-    <button class="ghost" onclick="segRedo()" title="この画像だけ切り直す(空=属性から自動)">切り直す</button>
     <button class="ghost" onclick="segClear()" title="間違いマスクを消す">マスク削除</button>
     <button class="ghost" onclick="segCutout()" title="背景を透過にした切り抜きPNGを開く(保存できます)">切り抜きPNG</button>
-    <span style="font-size:11px; color:var(--faint)">画像をクリック=そこを切って追加 · ドラッグ=範囲で切る · 右クリック=そのマスクを削除</span>
+    <span style="font-size:11px; color:var(--faint)">右クリック=そのマスクを削除</span>
   </div>
   <div id="editpanel" onclick="event.stopPropagation()">
     <div class="row"><label>露出</label><input type="range" id="ed_exposure" min="-100" max="100" value="0"
@@ -1540,6 +1540,13 @@ async function genLoraScale(i, v) {
 // ================= 設定ページ(docs/gen-design.md §8.1) =================
 // 正本は store/config.json。行ごとに PATCH /api/settings で自動保存(保存ボタン禁止=憲法5条)。キーは末尾4桁だけ表示
 let setCache = null;
+// 設定の種類ごとのタブ。再描画(キー保存後など)でも開いていたタブを保つ
+let setTab = 'ai';
+function pickSetTab(id) {
+  setTab = id;
+  document.querySelectorAll('.setpage .settabs .chip').forEach(c => c.classList.toggle('on', c.dataset.tab === id));
+  document.querySelectorAll('.setpage .setsec').forEach(sec => sec.style.display = sec.dataset.tab === id ? '' : 'none');
+}
 async function renderSettings() {
   $('grid').innerHTML = `<div class="setpage"><h2>${ic('gear', 16)} 設定</h2><div class="hint">読み込み中…</div></div>`;
   try { setCache = await j('/api/settings'); } catch (e) { $('grid').innerHTML = `<div class="setpage">❌ ${esc(e.message)}</div>`; return; }
@@ -1550,12 +1557,18 @@ async function renderSettings() {
   const txt = (path, ph = '', extra = '') => `<input type="text" data-path="${path}" value="${esc(String(getPath(C, path) ?? ''))}" placeholder="${esc(ph)}" onchange="setSetting(this)" ${extra}>`;
   const num = (path, min, max, step = 1) => `<input type="number" data-path="${path}" value="${esc(String(getPath(C, path) ?? ''))}" min="${min}" max="${max}" step="${step}" style="width:90px" onchange="setSetting(this)">`;
   const sw = (path) => `<span class="switch ${getPath(C, path) ? 'on' : ''}" onclick="toggleSetting(this, '${path}')"><span class="track"></span></span>`;
+  // キーの入力欄。data-*-ignore はパスワード管理ソフト(1Password/LastPass/Bitwarden)に「ここは違う」と伝える
+  const keyInput = (path) => `<input type="password" data-path="${path}" value="" autocomplete="off"
+      data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other"
+      placeholder="貼り付けると保存" onchange="setSetting(this)">`;
   const keyRow = (name, label, what) => {
     const k = C.keys?.[name] || {};
     return `<div class="setrow"><span class="lbl">${label}</span>
-      <input type="password" data-path="keys.${name}" value="" autocomplete="new-password"
-        placeholder="${k.set ? '設定済 …' + esc(k.tail || '') + (k.from === 'legacy' ? '(旧 ml-hub の設定ファイル)' : '') : '未設定 — 貼り付けると保存'}" onchange="setSetting(this)">
-      ${k.set ? `<button class="ghost" onclick="clearSetting('keys.${name}')" title="このキーを消す">${ic('x', 12)}</button>` : ''}
+      ${k.set
+        ? `<span class="keyset" style="flex:1; font-size:11.5px; color:var(--dim)">設定済 …${esc(k.tail || '')}</span>
+           <button class="ghost" onclick="editKey(this, 'keys.${name}')">貼り替える</button>
+           <button class="ghost" onclick="clearSetting('keys.${name}')" title="このキーを消す">${ic('x', 12)}</button>`
+        : keyInput(`keys.${name}`)}
       <button class="ghost" onclick="testSetting(this, '${what}')">確認</button><span class="note" data-test="${what}"></span><span class="saved">保存しました</span></div>`;
   };
   const model = (label, x, kind, mb) => {
@@ -1569,7 +1582,9 @@ async function renderSettings() {
   $('grid').innerHTML = `<div class="setpage">
     <h2>${ic('gear', 16)} 設定 <span class="note" style="font-weight:400; font-size:11px; color:var(--faint)">行ごとに自動保存 · 正本 ${esc(S.path)}</span></h2>
 
-    <div class="setsec"><h3>AIの役(既定)</h3>
+    <div class="settabs">${[{id:'ai',label:'AI'},{id:'gen',label:'生成'},{id:'conn',label:'接続とキー'},{id:'run',label:'運転と保存'},{id:'info',label:'情報'},].map(t => `<span class="chip ${setTab === t.id ? 'on' : ''}" data-tab="${t.id}" onclick="pickSetTab('${t.id}')">${t.label}</span>`).join('')}</div>
+
+    <div class="setsec" data-tab="ai"><h3>AIの役(既定)</h3>
       <div class="hint">フォルダ側で選んでいない時にここが効きます。無料の役は「内蔵」、外部は有料または別マシン。</div>
       ${row('計画(プロンプト設計)', `<span>内蔵 Qwen3-4B${aiMark('llm')}</span>`, 'ブーストONのフォルダは Claude')}
       ${row('目利き(ブースト時)', `<select data-path="roles.judge" onchange="setSetting(this)">${JUDGE_MODELS.map(([id, label]) => `<option value="${id}" ${jm === id ? 'selected' : ''}>${label}</option>`).join('')}</select>`, 'OFFのフォルダは内蔵VLM(無料)')}
@@ -1577,14 +1592,14 @@ async function renderSettings() {
       ${row('生成', `<span>${G.external ? '外部 sd-server ' + esc(G.external) : '内蔵 klein 4B'}${aiMark('gen')}</span>`)}
     </div>
 
-    <div class="setsec"><h3>接続先(別マシンで動かす時だけ)</h3>
+    <div class="setsec" data-tab="conn"><h3>接続先(別マシンで動かす時だけ)</h3>
       <div class="hint">空なら内蔵を使います。URL を入れるとそちらを優先(内蔵は起動しません)。rtx4090 の sd-server や farm の llama-server を指せます。</div>
       ${row('生成 sd-server', txt('gen.base', '例: http://rtx4090:8092 (空=内蔵)') + `<button class="ghost" onclick="testSetting(this, 'gen')">確認</button><span class="note" data-test="gen"></span>`, envNote('FG_GEN_BASE'))}
       ${row('内蔵 sd-server のポート', num('gen.port', 1024, 65535), '既定 8092')}
       ${row('VLM(OpenAI互換)', txt('vlm.base', '例: http://farm1:8081/v1 (空=内蔵)') + `<button class="ghost" onclick="testSetting(this, 'vlm')">確認</button><span class="note" data-test="vlm"></span>`, envNote('FG_VLM_BASE'))}
     </div>
 
-    <div class="setsec"><h3>APIキー</h3>
+    <div class="setsec" data-tab="conn"><h3>APIキー</h3>
       <div class="hint">ブースト(Claude / OpenRouter)、検索元(Pexels / Pixabay)、X(xAI)。貼り付けた時だけ保存し、表示は末尾4桁だけ。書き出しやzipには含めません。</div>
       ${keyRow('anthropic', 'Anthropic', 'anthropic')}
       ${keyRow('openrouter', 'OpenRouter', 'openrouter')}
@@ -1593,10 +1608,9 @@ async function renderSettings() {
       ${keyRow('pexels', 'Pexels', 'pexels')}
       ${keyRow('pixabay', 'Pixabay', 'pixabay')}
       ${keyRow('civitai', 'Civitai (LoRA取り込み)', 'civitai')}
-      ${S.legacy_file ? `<div class="hint" style="margin-top:6px">旧 ~/ml-hub/config/settings.json が見つかりました。ここに貼るまではそのキーを読みます。</div>` : ''}
     </div>
 
-    <div class="setsec"><h3>モデル(内蔵AI)</h3>
+    <div class="setsec" data-tab="ai"><h3>モデル(内蔵AI)</h3>
       <div class="hint">置き場: ${esc(S.root)}/engine/models · 取得は初回だけ。生成は 3 ファイルで 7.1GB。</div>
       ${model('LLM(計画・自然言語検索)', A.llm, 'llm', '2.4GB')}
       ${model('VLM(属性付け・目利き)', L.bin ? {model: L.model, size_mb: L.size_mb, present: L.present, downloading: L.downloading, got_mb: L.got_mb, total_mb: L.total_mb, running: L.running} : {model: V.model, present: V.present}, 'vlm', '3.3GB')}
@@ -1605,36 +1619,38 @@ async function renderSettings() {
       ${(G.models || []).map(m => `<div class="setrow"><span class="lbl">生成 ${esc(m.label.split('(')[0])}</span><span style="flex:1; font-size:11.5px; color:var(--dim)" title="${esc(m.note || '')}">${esc(m.id)} · ${(m.size_mb / 1024).toFixed(1)}GB · ${esc(m.license)}${m.refs ? ' · 参照OK' : ''}</span>${m.present ? '<span class="ok">取得済</span>' : (G.downloading && G.dl_model === m.id) ? `<span class="note">DL ${Math.round(100 * G.got_mb / (G.total_mb || 1))}%</span>` : `<button class="ghost" onclick="aiPull('gen', '${m.id}')">取得 ${(m.size_mb / 1024).toFixed(1)}GB</button>`}</div>`).join('')}
     </div>
 
-    <div class="setsec"><h3>外部ツール</h3>
+    <div class="setsec" data-tab="conn"><h3>外部ツール</h3>
       <div class="hint">自動検出の結果。見つからない時だけパスを入れてください。</div>
       ${row('sd-server(生成)', txt('tools.sd_server', G.bin ? '検出: ' + G.bin : '見つからない — パスを入力'), envNote('FG_SD_SERVER') || (G.bin ? `<span class="ok">検出 ${esc(G.bin)}</span>` : `<span class="ng">なし</span>`))}
       ${row('llama-server(VLM)', txt('tools.llama_server', L.bin ? '検出: ' + L.bin : '見つからない — パスを入力'), envNote('FG_LLAMA_SERVER') || (L.bin ? `<span class="ok">検出 ${esc(L.bin)}</span>` : `<span class="ng">なし(brew install llama.cpp)</span>`))}
       ${row('yt-dlp / ffmpeg(動画・URL取り込み)', `<span>${A.tools?.yt_dlp ? '<span class="ok">yt-dlp ✓</span>' : '<span class="ng">yt-dlp ✗</span>'} · ${A.tools?.ffmpeg ? '<span class="ok">ffmpeg ✓</span>' : '<span class="ng">ffmpeg ✗</span>'}</span>`)}
     </div>
 
-    <div class="setsec"><h3>自動運転</h3>
+    <div class="setsec" data-tab="run"><h3>自動運転</h3>
       ${row('♻ 見回りの周期(分)', num('autopilot.interval_min', 1, 1440), '自動収集/自動生成のフォルダを順に補充。次の周期から効きます')}
-      ${row('自動お手入れ', sw('autopilot.groom'), '取り込んだ画像に属性付け・マスクを裏で付ける(3分ごとの見回り)')}
+      ${row('自動お手入れ', sw('autopilot.groom'), '取り込んだ画像に属性を裏で付ける(3分ごとの見回り)')}
     </div>
 
-    <div class="setsec"><h3>生成の既定</h3>
+    <div class="setsec" data-tab="gen"><h3>生成の既定</h3>
       ${row('モデル', `<select data-path="gen.model" onchange="setSetting(this)">${(G.models || []).map(m => `<option value="${m.id}" ${(C.gen?.model || G.default) === m.id ? 'selected' : ''}>${esc(m.label)}${m.present ? '' : '(未取得)'}</option>`).join('')}</select>`, 'フォルダ側で選んでいない時')}
       ${row('サイズ', `<select data-path="gen.size" onchange="setSetting(this)">${['1024x1024', '768x768', '1024x768', '768x1024', '1280x768', '768x1280'].map(s => `<option value="${s}" ${(C.gen?.size || '1024x1024') === s ? 'selected' : ''}>${s.replace('x', ' × ')}</option>`).join('')}</select>`)}
-      ${row('ステップ数', num('gen.steps', 0, 50), '0 = モデルの既定(klein 4 / Z-Image 8 / Qwen-Edit 20)')}
+      ${(G.models || []).map(m => row(`ステップ数 — ${esc(m.label.replace(/[(（].*$/, '').trim())}`, num(`gen.model_steps.${m.id}`, 1, 50),
+        m.id === G.default ? '少なすぎるとノイズが残った絵になる。モデルごとに適正値が違う' : '')).join('')}
       ${row('途中経過を見る', sw('gen.preview'), 'ローカル生成(sd-cli)で各ステップの途中画像を出す。1枚あたり数秒遅くなる')}
     </div>
 
-    <div class="setsec"><h3>保存先と容量</h3>
+    <div class="setsec" data-tab="run"><h3>保存先と容量</h3>
       ${row('データの置き場', `<span style="font-size:11.5px; color:var(--dim)">${esc(S.root)}</span>`, S.system?.disk ? `空き ${S.system.disk.free_gb.toFixed(0)}GB / ${S.system.disk.total_gb.toFixed(0)}GB` : '')}
       ${row('キャッシュ上限(MB)', num('storage.cache_mb', 512, 1048576, 512), 'preview/render は再生成できるので上限で自動掃除', )}
       ${row('ログ', `<span style="font-size:11.5px; color:var(--dim)">${esc(S.log)}</span>`)}
     </div>
 
-    <div class="setsec"><h3>情報</h3>
+    <div class="setsec" data-tab="info"><h3>情報</h3>
       ${row('バージョン', `<span>${esc(S.version)} · ポート ${S.port} · ${Object.entries(S.features || {}).filter(([, v]) => v).map(([k]) => k).join(' / ') || '-'}</span>`)}
       ${Object.keys(env).length ? row('環境変数の上書き', `<span class="note">${Object.entries(env).map(([k, v]) => `${esc(k)}=${esc(v)}`).join(' · ')}</span>`, '開発用。設定より優先') : ''}
     </div>
   </div>`;
+  pickSetTab(setTab); // 開いていたタブだけ見せる(回帰テストが数える .setsec は消さずに隠す)
 }
 function getPath(o, p) { return p.split('.').reduce((a, k) => (a == null ? undefined : a[k]), o); }
 async function setSetting(el) {
@@ -1655,6 +1671,16 @@ async function toggleSetting(el, path) {
     el.classList.toggle('on', on);
     const s = el.closest('.setrow')?.querySelector('.saved'); if (s) { s.classList.add('show'); setTimeout(() => s.classList.remove('show'), 1500); }
   } catch (e) { toast('❌ ' + e.message); }
+}
+// 「貼り替える」: 設定済みの表示を入力欄に差し替える(既定では入力欄を出さないので、パスワード管理ソフトが誤爆しない)
+function editKey(btn, path) {
+  const row = btn.closest('.setrow'); if (!row) return;
+  const cur = row.querySelector('.keyset'); if (!cur) return;
+  cur.outerHTML = `<input type="password" data-path="${path}" value="" autocomplete="off"
+    data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other"
+    placeholder="新しいキーを貼り付けると保存" onchange="setSetting(this)">`;
+  btn.remove();
+  row.querySelector('input')?.focus();
 }
 async function clearSetting(path) {
   try {
@@ -1942,7 +1968,7 @@ function folderHeadHtml(a, isNew) {
                ${JUDGE_MODELS.map(([id, label]) => `<option value="${id}" ${(a.agent?.judge_model || '') === id ? 'selected' : ''}>${label}</option>`).join('')}
              </select>${aiMark('key_judge')}`
           : `クエリ生成 = 内蔵Qwen3-4B${aiMark('llm')} · 目利き = 内蔵qwen2.5vl${aiMark('vlm')}`}
-        · 属性付け = 内蔵qwen2.5vl${aiMark('vlm')} · マスク = GroundingDINO+SAM2${aiMark('seg')} · 似た画像 = CLIP${aiMark('clip')}${caps.faceid ? ` · 顔ID = insightface${aiMark('faceid')}` : ''}
+        · 属性付け = 内蔵qwen2.5vl${aiMark('vlm')} · 似た画像 = CLIP${aiMark('clip')}${caps.faceid ? ` · 顔ID = insightface${aiMark('faceid')}` : ''}
       </span>
     </div>
     <div class="frow">
@@ -1965,8 +1991,7 @@ function folderHeadHtml(a, isNew) {
       <span class="sp"></span>
       <button class="ghost" style="padding:2px 9px; font-size:11px" onclick="resetLedger()"
         title="使ったクエリ/見たURLの記録を忘れて、もう一度最初から探させる(収集が枯れた時に)">${ic('reset', 12)} 検索履歴リセット</button>
-      <button class="ghost" style="padding:2px 9px; font-size:11px" onclick="runSeg()"
-        title="このフォルダの画像に自動マスク(目標からAIが対象語を決めて、gdino2segが輪郭を切る)">${ic('smart', 12)} マスク生成</button></div>` : ''}`;
+</div>` : ''}`;
 }
 
 // お決まり条件: 押すと目標文に入る(=VLMゲートがその条件で判定する)
@@ -2206,13 +2231,6 @@ async function setJudgeModel(v) {
     a.agent = agent;
     toast('目利き = ' + judgeName(a));
     renderViewhead();
-  } catch (e) { toast('❌ ' + e.message); }
-}
-async function runSeg() {
-  try {
-    const r = await j('/api/seg', {method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({album: loc.key})});
-    toast(`マスク生成開始 — 対象「${r.prompt}」(進捗はAI稼働状況)`);
   } catch (e) { toast('❌ ' + e.message); }
 }
 async function resetLedger() {
@@ -3373,19 +3391,6 @@ function lbCrossfade(src) {
   };
   if (pv.complete) apply(); else { pv.onload = apply; pv.onerror = () => { img.src = src; }; }
 }
-async function segRedo() {
-  const sha = items[lbIdx]?.sha1; if (!sha) return;
-  const prompt = $('seg_prompt').value.trim();
-  toast('マスクを切り直し中…');
-  try {
-    const m2 = await j('/api/seg/one', {method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({sha1: sha, prompt})});
-    if (m2.skipped) return toast('❌ ' + (m2.reason || '対象語をください'));
-    lbMeta = {...lbMeta, seg: m2.seg};
-    toast(`切り直しました: 「${m2.seg?.prompt}」で${m2.seg?.shapes?.length || 0}個`);
-    if (lbSegOn) lbCrossfade(lbUrl(sha, 1600) + '&t=' + Date.now()); // サーバは焼き直し済み・ブラウザ側もバスト
-  } catch (e) { toast('❌ ' + e.message); }
-}
 async function segClear() {
   const sha = items[lbIdx]?.sha1; if (!sha) return;
   try {
@@ -3404,65 +3409,15 @@ function segCutout() {
   const sha = items[lbIdx]?.sha1;
   if (sha) window.open('/cutout/' + sha, '_blank');
 }
-// ---- マスクのクリック/範囲修正(ml-hubアノテエディタ風、SAM2直叩き) ----
-let segDrag = null;
+// ---- マスクの削除(残っているマスクを消す。作成はしない) ----
 function segBindPointer() {
   const img = $('lbimg');
-  img.addEventListener('click', e => { if (lbSegOn) { e.stopImmediatePropagation(); e.preventDefault(); } }, true);
-  img.addEventListener('mousedown', e => {
-    if (!lbSegOn || e.button !== 0) return;
-    e.preventDefault(); e.stopImmediatePropagation();
-    segDrag = {x: e.clientX, y: e.clientY, moved: false};
-  }, true);
-  addEventListener('mousemove', e => {
-    if (!segDrag) return;
-    if (Math.abs(e.clientX - segDrag.x) + Math.abs(e.clientY - segDrag.y) > 8) segDrag.moved = true;
-    if (segDrag.moved) drawSegRect(e);
-  });
-  addEventListener('mouseup', e => {
-    if (!segDrag) return;
-    const d = segDrag; segDrag = null; $('segrect')?.remove();
-    const r = img.getBoundingClientRect();
-    if (!r.width) return;
-    const nx = v => Math.min(1, Math.max(0, v));
-    if (d.moved) {
-      segRefine({box: [nx((Math.min(d.x, e.clientX) - r.left) / r.width), nx((Math.min(d.y, e.clientY) - r.top) / r.height),
-                       nx((Math.max(d.x, e.clientX) - r.left) / r.width), nx((Math.max(d.y, e.clientY) - r.top) / r.height)]});
-    } else {
-      segRefine({points: [[nx((e.clientX - r.left) / r.width), nx((e.clientY - r.top) / r.height)]], labels: [1]});
-    }
-  });
   img.addEventListener('contextmenu', e => {
     if (!lbSegOn) { const sha = items[lbIdx]?.sha1; if (sha) ctxMenu(e, 'image', sha); return; } // 通常時=画像メニュー(保存/zip/…)
     e.preventDefault(); e.stopImmediatePropagation();
     const r = img.getBoundingClientRect();
     segDelAt((e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height);
   }, true);
-}
-function drawSegRect(e) {
-  let el = $('segrect');
-  if (!el) {
-    el = document.createElement('div'); el.id = 'segrect';
-    el.style.cssText = 'position:fixed; border:1.5px dashed var(--acc); background:#4d9fff22; z-index:41; pointer-events:none; border-radius:4px';
-    document.body.appendChild(el);
-  }
-  el.style.left = Math.min(segDrag.x, e.clientX) + 'px';
-  el.style.top = Math.min(segDrag.y, e.clientY) + 'px';
-  el.style.width = Math.abs(e.clientX - segDrag.x) + 'px';
-  el.style.height = Math.abs(e.clientY - segDrag.y) + 'px';
-}
-async function segRefine(p) {
-  const sha = items[lbIdx]?.sha1; if (!sha) return;
-  toast('SAMで切り出し中…');
-  try {
-    const m = await j('/api/seg/refine', {method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({sha1: sha, cls: $('seg_prompt').value.trim(), ...p})});
-    if (items[lbIdx]?.sha1 !== sha) return;
-    lbMeta = m;
-    $('lbsegbtn').style.display = '';
-    lbCrossfade(lbUrl(sha, 1600) + '&t=' + Date.now());
-    toast('切りました(間違いは右クリックで削除)');
-  } catch (e) { toast('❌ ' + e.message); }
 }
 async function segDelAt(x, y) {
   const sha = items[lbIdx]?.sha1; if (!sha) return;
@@ -3674,20 +3629,6 @@ async function lbShow(i, dir) {
         if (fb && names.length) fb.innerHTML = `${ic('bot', 13)} <b style="color:#f2c14e">${esc(names.join(' / '))}</b>`;
       } catch (e) {}
     })();
-    // 開いたのにマスクが無い→その場で勝手に切る(遅延マスク)。属性が要るのでエンリッチ後に発火
-    const autoSeg = async (meta) => {
-      if (meta.seg || lbShow._segging?.has(sha)) return;
-      (lbShow._segging ??= new Set()).add(sha);
-      try {
-        const m2 = await j('/api/seg/one', {method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({sha1: sha})});
-        if (m2.seg?.shapes?.length && items[lbIdx]?.sha1 === sha) {
-          lbMeta = {...lbMeta, seg: m2.seg};
-          $('lbsegbtn').style.display = '';
-        }
-      } catch (e) {} finally { lbShow._segging.delete(sha); }
-    };
-    if (v.caption) autoSeg(m);
     if (!v.caption && !lbShow._enriching?.has(sha)) {
       (lbShow._enriching ??= new Set()).add(sha);
       $('lbmeta').innerHTML = line1 + '<br><span class="tag">属性を見ています…</span>';
@@ -3697,7 +3638,6 @@ async function lbShow(i, dir) {
           const it = items.find(x => x.sha1 === sha);
           if (it) { it.caption = m2.vlm?.caption; it.vlm_model = m2.vlm?.model; }
           if (items[lbIdx]?.sha1 === sha) $('lbmeta').innerHTML = line1 + vlmHtml(m2.vlm || {});
-          autoSeg(m2); // 属性が付いた→続けてマスクも
         })
         .catch(() => { if (items[lbIdx]?.sha1 === sha) $('lbmeta').innerHTML = line1; })
         .finally(() => lbShow._enriching.delete(sha));
@@ -4603,7 +4543,6 @@ function aiMarkHtml(k) {
       if (L.bin) return L.present ? ng('内蔵VLM 停止中', pull('vlm', '起動')) : ng('未取得', pull('vlm', '3.3GB'));
       return A.vlm.present ? ok('ollama接続OK') : A.vlm.reachable ? ng('モデル未取得(初回に自動pull)') : ng('llama-server なし・ollama未起動');
     }
-    case 'seg': return A.seg.reachable ? ok('ml-hub接続OK') : ng('ml-hub未接続');
     case 'gen': {
       const G = A.gen || {};
       if (G.external) return ok('外部 sd-server: ' + G.external);
@@ -4697,15 +4636,14 @@ async function watchActivity() {
           : l.busy ? '生成中' : l.ready ? '常駐中' : l.present ? '待機' : '未取得') +
       row('upload', '取込', g.alive, g.alive ? `${g.done}/${g.total}${eta('ingest', g.done, g.total)}` : '待機',
           g.alive ? '<span class="stopbtn" onclick="stopIngest(event)" title="この取り込みを止める(取った分は残ります)">止める</span>' : '') +
-      (a.seg?.alive ? row('smart', 'マスク', true, `${a.seg.done}/${a.seg.total} 「${a.seg.prompt}」`) : '') +
       wrow('img', 'サムネ', 'micro') +      // micro120px焼き(裏方)
       (a.ai?.clip && !a.ai.clip.present
         ? row('spark', 'CLIP', a.ai.clip.downloading, a.ai.clip.downloading ? `DL ${Math.round(100 * a.ai.clip.got_mb / (a.ai.clip.total_mb || 1))}%${eta('clip', a.ai.clip.got_mb, a.ai.clip.total_mb)}` : 'モデル未取得')
         : wrow('spark', 'CLIP', 'clip')) +       // 似た画像の索引(裏方)。モデルが無ければその旨
       apRow() + // ♻自動収集の巡回(周期と次回)
-      wrow('bot', 'お手入れ', 'groom') +    // 属性/マスクの穴埋め巡回
+      wrow('bot', 'お手入れ', 'groom') +    // 属性の穴埋め巡回
       cpu + gpu + ram;
-    // ストレージ(ml-hub風メーター): ライブラリの量と、ディスクの余白
+    // ストレージ: ライブラリの量と、ディスクの余白
     if (s.disk && facetsCache) {
       const usedPct = 100 * s.disk.used_gb / (s.disk.total_gb || 1);
       $('storagebox').innerHTML = `

@@ -1,5 +1,5 @@
 //! M5 クローラ — AIフォルダ(goal付きアルバム)の▶で走る収集エージェントv0。
-//! ml-hub collectで実証済みの芯を移植: クエリ生成(LLM)→検索(DDG/Openverse)→
+//! 過去プロジェクトの収集で実証済みの芯を移植: クエリ生成(LLM)→検索(DDG/Openverse)→
 //! クエリ/URL台帳→DL検査(バイト/デコード/短辺/アスペクト)→sha1/pHash重複→VLM意味ゲート→収蔵。
 //! 教訓: ゴミは門前払い(収蔵前に落とす)、キーワード一致でなく「目標の意味」で判定、
 //! 動作リミット(枚数/時間/連続エラー)無しで走らせない。
@@ -203,11 +203,11 @@ fn spawn_img_searches(client: &reqwest::Client, engines: &[String], q: &str, all
             let (c, q2) = (client.clone(), q.to_string());
             sp(Box::pin(async move { search_wikimedia(&c, &q2, 50).await }))
         }),
-        pxb: en("pixabay").then(|| crate::enrich::mlhub_key("pixabay_api_key")).flatten().map(|k| {
+        pxb: en("pixabay").then(|| crate::enrich::api_key("pixabay_api_key")).flatten().map(|k| {
             let (c, q2) = (client.clone(), q.to_string());
             sp(Box::pin(async move { search_pixabay(&c, &k, &q2, 150, allow_nsfw).await }))
         }),
-        pex: en("pexels").then(|| crate::enrich::mlhub_key("pexels_api_key")).flatten().map(|k| {
+        pex: en("pexels").then(|| crate::enrich::api_key("pexels_api_key")).flatten().map(|k| {
             let (c, q2) = (client.clone(), q.to_string());
             sp(Box::pin(async move { search_pexels(&c, &k, &q2, 80).await }))
         }),
@@ -230,7 +230,7 @@ async fn search_ddg(client: &reqwest::Client, query: &str, limit: usize, allow_n
         .or_else(|| find_between(&html, "vqd=", '&'))
         .ok_or("vqd取得不可(DDGに絞られてる可能性、少し待つ)")?;
     let mut out = vec![];
-    // セーフサーチ: 目標が成人向けのフォルダはp=-1でOFF(ONだと「全然探せない」ml-hubと同じ教訓)
+    // セーフサーチ: 目標が成人向けのフォルダはp=-1でOFF(ONだと「全然探せない」という過去の教訓)
     let mut url = format!(
         "https://duckduckgo.com/i.js?l=us-en&o=json&q={}&vqd={}&f=,,,,,&p={}",
         urlenc(query), urlenc(&vqd), if allow_nsfw { "-1" } else { "1" }
@@ -271,7 +271,7 @@ async fn search_ddg(client: &reqwest::Client, query: &str, limit: usize, allow_n
 }
 
 async fn search_openverse(client: &reqwest::Client, query: &str, limit: usize) -> Result<Vec<Cand>, String> {
-    // 匿名はpage_size上限20 — ページングで深掘る(ml-hub方式)
+    // 匿名はpage_size上限20 — ページングで深掘る(実証済みの方式)
     let mut out = vec![];
     for page in 1..=10 {
         if out.len() >= limit {
@@ -400,7 +400,7 @@ async fn search_pexels(client: &reqwest::Client, key: &str, query: &str, limit: 
     Ok(out)
 }
 
-/// X(Grok Agent Tools): x_searchでメディア付きポストURLを探す(ml-hub実証方式の移植)。
+/// X(Grok Agent Tools): x_searchでメディア付きポストURLを探す(実証済み方式の移植)。
 /// 画像直リンクは取れないので、返ったポストURLをyt-dlpでメディアDL→フレーム化する
 async fn x_post_urls(client: &reqwest::Client, key: &str, query: &str, limit: usize) -> Result<Vec<String>, String> {
     let prompt = format!(
@@ -428,7 +428,7 @@ async fn x_post_urls(client: &reqwest::Client, key: &str, query: &str, limit: us
         return Err(format!("Grok: {}", v["error"]));
     }
     // citationsだけを見る(応答全文からの乱獲はGrokが本文に書く例示URL=捏造ID
-    // 「0987654321」等まで拾ってyt-dlpが空振りする。ml-hub x_grok_searchと同じ教訓 2026-09-03)
+    // 「0987654321」等まで拾ってyt-dlpが空振りする。過去の x 検索と同じ教訓 2026-09-03)
     let mut urls: Vec<String> = vec![];
     let mut push = |u: &str| {
         let ok = (u.starts_with("https://x.com/") || u.starts_with("https://twitter.com/"))
@@ -507,7 +507,7 @@ pub(crate) fn media_frames_from_urls(scratch: &Path, urls: &[String]) -> Vec<(Ve
         ca_env(&mut c); // 静的ffmpegのTLS検証失敗(code251でYT収穫0)の根治 2026-09-03
         let ok = status_timeout(&mut c, 120);
         if !ok {
-            continue; // 画像のみのポストはyt-dlpで取れないことがある(ml-hubと同じ割り切り)
+            continue; // 画像のみのポストはyt-dlpで取れないことがある(過去と同じ割り切り)
         }
         if let Ok(data) = std::fs::read(&f) {
             if let Ok(frames) = crate::media::extract_frames(scratch, &data, 0.5) {
@@ -522,7 +522,7 @@ pub(crate) fn media_frames_from_urls(scratch: &Path, urls: &[String]) -> Vec<(Ve
     out
 }
 
-/// クエリとタイトルの関連度(0..1)。ml-hub video_crawl.relevance_scoreの移植:
+/// クエリとタイトルの関連度(0..1)。過去の関連度スコアの移植:
 /// 空白区切りの語はタイトル内ヒット率、CJK等スペース無し1語は部分一致で1/0。
 fn yt_relevance(title: &str, query: &str) -> f64 {
     let t = title.to_lowercase();
@@ -817,7 +817,7 @@ async fn gen_queries(
          人名・グループ名は正式な綴りに直し、別表記(ハングル/正式ローマ字/日本語表記)も使ってよい。\
          一般語だけのクエリ禁止(「写真」「image」単体等)。JSONのみ: {{\"queries\": [\"...\"]}}"
     );
-    let key = enrich::mlhub_key("anthropic_api_key");
+    let key = enrich::api_key("anthropic_api_key");
     // 💰ブースト: 最初からClaude(綴り訂正・別名展開ができる=検索の入口が良くなる)
     if boost {
         if let Some(k) = &key {
@@ -918,15 +918,11 @@ async fn judge_builtin(client: &reqwest::Client, img: &image::DynamicImage, goal
     parse_judge(v["response"].as_str().unwrap_or(""))
 }
 
-/// 💰目利きのモデル/プロバイダ設定(ml-hub settings.json)。安いAPIへの切替口(2026-09-03指示):
-///   gallery_judge_model: "claude-haiku-4-5"(Anthropic・1/3コスト) or "google/gemini-..."等(スラッシュ入り=OpenRouter)
-///   openrouter_api_key: OpenRouter利用時に必須
-/// 未設定なら従来どおり claude-sonnet-5。
-/// 既定の目利きモデル(settings.json gallery_judge_model)。フォルダ側agent.judge_modelが優先
+/// 💰目利きのモデル(設定画面の「AIの役」= roles.judge)。安いAPIへの切替口:
+///   "claude-haiku-4-5"(Anthropic・1/3コスト) or "google/gemini-..."等(スラッシュ入り=OpenRouter)
+/// 未設定なら claude-sonnet-5。フォルダ側 agent.judge_model が優先
 pub fn default_judge_model() -> String {
-    crate::enrich::mlhub_key("gallery_judge_model")
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "claude-sonnet-5".into())
+    crate::config::get_str("roles.judge").unwrap_or_else(|| "claude-sonnet-5".into())
 }
 
 /// モデル名→(入力$/M, 出力$/M)。OpenRouterは主要候補だけ実額、他は保守的な概算($0.5/M均し)
@@ -994,10 +990,10 @@ async fn judge_claude(
     let b64 = base64::engine::general_purpose::STANDARD.encode(buf.get_ref());
     // スラッシュ入りモデル名(例: google/gemini-2.5-flash)=OpenRouter経由の格安VLM
     if model.contains('/') {
-        if let Some(ork) = crate::enrich::mlhub_key("openrouter_api_key") {
+        if let Some(ork) = crate::enrich::api_key("openrouter_api_key") {
             return judge_openrouter(client, &ork, model, &b64, goal, hints).await;
         }
-        return Err("gallery_judge_modelがOpenRouter形式ですがopenrouter_api_keyが未設定です".into());
+        return Err("目利きモデルがOpenRouter形式ですが OpenRouter のキーが未設定です".into());
     }
     let v: Value = client
         .post("https://api.anthropic.com/v1/messages")
@@ -1131,7 +1127,7 @@ fn crawl_tags(album: &str, query: &str) -> Vec<String> {
     out
 }
 
-/// 動画フレームのゴミ抜き(ml-hub video_framesと同趣旨): 真っ暗/白飛び/明白なブレだけ門前払い。
+/// 動画フレームのゴミ抜き(過去の動画フレーム抽出と同趣旨): 真っ暗/白飛び/明白なブレだけ門前払い。
 /// Laplacian分散は平滑被写体で誤検出する既知の限界があるので閾値は保守的に。最終判定はVLM。
 fn frame_looks_ok(img: &image::DynamicImage) -> Result<(), &'static str> {
     let g = img.thumbnail(128, 128).into_luma8();
@@ -1148,7 +1144,7 @@ fn frame_looks_ok(img: &image::DynamicImage) -> Result<(), &'static str> {
     if mean > 237.0 {
         return Err("白飛び");
     }
-    // コントラスト(ml-hub video_framesのmin_contrast相当): ほぼ単色のフレードイン/暗転を捨てる
+    // コントラスト(min_contrast相当): ほぼ単色のフレードイン/暗転を捨てる
     let std = (g.pixels().map(|p| (p.0[0] as f64 - mean).powi(2)).sum::<f64>() / n_all).sqrt();
     if std < 10.0 {
         return Err("コントラスト無し");
@@ -1219,11 +1215,11 @@ pub async fn run(
     let (mut done_queries, mut seen_urls, brief_cached) = load_ledger(&root, &album);
     let mut consec_err = 0usize;
     // 💰ブースト: キーがあればClaudeがクエリ生成+目利き(並列)。予算超過で内蔵AIに戻る
-    let boost_key = if limits.boost { enrich::mlhub_key("anthropic_api_key") } else { None };
+    let boost_key = if limits.boost { enrich::api_key("anthropic_api_key") } else { None };
     // 目標の正規化(1回だけ・台帳キャッシュ)。以後のクエリ生成/目利きは正規化済みの目標を見る
     set_last("目標を解釈中…".into());
     let brief = ensure_brief(&root, &client, &llm_st, &goal, &keywords,
-                             enrich::mlhub_key("anthropic_api_key").as_deref(), &brief_cached).await;
+                             enrich::api_key("anthropic_api_key").as_deref(), &brief_cached).await;
     if brief != brief_cached {
         save_ledger(&root, &album, &done_queries, &seen_urls, &brief);
     }
@@ -1288,7 +1284,7 @@ pub async fn run(
                 tokio::task::spawn_blocking(move || youtube_frames(&sc, &qq, 2))
             });
             let h_grok = if en("x") && run_ok {
-                enrich::mlhub_key("xai_api_key").map(|k| {
+                enrich::api_key("xai_api_key").map(|k| {
                     st.spent_cents.fetch_add(3, Relaxed); // Grok x_searchの概算
                     let c = client.clone();
                     let q2 = q.clone();
@@ -1383,7 +1379,7 @@ pub async fn run(
                                 st.rejected.fetch_add(1, Relaxed);
                                 continue;
                             }
-                            // ml-hub video_frames と同趣旨のゴミ抜き: 真っ暗/白飛び/明白なブレだけ門前払い
+                            // 過去の動画フレーム抽出と同趣旨のゴミ抜き: 真っ暗/白飛び/明白なブレだけ門前払い
                             // (Laplacianは平滑被写体で誤検出する既知の限界 → 閾値は保守的に。最終判定はVLM)
                             if let Err(why) = frame_looks_ok(&img) {
                                 st.rejected.fetch_add(1, Relaxed);
@@ -1528,7 +1524,7 @@ pub async fn run(
                 set_last("連続エラーで自動停止(検索が絞られてる可能性)".into());
                 break 'outer;
             }
-            // 未見だけに絞ってから8並列でDL(ml-hub並みのスクレイピング速度)。ゲート/判定は直列のまま
+            // 未見だけに絞ってから8並列でDL(実用的なスクレイピング速度)。ゲート/判定は直列のまま
             let fresh: Vec<Cand> = cands
                 .into_iter()
                 .filter(|c| {

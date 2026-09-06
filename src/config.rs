@@ -1,5 +1,5 @@
 //! 設定の正本 = `store/config.json`(docs/gen-design.md §8.1)。設定画面(UI)が行ごとに自動保存で書く。
-//! 優先順: 環境変数(開発・一時上書き) > config.json > 旧 `~/ml-hub/config/settings.json`(Linux の後方互換、読むだけ)。
+//! 優先順: 環境変数(開発・一時上書き) > config.json。
 //! キーは平文でここに置く(store 内だが書き出し/zip には含めない)。値の読み出しは点区切りパス(`keys.anthropic`, `gen.base`)。
 
 use serde_json::{json, Value};
@@ -11,15 +11,21 @@ static CFG: Mutex<Option<Value>> = Mutex::new(None);
 
 /// 既定値(UI はここに無いキーを出さない=未実装の設定を見せない)
 pub fn defaults() -> Value {
-    json!({
+    let mut v = json!({
         "keys": {"anthropic": "", "openai": "", "openrouter": "", "xai": "", "pexels": "", "pixabay": "", "civitai": ""},
         "roles": {"judge": ""},                       // 目利きの既定モデル(空=claude-sonnet-5)。フォルダ設定が優先
-        "gen": {"base": "", "port": 8092, "size": "1024x1024", "steps": 0, "model": "flux2-klein-4b", "preview": true}, // base=別マシンの sd-server(空=内蔵)。steps 0=モデルの既定。preview=途中経過(sd-cli)
+        "gen": {"base": "", "port": 8092, "size": "1024x1024", "model": "flux2-klein-4b", "preview": true}, // base=別マシンの sd-server(空=内蔵)。preview=途中経過(sd-cli)
         "vlm": {"base": ""},                          // 別マシンの llama-server / OpenAI 互換 VLM(空=内蔵)
         "tools": {"sd_server": "", "llama_server": ""}, // バイナリの手動指定(空=自動検出)
         "autopilot": {"interval_min": 30, "groom": true}, // ♻見回りの周期 / 属性・マスクの自動お手入れ
         "storage": {"cache_mb": 20480},               // preview/render キャッシュの上限
-    })
+    });
+    // ステップ数はモデルごとに正解が違う(蒸留の klein は 4 で完成し、非蒸留の Qwen-Image-Edit は 20 要る)。
+    // 共通の1個で上書きすると、少ない方に合わせたときに非蒸留モデルがノイズの残った絵を吐く。
+    // 既定は ModelSpec の出荷時の値。設定画面からモデルごとに変えられる
+    v["gen"]["model_steps"] = Value::Object(
+        crate::gen::MODELS.iter().map(|m| (m.id.to_string(), json!(m.steps))).collect());
+    v
 }
 
 pub fn path() -> PathBuf {
@@ -70,18 +76,8 @@ pub fn env_or(env: &str, path: &str) -> Option<String> {
     std::env::var(env).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).or_else(|| get_str(path))
 }
 
-/// API キー: config の keys.<name> → 旧 ml-hub settings.json の <name>_api_key
-pub fn key(name: &str) -> Option<String> {
-    get_str(&format!("keys.{name}")).or_else(|| legacy(&format!("{name}_api_key")))
-}
-
-/// 旧 ~/ml-hub/config/settings.json(Linux の ml-hub と共用していた置き場)。読むだけ
-pub fn legacy(name: &str) -> Option<String> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
-    let p = Path::new(&home).join("ml-hub/config/settings.json");
-    let v: Value = serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok()?;
-    v[name].as_str().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
-}
+/// API キー: 正本は store/config.json の keys.<name>
+pub fn key(name: &str) -> Option<String> { get_str(&format!("keys.{name}")) }
 
 /// 設定画面が書く。既定に無いパスは受け付けない(未実装の設定を貯めない)。空文字は「既定に戻す」
 pub fn set(path: &str, v: Value) -> Result<Value, String> {
@@ -116,16 +112,14 @@ pub fn set(path: &str, v: Value) -> Result<Value, String> {
 
 fn path_file() -> PathBuf { path() }
 
-/// 設定画面向け: キーは末尾 4 桁だけ、旧ファイル由来のキーは "legacy" と印を付ける
+/// 設定画面向け: キーは末尾 4 桁だけにして返す(本体は渡さない)
 pub fn masked() -> Value {
     let mut v = get();
     if let Some(keys) = v["keys"].as_object_mut() {
-        for (name, val) in keys.iter_mut() {
+        for (_name, val) in keys.iter_mut() {
             let s = val.as_str().unwrap_or("").to_string();
             *val = if !s.is_empty() {
-                json!({"set": true, "tail": s.chars().rev().take(4).collect::<String>().chars().rev().collect::<String>(), "from": "config"})
-            } else if let Some(l) = legacy(&format!("{name}_api_key")) {
-                json!({"set": true, "tail": l.chars().rev().take(4).collect::<String>().chars().rev().collect::<String>(), "from": "legacy"})
+                json!({"set": true, "tail": s.chars().rev().take(4).collect::<String>().chars().rev().collect::<String>()})
             } else {
                 json!({"set": false})
             };

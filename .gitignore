@@ -6,6 +6,8 @@
 /engine/models/
 # 生成エンジンの実行ファイル(各OSで自前ビルド/同梱。500MB級)
 /engine/bin/
+/engine/*.png
+/engine/refs/
 /mac/tauri/src-tauri/sd/
 # サンプル源の注釈ファイル(COCO 253MB / Open Images CSV など。初回に自動DL)
 /engine/data/
