@@ -998,6 +998,8 @@ function nameHint() {
   const slug = albumSlug(name);
   if (name && albumsCache.some(x => x.name === slug)) {
     el.innerHTML = `<span style="color:#e06c75">「${esc(slug)}」はもうあります — 別の名前にするか、そのフォルダを開いて設定を変えてください</span>`;
+  } else if (name && groupsCache.some(g => g.path === slug || g.path.endsWith('/' + slug))) {
+    el.innerHTML = `<span style="color:#e5c07b">同じ名前のグループ(入れ物)があります — 作れますが紛らわしくなるので、別の名前をおすすめします</span>`;
   } else if (name && slug !== name) {
     el.innerHTML = `<span style="color:#e5c07b">保存名は「${esc(slug)}」になります(英数字・日本語以外の記号は _ に、48文字まで)。記号違いの名前は同じ保存名になります</span>`;
   } else if (!newParent) {
@@ -1531,7 +1533,9 @@ function newGroupInline(parent = '') {
       await j('/api/groups', {method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({name: (parent ? parent + '/' : '') + v})});
       renaming = null; row.remove();
-      toast(`グループ「${v}」を作りました — 空のままでも残ります`);
+      toast(albumsCache.some(a => a.name === v)
+        ? `グループ「${v}」を作りました — 注意: 同じ名前のフォルダ(タスク)があり紛らわしいかも`
+        : `グループ「${v}」を作りました — 空のままでも残ります`);
       await loadAlbums();
     } catch (e) {
       busy = false;
