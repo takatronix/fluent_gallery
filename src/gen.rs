@@ -437,6 +437,26 @@ fn ref_file(root: &Path, sha: &str) -> Option<PathBuf> {
 pub fn ref_caption(root: &Path, sha: &str) -> String {
     store::load_meta(root, sha).and_then(|m| m["vlm"]["caption"].as_str().or(m["caption"].as_str()).map(String::from)).unwrap_or_default()
 }
+/// 参照メモの解決: main.rs はキャプション未取得の固定参照を "__REF__<sha>" で渡す。ここで
+/// サイドカーのキャプション → 無ければ内蔵VLMでその場で説明(約2秒/枚) → それも無理なら定型文、に置き換える。
+/// これが無いと「犬の写真を参照に色々なポーズで」が、犬の一言も無いまま計画LLMに渡って別物が出る(2026-09-06 実害)
+pub async fn resolve_ref_notes(root: &Path, client: &reqwest::Client, notes: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(notes.len());
+    for n in notes {
+        let Some(sha) = n.strip_prefix("__REF__") else { out.push(n.clone()); continue };
+        let mut c = ref_caption(root, sha);
+        if c.is_empty() && enrich::local_vlm_base().is_some() {
+            let ext = store::load_meta(root, sha).and_then(|m| m["ext"].as_str().map(String::from)).unwrap_or_else(|| "jpg".into());
+            let path = store::image_path(root, sha, &ext);
+            match enrich::describe(client, &path, "builtin").await {
+                Ok(v) => { c = v["caption"].as_str().unwrap_or("").to_string(); if !c.is_empty() { println!("🪄 参照を内蔵VLMで説明: {c}"); } }
+                Err(e) => println!("🪄 参照の説明取得に失敗({e}) — 定型文で続行"),
+            }
+        }
+        out.push(if c.is_empty() { "a reference image (keep its subject)".into() } else { c });
+    }
+    out
+}
 
 // ---------- 生成 ----------
 pub struct GenJob {
@@ -634,14 +654,21 @@ fn parse_prompts(text: &str) -> Vec<String> {
 }
 
 /// 内蔵 LLM が多様なプロンプトを設計(atelier genraw の 24 本方式)。参照があれば「編集指示」の形で。失敗時は決定的テンプレ
-pub async fn plan(root: &Path, client: &reqwest::Client, llm_st: &llm::LlmState, goal: &str, used: &[String], n: usize, ref_notes: &[String], triggers: &[String]) -> Vec<String> {
+pub async fn plan(root: &Path, client: &reqwest::Client, llm_st: &llm::LlmState, goal: &str, used: &[String], n: usize, ref_notes: &[String], refs_attached: bool, triggers: &[String]) -> Vec<String> {
     let avoid: Vec<&String> = used.iter().rev().take(12).collect();
     let trig = triggers.iter().take(4).cloned().collect::<Vec<_>>().join(", ");
     let lora_block = if trig.is_empty() { String::new() } else {
         format!("A LoRA (style/subject adapter) is attached. Its trigger words are: \"{trig}\". Start EVERY prompt with these trigger words verbatim, \
                  and let the LoRA decide the style: do not add 'photorealistic photograph' or other style words that fight it unless the goal asks.\n")
     };
-    let ref_block = if ref_notes.is_empty() { String::new() } else {
+    let ref_block = if ref_notes.is_empty() { String::new() } else if !refs_attached {
+        // 参照非対応モデル(Z-Image Turbo 等): 画像は渡らないので、主語を言葉で毎回書かせる
+        format!("REFERENCE SUBJECT (text only — the image model will NOT see the reference images, so you must describe the subject in words):\n{}\n\
+                 Every prompt MUST explicitly describe this same subject (species/breed or object type, colors, markings, distinctive features) \
+                 and then vary what the goal asks (pose, scene, lighting, composition, season). Never replace the subject with something else \
+                 (e.g. if the reference is a dog, every prompt is about that dog, not a person).\n",
+                ref_notes.iter().enumerate().map(|(i, c)| format!("- [REF{}] {}", i + 1, c)).collect::<Vec<_>>().join("\n"))
+    } else {
         format!("REFERENCE IMAGES will be attached to the image model for every generation:\n{}\n\
                  Therefore write EDIT INSTRUCTIONS, not scene descriptions: each prompt must keep the main subject of the reference \
                  (same identity, breed, face, clothing, colors, materials) and change what the goal asks (scene, pose, lighting, \
@@ -682,6 +709,8 @@ pub async fn plan(root: &Path, client: &reqwest::Client, llm_st: &llm::LlmState,
                 format!("{trig}, {subj}, {v}")
             } else if ref_notes.is_empty() {
                 format!("photorealistic photograph of {subj}, {v}, sharp focus, natural colors")
+            } else if !refs_attached {
+                format!("photorealistic photograph of {}, {subj}, {v}, sharp focus, natural colors", ref_notes[0])
             } else {
                 format!("Keep the same subject from the reference image and show it {v}, {subj}, photorealistic, sharp focus")
             }).collect();
@@ -815,7 +844,10 @@ pub async fn run(
     if !vlm_on {
         set_last("目利き無し(内蔵VLM 未稼働): 近重複だけ弾いて収蔵します".into());
     }
-    let ref_notes = if s.refs { refs.notes.clone() } else { vec![] };
+    // 参照の説明は、モデルが画像参照に対応していなくても計画LLMに渡す(言葉で主語を固定する)。
+    // 対応モデルなら「参照を保って編集せよ」、非対応なら「主語を毎回明示せよ」と指示が変わる(plan の refs_attached)
+    let ref_notes = resolve_ref_notes(&root, &client, &refs.notes).await;
+    let refs_attached = s.refs && !refs.is_empty();
     // LoRA のトリガー語(棚の json)。計画 LLM に「必ず先頭に置け」と渡す
     let triggers: Vec<String> = lora.iter().flat_map(|(f, _)| {
         crate::lora::load_meta(&root, f)["triggers"].as_array().map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect::<Vec<_>>()).unwrap_or_default()
@@ -835,7 +867,7 @@ pub async fn run(
         }
         if pool.is_empty() {
             set_last("プロンプトを設計中…(内蔵LLM)".into());
-            pool = plan(&root, &client, &llm_st, &goal, &used, per_plan, &ref_notes, &triggers).await;
+            pool = plan(&root, &client, &llm_st, &goal, &used, per_plan, &ref_notes, refs_attached, &triggers).await;
             st.planned.fetch_add(pool.len(), Relaxed);
             for p in &pool {
                 ledger["prompts"].as_array_mut().unwrap().push(json!({"text": p, "ok": 0, "ng": 0, "ts": now_secs()}));

@@ -1739,7 +1739,7 @@ function genHeadHtml(a, isNew) {
         : `<button class="pri" onclick="runGenNow()" ${!a.goal ? 'disabled style="opacity:.5"' : ''}
         title="その場で1回だけ作る(1回の枚数ぶん)。内蔵エンジンは無料、1024²で約30秒/枚">${ic('play', 12)} 今すぐ1回作る <span style="opacity:.75; font-weight:400">${genTimeEst(a)}</span></button>`}
       <span class="switch ${a.agent?.auto ? 'on' : ''}" onclick="toggleAutoHead()"
-        title="ONの間は30分ごとに見回り、目標枚数に足りなければ1回ぶん作ります。消して減ってもまた埋めます(夜間の量産向き)">
+        title="ONの間は30分ごとに見回り、目標枚数に足りなければ1回ぶん作ります(夜間の量産向き)。OFFでも「今すぐ1回作る」はいつでも押せます">
         <span class="track"></span>自動生成</span>
       <span class="lbl" id="ah_cycle" style="width:auto; color:var(--faint)" title="見回りの周期と次回時刻(サーバの実測)">${a.agent?.auto ? '30分ごと' : ''}</span>
       <button class="ghost" onclick="$('viewhead').classList.toggle('open')" title="設定(作る物/枚数/サイズ/参照)を開閉">${ic('chevD', 14)}</button>`}
@@ -1766,7 +1766,7 @@ function genHeadHtml(a, isNew) {
       <span class="lbl" style="width:auto">枚</span>
     </div>
     <div class="frow" style="flex-wrap:wrap">
-      <span class="lbl" title="参照画像: 固定の画像は毎回付ける。フォルダ/データセットは毎回そこから抽選。モデルが参照対応の時だけ効く">参照</span>
+      <span class="lbl" title="参照画像: 固定の画像は毎回付ける。フォルダ/データセットは毎回そこから抽選。参照対応モデルは画像ごと渡し、非対応モデルでも説明文(内蔵VLMのキャプション)を主語として計画に使う">参照</span>
       ${refs.map(refChip).join('')}
       ${isNew ? `<span class="lbl" style="width:auto">(作成後に、サムネの右クリック「似た画像を作る」やここで足せます)</span>` : `
       <select id="ah_refpick" onchange="genRefAdd(this)" title="フォルダやデータセットを参照に足す(毎回そこから1枚を抽選)">
@@ -2078,7 +2078,7 @@ async function createFolder() {
   const min_quality = Math.min(10, Math.max(1, parseInt($('ah_minq')?.value) || 5));
   try {
     const r = await j('/api/albums', {method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({name, folder, goal, agent: isGen ? {auto: false, target, batch, min_quality} : {auto: false, target},
+      body: JSON.stringify({name, folder, goal, agent: isGen ? {auto: true, target, batch, min_quality} : {auto: false, target}, // 生成フォルダは作った時点で自動(30分ごとに目標まで補充)。手で作る時はトグル不要
                             keywords, engines: isGen ? [] : engPick(), criteria, kind: isGen ? 'gen' : 'crawl', recipe})});
     toast(isGen ? `生成フォルダ「${r.name}」誕生 — ▶で作り始めます` : goal ? `AIフォルダ「${r.name}」誕生 — ▶で集め始めます` : `フォルダ「${r.name}」作成`);
     await loadAlbums();
@@ -2115,6 +2115,10 @@ function headAutoSave() {
                   judge_model: $('ah_judge')?.value ?? (src.agent?.judge_model || ''), ...(min_quality ? {min_quality} : {})},
           keywords, engines, criteria, kind: src.kind || '', recipe})});
       src.goal = goal; src.keywords = keywords; if (recipe) src.recipe = recipe;
+      { // 目標が入った/消えたら「今すぐ1回作る」ボタンの活性を追従(以前は再描画されず、自動生成トグルを触るまで押せなかった)
+        const rb = document.querySelector('#viewhead button[onclick="runGenNow()"]');
+        if (rb) { rb.disabled = !goal; rb.style.opacity = goal ? '' : '.5'; }
+      }
       if (droppedLora.length) { toast(`モデルを変えたので、合わない LoRA を外しました: ${droppedLora.map(x => x.file).join(', ')}`); renderViewhead(); }
       src.agent = {...(src.agent || {}), target, batch, budget_usd, ...(min_quality ? {min_quality} : {}),
                    judge_model: $('ah_judge')?.value ?? (src.agent?.judge_model || '')}; src.engines = engines;
