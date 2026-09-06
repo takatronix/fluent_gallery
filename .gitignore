@@ -6,6 +6,7 @@
 /engine/models/
 # 生成エンジンの実行ファイル(各OSで自前ビルド/同梱。500MB級)
 /engine/bin/
+/engine/cuda/
 /engine/*.png
 /engine/refs/
 /mac/tauri/src-tauri/sd/

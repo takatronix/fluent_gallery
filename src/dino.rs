@@ -87,11 +87,9 @@ fn sess(root: &Path) -> Option<&'static Mutex<ort::session::Session>> {
     if SESS.get().is_none() && !model_path(root).exists() { return None; }
     let p = model_path(root);
     SESS.get_or_init(move || {
-        let built = (|| -> Result<ort::session::Session, String> {
-            let b = ort::session::Session::builder().map_err(|e| e.to_string())?;
-            let mut b = b.with_intra_threads(4).map_err(|e| e.to_string())?;
-            b.commit_from_file(&p).map_err(|e| e.to_string())
-        })();
+        // int8 は CUDA で動かない(ConvInteger 未実装)し、fp16 にしても速度は横ばいだった。
+        // GPU に載せる価値が無いので CPU 固定にしている(docs/model-placement-design.md)
+        let built = crate::ep::build(&p, 4, false, "grounding-dino");
         match built {
             Ok(s) => { println!("🔎 grounding-dino 読込OK"); Some(Mutex::new(s)) }
             Err(e) => { println!("⚠ grounding-dino 読込失敗({e})"); None }

@@ -30,8 +30,10 @@ faceid = []
 # ストア版(App Store 提出用)の制限: YouTube/X 等の取り込み拒否、COCO は CC BY 系のみ。既定OFF=フル機能
 store = []
 # 内蔵LLM(llama.cpp)のGPUバックエンド。どちらか一つを選ぶ
-cuda = ["llama-cpp-2/cuda"]
-metal = ["llama-cpp-2/metal"]
+# 内蔵LLMのGPUバックエンドと、ONNX(ORT)の実行先をまとめて切り替える。
+# ONNX側は SAM2 が CPU 1.57秒 → CUDA 0.028秒(56倍)なので効きが大きい(docs/model-placement-design.md)
+cuda = ["llama-cpp-2/cuda", "ort/cuda"]
+metal = ["llama-cpp-2/metal", "ort/coreml"]
 
 [profile.release]
 lto = true
