@@ -43,13 +43,16 @@ async function until(probe, description, timeout = 30000) {
   }
   throw new Error(`Timeout: ${description}; last=${JSON.stringify(last)}`);
 }
-async function imageStats(path) {
-  return page.evaluate(async path => {
+async function imageStats(path, region = null) {
+  return page.evaluate(async ({path, region}) => {
     const response = await fetch(path);
     if (!response.ok) throw new Error(`image ${path}: ${response.status}`);
     const image = await createImageBitmap(await response.blob());
     const canvas = document.createElement('canvas'); canvas.width = canvas.height = 64;
-    const ctx = canvas.getContext('2d'); ctx.drawImage(image, 0, 0, 64, 64);
+    const ctx = canvas.getContext('2d');
+    if (region) ctx.drawImage(image, image.width * region[0], 0,
+      image.width * (region[1] - region[0]), image.height, 0, 0, 64, 64);
+    else ctx.drawImage(image, 0, 0, 64, 64);
     const data = ctx.getImageData(0, 0, 64, 64).data;
     const samples = [], channels = [0, 0, 0];
     for (let i = 0; i < data.length; i += 4) {
@@ -59,9 +62,10 @@ async function imageStats(path) {
     samples.sort((a, b) => a - b);
     const result = {width: image.width, height: image.height, channels,
       mean: channels.reduce((a, b) => a + b) / 3,
-      low: samples[Math.floor(samples.length * .05)], high: samples[Math.floor(samples.length * .95)]};
+      low: samples[Math.floor(samples.length * .05)], high: samples[Math.floor(samples.length * .95)],
+      clipped: samples.filter(value => value === 255).length / samples.length};
     image.close(); return result;
-  }, path);
+  }, {path, region});
 }
 async function currentImage() {
   return page.evaluate(() => {
@@ -244,6 +248,7 @@ async function verifyUnversionedRenders(sha, expectedMean) {
   await releaseDecode();
   const first = await ready(sha, true);
   assert.equal(first.edits.length, 1); assert.equal(first.edits[0].op, 'auto');
+  assert.equal(first.edits[0].params.version, 3, 'new auto requests must identify the photographic algorithm');
   const after = await imageStats(first.src);
   assert(after.mean > before.mean + 20, `auto must visibly brighten dark neutral image: ${JSON.stringify({before, after})}`);
   assert(Math.max(...after.channels) - Math.min(...after.channels) < 3, 'gray image must remain neutral');
@@ -347,6 +352,102 @@ async function verifyUnversionedRenders(sha, expectedMean) {
   await verifyOriginals();
   assert.deepEqual(errors, [], 'browser JavaScript errors');
   passed('再読込後も補正済み表示・原本に戻すで復帰・全原本と無版サムネ保持・JS例外なし');
+
+  const photoFixtures = await page.evaluate(async ({source, nonce}) => {
+    const form = new FormData(); form.append('source', source);
+    const profiles = ['lowcontrast', 'backlit', 'warmcast', 'balanced'];
+    const fixtures = [];
+    for (const profile of profiles) {
+      const canvas = document.createElement('canvas'); canvas.width = 640; canvas.height = 320;
+      const ctx = canvas.getContext('2d');
+      for (let x = 0; x < canvas.width; x++) {
+        const position = x / (canvas.width - 1);
+        const value = profile === 'lowcontrast' ? 80 + 90 * position :
+          profile === 'backlit' ? (position < .8 ? 20 + 70 * position / .8 : 210 + 45 * (position - .8) / .2) :
+          profile === 'warmcast' ? 60 + 130 * position : 255 * position;
+        const gains = profile === 'warmcast' ? [1.16, 1, .82] : [1, 1, 1];
+        ctx.fillStyle = `rgb(${gains.map(gain => Math.round(value * gain)).join(',')})`;
+        ctx.fillRect(x, 0, 1, canvas.height);
+      }
+      [...nonce + profile].forEach((character, x) => {
+        const value = character.charCodeAt(0); ctx.fillStyle = `rgb(${value},${value},${value})`;
+        ctx.fillRect(x, 0, 1, 1);
+      });
+      const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+      const digest = await crypto.subtle.digest('SHA-1', await blob.arrayBuffer());
+      fixtures.push({profile, sha: [...new Uint8Array(digest)].map(value => value.toString(16).padStart(2, '0')).join('')});
+      form.append('file', blob, `${profile}.png`);
+    }
+    const response = await fetch('/api/upload', {method: 'POST', body: form});
+    const result = await response.json();
+    if (!response.ok || result.added !== profiles.length) throw new Error(JSON.stringify(result));
+    return fixtures;
+  }, {source, nonce});
+  for (const fixture of photoFixtures) {
+    createdShas.add(fixture.sha);
+    originalBytes.set(fixture.sha, hash(await bytes('/img/' + fixture.sha)));
+    for (const [tier] of tiers) originalTiers.set(`${tier}/${fixture.sha}`, hash(await bytes(`/${tier}/${fixture.sha}`)));
+  }
+  await page.evaluate(async source => { await go({type: 'lib', key: 'all', criteria: {source}}); }, source);
+  await page.waitForFunction(shas => shas.every(sha => items.some(value => value.sha1 === sha)),
+    {}, photoFixtures.map(value => value.sha));
+
+  const lowContrast = photoFixtures.find(value => value.profile === 'lowcontrast');
+  await show(lowContrast.sha);
+  await page.evaluate(() => edPush({op: 'pipeline', params: {edits: [{op: 'auto', params: {version: 2}}]}}));
+  const historical = await ready(lowContrast.sha, true);
+  assert.equal(historical.edits[0].params.edits[0].params.version, 2, 'explicit historical algorithm version must be retained');
+  const historicalStats = await imageStats(historical.src), historicalOriginal = await imageStats('/img/' + lowContrast.sha);
+  assert(Math.abs(historicalStats.mean - historicalOriginal.mean) < 2 &&
+    Math.abs((historicalStats.high - historicalStats.low) - (historicalOriginal.high - historicalOriginal.low)) < 3,
+    'historical v2 low-contrast rendering must remain unchanged');
+  await clearCurrent(lowContrast.sha);
+  passed('保存済みv2自動補正は旧処理のまま再現・新処理とキャッシュを区別');
+
+  for (const fixture of photoFixtures) {
+    await show(fixture.sha);
+    const original = await imageStats('/img/' + fixture.sha);
+    await page.click('#edauto');
+    const current = await ready(fixture.sha, true);
+    const corrected = await imageStats(current.src);
+    assert.equal(current.edits.length, 1);
+    assert.equal(current.edits[0].params.version, 3);
+    if (fixture.profile === 'lowcontrast') {
+      assert(corrected.high - corrected.low >= original.high - original.low + 10,
+        `flat photo needs useful contrast: ${JSON.stringify({original, corrected})}`);
+      assert(Math.abs(corrected.mean - original.mean) < 25, 'contrast correction should preserve a reasonable exposure');
+      assert(corrected.low > 0 && corrected.high < 255, 'contrast must not force black/white clipping');
+      passed(`低コントラストの階調幅 ${Math.round(original.high - original.low)} → ${Math.round(corrected.high - corrected.low)}`);
+    } else if (fixture.profile === 'backlit') {
+      const darkBefore = await imageStats('/img/' + fixture.sha, [0, .78]);
+      const darkAfter = await imageStats(current.src, [0, .78]);
+      const brightBefore = await imageStats('/img/' + fixture.sha, [.82, 1]);
+      const brightAfter = await imageStats(current.src, [.82, 1]);
+      assert(darkAfter.mean > darkBefore.mean + 8,
+        `bright background must not suppress subject correction: ${JSON.stringify({darkBefore, darkAfter})}`);
+      assert(brightAfter.high >= 240, 'protected highlights must remain bright');
+      assert(brightAfter.clipped <= brightBefore.clipped + .01,
+        `subject correction must not blow highlights: ${JSON.stringify({brightBefore, brightAfter})}`);
+      passed(`逆光の暗部 ${darkBefore.mean.toFixed(1)} → ${darkAfter.mean.toFixed(1)}・明部の白飛びを増やさない`);
+    } else if (fixture.profile === 'warmcast') {
+      const spread = stats => (Math.max(...stats.channels) - Math.min(...stats.channels)) / stats.mean;
+      assert(spread(corrected) < spread(original) * .8,
+        `consistent color cast needs neutral correction: ${JSON.stringify({original, corrected})}`);
+      passed('複数の明るさに共通する暖色かぶりを自然な方向へ補正');
+    } else {
+      assert(Math.abs(corrected.mean - original.mean) < 8,
+        `balanced photo must not receive a strong exposure change: ${JSON.stringify({original, corrected})}`);
+      assert(Math.max(...corrected.channels) - Math.min(...corrected.channels) < 3, 'balanced neutrals must stay neutral');
+      passed('露出と階調が整った画像は過剰に変えず、中性色を保持');
+    }
+    const repeat = await api('/api/edits/' + fixture.sha, {action: 'push', edit: {op: 'auto', params: {version: 3}}});
+    assert.equal(repeat.rev, current.rev, 'repeat auto must reuse the same revision');
+    assert.equal(repeat.edits.length, 1, 'repeat auto must not stack corrections');
+    await clearCurrent(fixture.sha);
+  }
+  await verifyOriginals();
+  assert.deepEqual(errors, [], 'browser JavaScript errors');
+  passed('写真補正でも再押下は同じ1履歴・リセット可能・原本と原本サムネをすべて保持');
   console.log(`\n${checks} checks passed; screenshot: /tmp/fg-auto-adjust-desktop.png`);
 })().catch(async error => {
   console.error(error.stack || error);

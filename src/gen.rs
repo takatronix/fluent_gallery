@@ -67,6 +67,15 @@ pub const MODELS: &[ModelSpec] = &[
     },
 ];
 pub const DEFAULT_MODEL: &str = "flux2-klein-4b";
+
+/// 参照だけあって目標が空のときの既定の目標(右クリック「似た画像を作る」直後はこの状態)。
+/// 計画 LLM は GOAL を英語化するので日本語でよい
+pub const REF_ONLY_GOAL: &str = "参照画像と同じ被写体(同じ個体・見た目・色・画風)のまま、場面・ポーズ・構図・光・季節を変えたバリエーション";
+/// 実際に使う目標。空なら参照がある時だけ既定(REF_ONLY_GOAL)、参照も無ければ None(=入力を求める)
+pub fn effective_goal(goal: &str, has_refs: bool) -> Option<String> {
+    let g = goal.trim();
+    if !g.is_empty() { Some(g.to_string()) } else if has_refs { Some(REF_ONLY_GOAL.to_string()) } else { None }
+}
 pub const DEFAULT_PORT: u16 = 8092;
 const PHASH_NEAR: u32 = 4; // 生成物同士の近重複(同じ seed 近傍・同じ構図)はこれ以下で捨てる
 
@@ -684,8 +693,20 @@ pub async fn plan(root: &Path, client: &reqwest::Client, llm_st: &llm::LlmState,
                  Never describe the subject as something else.\n",
                 ref_notes.iter().enumerate().map(|(i, c)| format!("- [REF{}] {}", i + 1, c)).collect::<Vec<_>>().join("\n"))
     };
+    // 目標に画風/画材(アニメ・イラスト・水彩…)があれば、参照の見た目より優先させる。
+    // 実例: 参照=写真の鹿 + 目標「80年代のアニメ絵」で LLM が写真調の指示を書き、目利きが全部却下(2026-09-06)
+    let gl = goal.to_lowercase();
+    let styled = ["アニメ", "anime", "イラスト", "illustration", "絵", "painting", "水彩", "watercolor", "ドット", "pixel", "3dcg", "cg", "漫画", "manga",
+                  "sketch", "スケッチ", "油絵", "oil paint", "セル画", "cel", "cartoon", "カートゥーン", "線画", "line art", "版画", "浮世絵", "ukiyo", "手描き", "hand-drawn"]
+        .iter().any(|w| gl.contains(w));
+    let style_block = if styled {
+        "STYLE: the goal names an art style/medium. This OVERRIDES the look of any reference: every prompt must state that style explicitly in English \
+         (e.g. '1980s anime cel style, hand-drawn, retro anime colors, film grain'), and must NOT contain 'photorealistic' or 'photograph'. \
+         With reference images, phrase it as 'Render the same <subject> from the reference image as <style>, ...'.\n"
+    } else { "" };
     let user = format!(
         "GOAL (may be Japanese): 「{goal}」\n{ref_block}\
+         {style_block}\
          {lora_block}\
          Write {n} English text-to-image prompts for building an image DATASET for this goal.\n\
          Rules:\n\
@@ -719,6 +740,10 @@ pub async fn plan(root: &Path, client: &reqwest::Client, llm_st: &llm::LlmState,
         out = vars.iter().filter(|v| !used.iter().any(|u| u.contains(*v)))
             .take(n).map(|v| if !trig.is_empty() {
                 format!("{trig}, {subj}, {v}")
+            } else if styled {
+                // 画風指定あり: 写真調の語を足さない
+                if ref_notes.is_empty() || !refs_attached { format!("{subj}, {v}, detailed, clean composition") }
+                else { format!("Render the same subject from the reference image as {subj}, {v}") }
             } else if ref_notes.is_empty() {
                 format!("photorealistic photograph of {subj}, {v}, sharp focus, natural colors")
             } else if !refs_attached {
@@ -815,6 +840,9 @@ pub async fn run(
     let started = std::time::Instant::now();
     let set_last = |m: String| *st.last.lock().unwrap() = m;
     let s = spec(&model_id);
+    let goal = effective_goal(&goal, !refs.is_empty()).unwrap_or(goal); // 参照だけで目標が空 → 既定の目標
+    // 前の仕事の途中経過(engine/gen_preview.png)が計画中に「いま」として見えていた(sd-server 経路は preview を触らないので残る) → 開始時に消す
+    let _ = std::fs::remove_file(preview_path(&root));
     *st.model.lock().unwrap() = s.id.into();
     // プロバイダ: 外部 sd-server > ローカル sd-cli(途中経過あり) > 同梱 sd-server
     let external = external_base();
@@ -866,6 +894,8 @@ pub async fn run(
     }).collect();
     let mut pool: Vec<String> = vec![];
     let mut consec_err = 0usize;
+    let mut consec_reject = 0usize; // 目利き(内蔵VLM)の連続却下。6 で目標に沿って計画し直し、12 で止める(30秒/枚を空回りさせない)
+    let mut replan_note = String::new();
     let mut seed: u64 = now_secs() ^ 0x9E37_79B9_7F4A_7C15 ^ ((std::process::id() as u64) << 32);
     let per_plan = 8usize;
     let steps = if limits.steps == 0 { s.steps } else { limits.steps };
@@ -877,9 +907,18 @@ pub async fn run(
             set_last("連続失敗 8 回で自動停止(engine/sd-server.log か稼働ボードを確認)".into());
             break;
         }
+        if consec_reject >= 12 {
+            set_last("目利きが12枚連続で却下したので止めました — 作る物(目標)と出来上がりが食い違っています(例: 目標は「アニメ絵」なのに写真調)。作る物に画風や被写体を具体的に書いてください".into());
+            break;
+        }
+        if consec_reject >= 6 && replan_note.is_empty() {
+            replan_note = "\n(IMPORTANT: a reviewer rejected the previous images as NOT matching this goal. Follow the goal's style/medium and subject literally in every prompt.)".to_string();
+            pool.clear();
+            set_last("目利きが6枚連続で却下 → 目標に沿ってプロンプトを作り直します".into());
+        }
         if pool.is_empty() {
             set_last("プロンプトを設計中…(内蔵LLM)".into());
-            pool = plan(&root, &client, &llm_st, &goal, &used, per_plan, &ref_notes, refs_attached, &triggers).await;
+            pool = plan(&root, &client, &llm_st, &format!("{goal}{replan_note}"), &used, per_plan, &ref_notes, refs_attached, &triggers).await;
             st.planned.fetch_add(pool.len(), Relaxed);
             for p in &pool {
                 ledger["prompts"].as_array_mut().unwrap().push(json!({"text": p, "ok": 0, "ng": 0, "ts": now_secs()}));
@@ -897,9 +936,14 @@ pub async fn run(
             if st.stop.load(Relaxed) || st.ingested.load(Relaxed) >= limits.max_n || started.elapsed().as_secs() > limits.max_secs {
                 break 'outer;
             }
-            // 閲覧中は道を譲る(GPU を取り合わない)。夜間の量産では誰も触らないので止まらない
+            // 閲覧中は道を譲る(GPU を取り合わない)。夜間の量産では誰も触らないので止まらない。
+            // ただし上限 45 秒: 一覧を触り続ける(スクロール/自動更新/監視スクリプト)と永遠に始まらず、
+            // 表示も「設計中」のままで原因が分からなかった(2026-09-06 検証で 12 分停止)
             enrich_st.user_priority(10);
-            while st.ui_recent(8) && !st.stop.load(Relaxed) {
+            let mut yielded = 0u32;
+            while st.ui_recent(8) && !st.stop.load(Relaxed) && yielded < 45 {
+                if yielded == 0 { set_last("閲覧中なので待機(GPU を譲ります。8 秒触らなければ再開、最長 45 秒)".into()); }
+                yielded += 1;
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
             // 参照の束ね: 固定 + 各フォルダ/データセットから k 枚抽選(モデルが参照非対応なら空)
@@ -975,6 +1019,7 @@ pub async fn run(
                         st.rejected.fetch_add(1, Relaxed);
                         crate::crawl::save_reject_thumb(&root, &uk, &img);
                         let why = if m { format!("品質 q{q} < {}", limits.min_quality) } else { "目標に合わない/破綻(内蔵VLM)".to_string() };
+                        consec_reject += 1;
                         push_recent(&st, false, &uk, &why);
                         ledger_mark(&mut ledger, &prompt, false);
                         continue;
@@ -982,18 +1027,25 @@ pub async fn run(
                     Err(e) => { set_last(format!("目利き不可({e}) — 近重複だけで収蔵")); ("none", 0) }
                 }
             } else { ("none", 0) };
-            let extra = json!({
-                "rights": format!("generated:{}", s.license),
-                "gen": {"provider": provider, "model": s.id, "file": role_path(&root, s, "diff").and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())),
+            let gen_info = json!({"provider": provider, "model": s.id, "file": role_path(&root, s, "diff").and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())),
                         "prompt": prompt, "seed": job.seed, "steps": job.steps, "cfg": s.cfg, "w": job.w, "h": job.h,
                         "refs": ref_shas, "lora": lora.iter().map(|(f, s)| json!({"file": f, "scale": s})).collect::<Vec<_>>(),
-                        "secs": (secs * 10.0).round() / 10.0, "gate": gate, "quality": quality, "album": album},
+                        "secs": (secs * 10.0).round() / 10.0, "gate": gate, "quality": quality, "album": album});
+            // 来歴は画像ファイル自体にも埋める(iTXt "parameters"=A1111/ComfyUI 互換の1行, "fluent_gallery"=JSON)。
+            // 書き出し・ダウンロード後も「どのモデルで何のプロンプトか」が残る。sha1 は埋めた後のバイト列で取る
+            let params = format!("{}\nSteps: {}, Sampler: euler, CFG scale: {}, Seed: {}, Size: {}x{}, Model: {}, Software: Fluent Gallery",
+                prompt, job.steps, s.cfg, job.seed, job.w, job.h, s.id);
+            let png = store::png_with_text(&png, &[("parameters", &params), ("fluent_gallery", &json!({"origin": "synthetic", "gen": &gen_info}).to_string())]);
+            let extra = json!({
+                "rights": format!("generated:{}", s.license),
+                "gen": gen_info,
                 "cost": {"usd": 0.0, "by": provider},
                 "quality": if quality > 0 { json!(quality) } else { Value::Null },
             });
             match store::ingest_bytes(&root, &db, &png, "png", &format!("gen:{album}"), &extra) {
                 Ok(sha) => {
                     phashes.push(ph);
+                    consec_reject = 0;
                     st.ingested.fetch_add(1, Relaxed);
                     push_recent(&st, true, &sha, &format!("採用 {:.0}秒{}", secs, if quality > 0 { format!(" q{quality}") } else { String::new() }));
                     ledger_mark(&mut ledger, &prompt, true);

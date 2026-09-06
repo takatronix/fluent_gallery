@@ -37,9 +37,15 @@ pub fn models_present(root: &Path) -> bool {
     let ok = |p: PathBuf, n: u64| p.metadata().map(|m| m.len() == n).unwrap_or(false);
     ok(model_path(root), MODEL_BYTES) && ok(mmproj_path(root), MMPROJ_BYTES)
 }
+/// 実際に使うポート。既定 8081 を別の実体(前のアプリ/検証用サーバ)の llama-server が使っていたら 8082.. に逃げる(start が決める)
+static CHOSEN_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+fn explicit_port() -> Option<u16> { std::env::var("FG_VLM_PORT").ok().and_then(|p| p.parse().ok()) }
 pub fn port() -> u16 {
-    std::env::var("FG_VLM_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(DEFAULT_PORT)
+    let c = CHOSEN_PORT.load(Relaxed);
+    if c != 0 { return c; }
+    explicit_port().unwrap_or(DEFAULT_PORT)
 }
+fn port_free(p: u16) -> bool { std::net::TcpListener::bind(("127.0.0.1", p)).is_ok() }
 pub fn base_url() -> String { format!("http://127.0.0.1:{}/v1", port()) }
 
 /// llama-server の在り処(優先順): FG_LLAMA_SERVER → root/engine/bin/ → 実行ファイルの隣(Tauri サイドカー)
@@ -123,31 +129,23 @@ pub async fn ensure_models(root: &Path, client: &reqwest::Client, st: &VlmState)
 }
 
 /// 子プロセスを起動して /health が通るまで待つ。親が死んだら道連れにする(sh の見張りで PPID を監視)
-/// 同じポートで生きている llama-server が自分の子でない場合(前のアプリ実体や検証用の残り)、それを使い続けると
-/// 見張り sh に数秒後に殺されて VLM が消える。コマンド行が llama-server + 同じモデル名なら「このアプリ用」とみなして止め、作り直す
-fn reap_stale_server() -> bool {
-    let out = std::process::Command::new("/usr/sbin/lsof").args(["-nP", "-ti", &format!("tcp:{}", port()), "-sTCP:LISTEN"]).output().ok();
-    let Some(out) = out else { return false };
-    let mut killed = false;
-    for pid in String::from_utf8_lossy(&out.stdout).split_whitespace().filter_map(|p| p.parse::<i32>().ok()) {
-        let cmd = std::process::Command::new("/bin/ps").args(["-o", "command=", "-p", &pid.to_string()]).output().ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
-        if cmd.contains("llama-server") && cmd.contains(MODEL_FILE) {
-            let _ = std::process::Command::new("/bin/kill").arg(pid.to_string()).status();
-            println!("👁 前の内蔵VLM(pid {pid})を止めて作り直します");
-            killed = true;
-        }
-    }
-    killed
-}
-
+/// 同じポートで別の実体(前のアプリ実体・検証用サーバ)の llama-server が生きていても、奪わない・殺さない。
+/// 奪うと相手の見張り sh に数秒後に殺されて VLM が消え、殺すと相手の VLM を消してしまう(2026-09-06 に両方踏んだ)。
+/// → 自分は空いているポート(8082..8090)で自分の子を持つ。FG_VLM_PORT 明示のときだけ、そこで生きている物を使う
 pub async fn start(root: &Path, client: &reqwest::Client, st: &VlmState) -> Result<String, String> {
-    if health(client).await {
-        let own = st.child.lock().unwrap().as_mut().map(|c| c.try_wait().ok().flatten().is_none()).unwrap_or(false);
-        if own || !reap_stale_server() { return Ok(base_url()); }
-        for _ in 0..40 { // 止まるのを待ってから同じポートで起動
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-            if !health(client).await { break; }
+    let own_alive = st.child.lock().unwrap().as_mut().map(|c| c.try_wait().ok().flatten().is_none()).unwrap_or(false);
+    if own_alive {
+        if health(client).await { return Ok(base_url()); }
+        stop(st); // 見張り sh は生きているのに応答が無い(llama-server だけ落ちた) → 作り直す
+        for _ in 0..20 { tokio::time::sleep(std::time::Duration::from_millis(250)).await; if port_free(port()) { break; } }
+    }
+    if explicit_port().is_some() {
+        if health(client).await { return Ok(base_url()); }
+    } else if !port_free(port()) {
+        let p0 = port();
+        match (DEFAULT_PORT + 1..=DEFAULT_PORT + 9).find(|p| port_free(*p)) {
+            Some(p) => { CHOSEN_PORT.store(p, Relaxed); println!("👁 :{p0} は別の実体(または他のサービス)が使用中 → 内蔵VLMは :{p} で起動します"); }
+            None => return Err(format!("内蔵VLMのポート(:{p0}〜:{}) が全部使用中です", DEFAULT_PORT + 9)),
         }
     }
     let bin = server_bin(root).ok_or_else(|| "llama-server が見つかりません(Mac: brew install llama.cpp か、.app 同梱の Resources/llama、または FG_LLAMA_SERVER=パス)".to_string())?;
@@ -159,8 +157,10 @@ pub async fn start(root: &Path, client: &reqwest::Client, st: &VlmState) -> Resu
         let sh = format!(
             "\"{}\" -m \"{}\" --mmproj \"{}\" -ngl 99 -c 8192 --port {} --host 127.0.0.1 -a vlm --temp 0.1 --no-webui >> \"{}\" 2>&1 & pid=$!; while kill -0 {} 2>/dev/null; do sleep 3; done; kill $pid 2>/dev/null",
             bin.display(), model_path(root).display(), mmproj_path(root).display(), port(), log.display(), parent);
+        use std::os::unix::process::CommandExt;
         let child = std::process::Command::new("/bin/sh").arg("-c").arg(sh)
             .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+            .process_group(0) // 見張り sh + llama-server を 1 グループに(stop でまとめて止める)
             .spawn().map_err(|e| format!("llama-server 起動失敗: {e}"))?;
         *st.child.lock().unwrap() = Some(child);
         for _ in 0..180 {
@@ -194,6 +194,8 @@ pub async fn ensure(root: &Path, client: &reqwest::Client, st: &VlmState) -> Res
 
 pub fn stop(st: &VlmState) {
     if let Some(mut c) = st.child.lock().unwrap().take() {
+        // 見張り sh だけ殺すと llama-server が孤児で残りポートを掴み続ける → 同じプロセスグループ(pgid=sh の pid)ごと TERM
+        let _ = std::process::Command::new("/bin/kill").args(["-TERM", "--", &format!("-{}", c.id())]).status();
         let _ = c.kill();
         let _ = c.wait();
     }

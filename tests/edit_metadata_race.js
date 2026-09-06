@@ -147,7 +147,7 @@ async function withDelayedClassification(sha, run, batch = false) {
     const pushed = await api('/api/edits/' + first.sha,
       {action: 'push', edit: {op: 'auto', params: {}}}, 'PUT');
     assert.equal(pushed.edits.length, 1); assert.equal(pushed.edits[0].op, 'auto');
-    assert.equal(pushed.edits[0].params.version, 2);
+    assert.equal(pushed.edits[0].params.version, 3);
     return pushed;
   });
   passed('delayed single-image VLM preserves auto history, revision, grid index and classification');

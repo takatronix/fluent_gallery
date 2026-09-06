@@ -631,11 +631,12 @@ pub fn validate(value: &Value) -> Result<Value, String> {
             }
             "auto" => {
                 allowed_keys(params, &["version"])?;
-                // Distinguish corrected auto rendering from previously baked cache results.
-                if params.get("version").is_some_and(|v| v != 2) {
+                // New instructions use the current recipe; explicit historical versions
+                // retain their rendering behavior and baked-image cache identity.
+                if params.get("version").is_some_and(|v| v != 2 && v != crate::edits::AUTO_VERSION) {
                     return Err("未対応の自動補正バージョンです".into());
                 }
-                out.insert("version".into(), json!(2));
+                out.insert("version".into(), params.get("version").cloned().unwrap_or_else(|| json!(crate::edits::AUTO_VERSION)));
             }
             _ => return Err(format!("未対応の操作: {op}")),
         }
@@ -804,6 +805,21 @@ mod tests {
             &json!({"op":"pipeline","params":{"edits":vec![json!({"op":"auto","params":{}});9]}})
         )
         .is_err());
+    }
+
+    #[test]
+    fn auto_recipe_defaults_to_current_version_and_preserves_legacy_pixels() {
+        let parsed = parse("自動補正して").unwrap();
+        assert_eq!(parsed["params"]["edits"][0]["params"]["version"], crate::edits::AUTO_VERSION);
+        for version in [2, crate::edits::AUTO_VERSION] {
+            let recipe = json!({"op":"pipeline","params":{"edits":[{"op":"auto","params":{"version":version}}]}});
+            let valid = validate(&recipe).unwrap();
+            assert_eq!(valid["params"]["edits"][0]["params"]["version"], version);
+            assert_eq!(validate(&valid).unwrap(), valid);
+        }
+        for version in [json!(1), json!(999), json!("3"), Value::Null] {
+            assert!(validate(&json!({"op":"pipeline","params":{"edits":[{"op":"auto","params":{"version":version}}]}})).is_err());
+        }
     }
 
     #[test]
