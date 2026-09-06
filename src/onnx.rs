@@ -108,7 +108,7 @@ fn text(root: &Path) -> Option<&'static (Mutex<ort::session::Session>, tokenizer
         let built = (|| -> Result<_, String> {
             let tok = tokenizers::Tokenizer::from_file(tok_path(&root)).map_err(|e| e.to_string())?;
             let b = ort::session::Session::builder().map_err(|e| e.to_string())?;
-            let mut b = b.with_intra_threads(2).map_err(|e| e.to_string())?;
+            let mut b = b.with_intra_threads(crate::ep::threads()).map_err(|e| e.to_string())?;
             let s = b.commit_from_file(text_path(&root)).map_err(|e| e.to_string())?;
             Ok((Mutex::new(s), tok))
         })();
@@ -151,7 +151,7 @@ fn clip(root: &Path) -> Option<&'static Mutex<ort::session::Session>> {
         // スレッド2本に制限: 既定(全コア)だと起動直後のバックフィルでUIまで重くなる(2026-09-03実害)
         let built = (|| -> Result<ort::session::Session, String> {
             let b = ort::session::Session::builder().map_err(|e| e.to_string())?;
-            let mut b = b.with_intra_threads(2).map_err(|e| e.to_string())?;
+            let mut b = b.with_intra_threads(crate::ep::threads()).map_err(|e| e.to_string())?;
             b.commit_from_file(&p).map_err(|e| e.to_string())
         })();
         match built {

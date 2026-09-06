@@ -89,7 +89,9 @@ fn sess(root: &Path) -> Option<&'static Mutex<ort::session::Session>> {
     SESS.get_or_init(move || {
         // int8 は CUDA で動かない(ConvInteger 未実装)し、fp16 にしても速度は横ばいだった。
         // GPU に載せる価値が無いので CPU 固定にしている(docs/model-placement-design.md)
-        let built = crate::ep::build(&p, 4, false, "grounding-dino");
+        // int8 は CUDA でも CoreML でも載らない(CUDA=ConvInteger未実装 /
+        // CoreML=量子化ノード×テキスト側の動的次元で全滅)。両OSとも CPU 固定が最適
+        let built = crate::ep::build(&p, crate::ep::threads(), false, "grounding-dino");
         match built {
             Ok(s) => { println!("🔎 grounding-dino 読込OK"); Some(Mutex::new(s)) }
             Err(e) => { println!("⚠ grounding-dino 読込失敗({e})"); None }

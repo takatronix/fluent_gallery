@@ -8,6 +8,13 @@
 
 use std::path::Path;
 
+/// CPU で走らせるときのスレッド数。4固定だと 20コア級の機械で損をする
+/// (Mac 実測: SAM2 が 4スレッド 0.99秒 → 全スレッド 0.71秒)。
+/// ただし全部使うと収集中に UI まで重くなるので、半分だけ使う(最低2・最大16)
+pub fn threads() -> usize {
+    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).div_ceil(2).clamp(2, 16)
+}
+
 /// この版で GPU に載せられるか(ビルド時のフィーチャで決まる)
 pub fn gpu_available() -> bool {
     cfg!(feature = "cuda") || cfg!(feature = "metal")
@@ -20,13 +27,34 @@ pub fn gpu_label() -> &'static str {
 
 /// セッションを1本作る。gpu=true でも載せられなければ CPU に落ちる(落ちても動く方を優先)
 pub fn build(path: &Path, threads: usize, gpu: bool, what: &str) -> Result<ort::session::Session, String> {
+    build_cached(path, threads, gpu, what, None)
+}
+
+/// cache_dir は CoreML のコンパイル結果の置き場(Mac のみ意味がある。初回40秒→2回目7.7秒)
+pub fn build_cached(path: &Path, threads: usize, gpu: bool, what: &str, cache_dir: Option<std::path::PathBuf>) -> Result<ort::session::Session, String> {
+    let _ = &cache_dir; // CUDA ビルドでは使わない
     let mut b = ort::session::Session::builder().map_err(|e| e.to_string())?;
     if gpu && gpu_available() {
         let eps: Vec<ort::ep::ExecutionProviderDispatch> = {
             #[cfg(feature = "cuda")]
             { vec![ort::ep::CUDA::default().build().error_on_failure()] }
+            // CoreML は既定(NeuralNetwork形式)だと速くならない。M3 Ultra 実測で
+            // CPU 0.71秒 → NeuralNetwork 0.88秒(遅い) → MLProgram 0.060秒(12倍)。
+            // 初回コンパイルが40秒かかるので、キャッシュ置き場を渡して2回目以降 7.7秒にする。
+            // ComputeUnits::All が最速(ANE単体 0.276秒 は GPU 0.060秒 より遅い)
             #[cfg(all(feature = "metal", not(feature = "cuda")))]
-            { vec![ort::ep::CoreML::default().build().error_on_failure()] }
+            {
+                use ort::ep::coreml::{ComputeUnits, ModelFormat};
+                let mut ep = ort::ep::CoreML::default()
+                    .with_model_format(ModelFormat::MLProgram)
+                    .with_compute_units(ComputeUnits::All)
+                    .with_static_input_shapes(true);
+                if let Some(dir) = cache_dir {
+                    let _ = std::fs::create_dir_all(&dir);
+                    ep = ep.with_arbitrary_config("ModelCacheDirectory", &dir.display().to_string());
+                }
+                vec![ep.build().error_on_failure()]
+            }
             #[cfg(not(any(feature = "cuda", feature = "metal")))]
             { vec![] }
         };

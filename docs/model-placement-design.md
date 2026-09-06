@@ -110,17 +110,87 @@ systemd)ごとに面倒を見ると漏れるので、**`engine/cuda/lib` があ�
 | マスク(クリック1回) | 0.95秒/枚 | **0.057秒/枚(16.7倍)** |
 | 言葉で自動マスク(DINO CPU + SAM2 GPU) | 3.5秒/枚 | **2.35秒/枚** |
 
-自動マスクが1.5倍止まりなのは、残り時間のほとんどが CPU 固定の DINO(1.9秒)だから。**次に効くのはそこ**。
+### スレッド数を機械に合わせる
 
-## 5. Mac 側の未確定(調査依頼中)
+CPU 実行のスレッドは 4 固定だったが、それだと 20 コア級の機械で損をする
+(Mac 実測: SAM2 が 4スレッド 0.99秒 → 全スレッド 0.71秒)。かといって全部使うと収集中に UI が重くなるので
+**コア数の半分(最低2・最大16)**にした。CPU 固定の GroundingDINO がこれで速くなる。
 
-1. ort 2.0.0-rc.13 で CoreML EP が使えるか。フィーチャ名と Session への渡し方
-2. SAM2 / DINO int8 の CPU vs CoreML の実測。**int8 が CoreML で動くか**
-3. 統合メモリで「余白」に相当する指標(sudo 無しで取れるか)
-4. CoreML 以外の選択肢(MPS / ANE)の有無
-5. 生成(sd.cpp Metal)と ONNX のメモリ競合が Mac でも起きるか
+### 最終的な実測(4090、端から端。GPU=SAM2のみ・DINOはCPU)
 
-この5つが埋まったら §1 の「余白」と §2 の行列の Mac 列を確定させ、実装に入る。
+| | 着手前 | 現在 |
+|---|---|---|
+| マスク(クリック1回) | 0.95秒/枚 | **0.051秒/枚** |
+| 言葉で自動マスク | 3.5秒/枚 | **1.46秒/枚** |
+
+自動マスクの残りはほぼ CPU の DINO。GPU に載せる道が両OSとも塞がっている以上、
+ここから先はスレッド数か、より小さい検出器に替えるかしかない。
+
+## 5. Mac 側の事実(M3 Ultra / macOS 26.6.2 で実測、2026-09-06)
+
+### 5.1 SAM2 は Mac でも大勝ちする。ただし **MLProgram 形式が必須**
+
+| 構成 | 1枚 | 初回ロード |
+|---|---|---|
+| CPU 4スレッド(旧アプリ設定) | 0.99秒 | 0.08秒 |
+| CPU 全28スレッド | 0.71秒 | 0.08秒 |
+| CoreML **NeuralNetwork**(既定) | 0.88秒 | 5.6秒 | ← **速くならない**(70分割される) |
+| CoreML **MLProgram** ALL | **0.060秒** | 40.8秒(冷) / **7.7秒**(温) |
+| CoreML MLProgram CPU+ANE | 0.276秒 | 27秒 | ← ANE は GPU より遅い |
+
+- 出力は CPU と **cos=1.000000 / 相対誤差 1e-6** で一致。速いだけで壊れていない。
+- **既定のまま CoreML を有効にしても遅くなるだけ**。`ModelFormat::MLProgram` + `ComputeUnits::All` が要る。
+- 初回コンパイル 40 秒は `ModelCacheDirectory` を渡せば 2 回目以降 7.7 秒。**プロセスを跨いで残る**。
+
+### 5.2 GroundingDINO は **両OSとも CPU 固定**が結論
+
+| | 結果 |
+|---|---|
+| CUDA | ✗ `ConvInteger` 未実装 |
+| CoreML NeuralNetwork | ✗ セッション生成失敗(`Invalid blob shape`) |
+| CoreML MLProgram | ✗ 実行失敗(`_output_quantized has unbounded dimension`) |
+| CPU(全スレッド) | ✓ **0.61秒** |
+
+CUDA と CoreML で**原因は別だが結末は同じ**。CoreML 側は「量子化ノード × テキスト側の動的次元」が
+扱えない。非量子化ノードでも Pad で壊れており、**GDINO の動的テキスト入力自体が CoreML と相性最悪**。
+fp16 版なら通る可能性はあるが、CUDA では fp16 でも CPU int8 と同速だったので追う価値が薄い。
+
+### 5.3 統合メモリに「VRAMバー」の対応物は無い
+
+M3 Ultra は VRAM/RAM の区別が無く、4090 の「24GB の壁」に当たる物が存在しない。
+**すべて sudo 無しで取れる**代替:
+
+| 見せる物 | 取り方 |
+|---|---|
+| メモリ圧(緑/黄/赤) | `sysctl kern.memorystatus_vm_pressure_level`(1=正常/2=警告/4=危険) |
+| 総容量 | `sysctl hw.memsize` |
+| 内訳 | `vm_stat`(page=16384B) |
+| スワップ | `sysctl vm.swapusage` |
+| GPU使用率 / GPUが今掴んでいる量 | `ioreg -r -d1 -c IOAccelerator` の `Device Utilization %` / `In use system memory` |
+
+`powermetrics` は sudo が要るので常時表示には使わない。
+`In use system memory` は**上限ではない**ので「いま GPU が N GB 保持中」と書く。
+実質の天井は GPU wired limit(既定 ≒ RAM の 70%)で、超えるとスワップ・圧縮として現れる。
+
+### 5.4 競合の壊れ方が OS で違う
+
+4090 は 7.8GB + 8.7GB で **24GB の壁**に当たり `cublasCreate` が失敗した。
+Mac は 256GB あるため、`sd-cli` 20.4GB + `llama-server` 4.4GB + GPU 保持 34GB が同時稼働しても落ちない。
+**Mac で起きるのはクラッシュではなく、GPU の時分割とメモリ帯域の取り合いによる「両方遅くなる」現象。**
+
+→ **同じ「予算チェック」でも意味が違う。** 4090 では落とさないための強制。Mac では速度のための遠慮。
+UI の文言もそう分ける(「載りません」と「いま載せると両方遅くなります」)。
+
+## 5.5 確定した置き場の行列
+
+| | CPU | CUDA | CoreML |
+|---|---|---|---|
+| **SAM2 encoder** | 0.71秒(Mac) / 1.57秒(4090) | **0.028秒** | **0.060秒**(MLProgram必須・初回7.7秒) |
+| **GroundingDINO int8** | **0.61秒(Mac) / 1.9秒(4090)** | ✗ ConvInteger 未実装 | ✗ 量子化×動的次元 |
+| **CLIP vision** | 数十ms | (不要) | ✗ コンパイル代に見合わない |
+| **生成 klein** | ✗ 実用外 | 6.1秒/枚 | (sd.cpp Metal・ORT外) |
+
+**GPU に載せるのは SAM2 だけ。** これが両OS共通の結論。
 
 ## 6. 実装の順(4090側が担当)
 

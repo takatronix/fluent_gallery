@@ -88,7 +88,8 @@ fn session(cell: &'static OnceLock<Option<Mutex<ort::session::Session>>>, p: Pat
     cell.get_or_init(move || {
         // CLIP と同じくスレッドは絞る(既定=全コアだと収集中に UI まで重くなる)
         // SAM2 は GPU の効きが桁違い(4090実測 1.568秒 → 0.028秒)。既定で載せにいく
-        let built = crate::ep::build(&p, 4, crate::ep::gpu_available(), &what);
+        let built = crate::ep::build_cached(&p, crate::ep::threads(), crate::ep::gpu_available(), &what,
+                                            p.parent().map(|d| d.join("../coreml-cache")));
         match built {
             Ok(s) => { println!("✂ {what} 読込OK"); Some(Mutex::new(s)) }
             Err(e) => { println!("⚠ {what} 読込失敗({e}) — マスクは無効"); None }
