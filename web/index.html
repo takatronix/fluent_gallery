@@ -95,6 +95,8 @@
   .chip:hover { color:var(--tx); border-color:#3a3d4a; }
   .chip.on { color:var(--tx); border-color:var(--acc); background:var(--acc-soft); }
   .chip small { opacity:.6; margin-left:3px; }
+  .pbar { display:flex; height:12px; border-radius:6px; overflow:hidden; background:#2a2d38; margin:2px 0 8px; }
+  .pbar > div { transition:width .3s; }
   .settabs { display:flex; gap:6px; flex-wrap:wrap; margin:2px 0 14px; }
   .settabs .chip { font-size:12px; padding:5px 14px; cursor:pointer; }
   .sub { font-size:11.5px; color:var(--faint); }
@@ -1627,6 +1629,10 @@ async function renderSettings() {
       ${keyRow('civitai', 'Civitai (LoRA取り込み)', 'civitai')}
     </div>
 
+    <div class="setsec" data-tab="ai"><h3>置き場(どのモデルがどこで動いているか)</h3>
+      <div id="placement"><div class="hint">読み込み中…</div></div>
+    </div>
+
     <div class="setsec" data-tab="ai"><h3>モデル(内蔵AI)</h3>
       <div class="hint">置き場: ${esc(S.root)}/engine/models · 取得は初回だけ。生成は 3 ファイルで 7.1GB。</div>
       ${model('LLM(計画・自然言語検索)', A.llm, 'llm', '2.4GB')}
@@ -1671,6 +1677,50 @@ async function renderSettings() {
     </div>
   </div>`;
   pickSetTab(setTab); // 開いていたタブだけ見せる(回帰テストが数える .setsec は消さずに隠す)
+  renderPlacement();
+}
+// 置き場: いま何がどこで動いていて、あと何を置けるか。
+// 「余白」の意味だけが OS で割れる(CUDA=VRAMに固い上限 / Mac=統合メモリで上限は無いが遅くなる)
+async function renderPlacement() {
+  const el = document.getElementById('placement'); if (!el) return;
+  let p; try { p = await j('/api/ai/placement'); } catch (e) { el.innerHTML = `<div class="hint">取得できません(${esc(e.message)})</div>`; return; }
+  const b = p.budget || {}, hard = b.hard_limit;
+  const mb = v => v == null ? '—' : (v >= 1024 ? (v / 1024).toFixed(1) + 'GB' : Math.round(v) + 'MB');
+  // 積み上げバー: このアプリのモデルを色分けし、他人が掴んでいる分と空きを並べる
+  const total = Number(b.total_mb) || 0;
+  const used = hard ? (Number(b.used_mb) || 0) : (Number(b.gpu_holding_mb) || 0);
+  const mine = (p.residents || []).filter(r => r.is_me).reduce((a, r) => a + (Number(r.mb) || 0), 0);
+  const others = Math.max(0, used - mine);
+  const seg = (w, color, title) => w <= 0 ? '' : `<div title="${esc(title)}" style="width:${(100 * w / (total || 1)).toFixed(1)}%; background:${color}"></div>`;
+  const bar = total ? `
+    <div class="pbar">
+      ${seg(mine, 'var(--acc)', 'このアプリのモデル ' + mb(mine))}
+      ${seg(others, '#7a6cf0', '他のプロセス ' + mb(others))}
+      ${seg(Math.max(0, total - used), '#2a2d38', '空き ' + mb(total - used))}
+    </div>
+    <div class="hint">${esc(b.unit || '')} ${mb(used)} / ${mb(total)}${b.gpu_util != null ? ` · GPU使用率 ${b.gpu_util}%` : ''}${
+      b.pressure != null ? ` · メモリ圧 ${{1: '正常', 2: '警告', 4: '危険'}[b.pressure] || b.pressure}` : ''}</div>` : '';
+  const where = m => {
+    if (m.where === 'remote') return `<span class="ok">別マシン</span>`;
+    if (m.where === 'gpu') return `<span class="ok">${esc(p.backend?.name || 'GPU')}</span>`;
+    return `<span class="note">CPU</span>`;
+  };
+  const rows = (p.models || []).map(m => `<div class="setrow">
+      <span class="lbl">${esc(m.label)}${m.present === false ? ' <span class="ng" style="font-size:10px">未取得</span>' : ''}</span>
+      <span style="width:74px">${where(m)}</span>
+      <span style="width:104px; font-size:11.5px; color:var(--dim)">${mb(m.mem_mb)}${
+        m.loaded === true ? ' <span class="ok" style="font-size:10px">常駐中</span>'
+        : m.loaded === false ? ' <span style="font-size:10px; color:var(--faint)">待機</span>' : ''}</span>
+      <span style="width:96px; font-size:11.5px; color:var(--dim)">${m.secs != null ? m.secs + '秒' : '—'}${
+        m.secs_note ? `<br><span style="font-size:10px; color:var(--faint)">${esc(m.secs_note)}</span>` : ''}</span>
+      <span style="flex:1; font-size:11px; color:var(--faint)">${esc(m.why_not || m.gain || '')}</span>
+    </div>`).join('');
+  const res = (p.residents || []).length
+    ? `<div class="hint" style="margin-top:8px">GPUを掴んでいるプロセス: ${p.residents.map(r =>
+        `${esc(r.name)} ${mb(r.mb)}${r.is_me ? '(このアプリ)' : ''}`).join(' · ')}</div>` : '';
+  el.innerHTML = bar + rows + res +
+    `<div class="hint" style="margin-top:6px">${esc(b.note || '')}${
+      p.backend?.gpu ? '' : ' · この版はGPU無しでビルドされています'} · CPUは${p.backend?.threads}スレッド</div>`;
 }
 function getPath(o, p) { return p.split('.').reduce((a, k) => (a == null ? undefined : a[k]), o); }
 async function setSetting(el) {

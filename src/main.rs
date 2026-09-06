@@ -2419,29 +2419,82 @@ async fn api_ai_placement(State(app): S) -> Json<Value> {
     let sys = sys_stats();
     let g = gen::engine_status(&app.root, &app.gen);
     let ext = gen::external_base();
+    let gpu_ok = ep::gpu_available();
+    let gpu_name = ep::gpu_label();
+    // 置き場・専有・速度は docs/model-placement-design.md の実測。測っていない所は null にする(推定値を数字で出さない)
     let models = json!([
-        {"id": "gen", "label": "生成(画像を作る)", "model": g["model"], "present": g["present"],
-         "where": if ext.is_some() { "remote" } else { "gpu" }, "remote": ext,
-         "mem_mb": g["size_mb"], "secs": 6.1, "secs_note": "1024²/4steps(tiling時)",
-         "gpu_gain": "GPU必須(CPUでは実用外)", "movable": false},
-        {"id": "vlm", "label": "目利き・属性付け(VLM)", "model": "qwen2.5vl:7b", "present": true,
-         "where": "gpu", "mem_mb": 8758, "secs": null, "secs_note": "ollama が常駐",
-         "gpu_gain": "GPU必須", "movable": false},
-        {"id": "sam", "label": "マスク(SAM2)", "model": "sam2-hiera-tiny", "present": sam::present(&app.root),
-         "where": "cpu", "mem_mb": 512, "secs": 1.57, "secs_note": "encode 1枚",
-         "gpu_gain": "GPUなら0.028秒(56倍)", "movable": true},
-        {"id": "dino", "label": "言葉で探す(検出)", "model": "grounding-dino-tiny(int8)", "present": dino::present(&app.root),
-         "where": "cpu", "mem_mb": 900, "secs": 1.9, "secs_note": "1枚",
-         "gpu_gain": "GPUでも1.87秒(int8はCUDA不可・fp16で横ばい)", "movable": false},
-        {"id": "clip", "label": "似た画像・意味検索(CLIP)", "model": "clip-vit-base-patch32", "present": onnx::status(&app.root)["present"],
-         "where": "cpu", "mem_mb": 600, "secs": null, "secs_note": null,
-         "gpu_gain": null, "movable": false},
+        {"id": "gen", "label": "画像を作る", "model": g["model"], "present": g["present"],
+         "where": if ext.is_some() { "remote" } else { "gpu" }, "remote": ext, "loaded": g["running"].as_bool().unwrap_or(false),
+         "mem_mb": g["size_mb"], "secs": 6.1, "secs_note": "1024²/4steps",
+         "can_cpu": false, "why_not": "CPUでは実用にならない速度"},
+        {"id": "vlm", "label": "目利き・属性付け", "model": "qwen2.5vl:7b", "present": true,
+         "where": "gpu", "mem_mb": 8758, "secs": Value::Null, "secs_note": "常駐",
+         "can_cpu": false, "why_not": "CPUでは実用にならない速度"},
+        {"id": "sam", "label": "マスクを切る", "model": "sam2-hiera-tiny", "present": sam::present(&app.root), "loaded": sam::loaded(),
+         "where": if gpu_ok { "gpu" } else { "cpu" }, "mem_mb": if gpu_ok { 2600 } else { 512 },
+         "secs": if gpu_ok { json!(0.051) } else { json!(0.95) }, "secs_note": "1枚(端から端)",
+         "can_gpu": true, "gain": "GPUで約17倍",
+         "why_not": if gpu_ok { Value::Null } else { json!(format!("この版は {gpu_name} 無しでビルドされています")) }},
+        {"id": "dino", "label": "言葉で探す", "model": "grounding-dino-tiny(int8)", "present": dino::present(&app.root), "loaded": dino::loaded(),
+         "where": "cpu", "mem_mb": 900, "secs": 1.4, "secs_note": "1枚",
+         "can_gpu": false,
+         "why_not": "量子化した重みはCUDAでもCoreMLでも動かない(fp16にしても速度は変わらなかった)"},
+        {"id": "clip", "label": "似た画像・意味検索", "model": "clip-vit-base-patch32",
+         "present": onnx::status(&app.root)["present"],
+         "where": "cpu", "mem_mb": 600, "secs": Value::Null, "secs_note": "数十ms",
+         "can_gpu": false, "why_not": "元々速く、GPUに載せる手間に見合わない"},
     ]);
     Json(json!({
-        "gpu": sys["gpu"], "ram": sys["ram"], "residents": gpu_residents(),
+        "backend": {"gpu": gpu_ok, "name": gpu_name, "threads": ep::threads()},
+        "budget": memory_budget(&sys),
+        "residents": gpu_residents(),
         "models": models,
-        "note": "ORT(ONNX側)は今すべてCPU実行。GPUのVRAMは生成とVLMが使っている",
     }))
+}
+
+/// 「あとどれだけ置けるか」。この意味だけが OS で割れる(docs/model-placement-design.md §1)。
+/// Linux/CUDA は VRAM に固い上限があり、超えると落ちる。
+/// Mac は統合メモリで上限が無い代わりに、圧力が上がってスワップし「全部遅くなる」
+fn memory_budget(sys: &Value) -> Value {
+    #[cfg(target_os = "macos")]
+    {
+        let sysctl = |k: &str| -> Option<String> {
+            let o = std::process::Command::new("sysctl").args(["-n", k]).output().ok()?;
+            Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+        };
+        // 1=正常 / 2=警告 / 4=危険。sudo は要らない
+        let pressure = sysctl("kern.memorystatus_vm_pressure_level").and_then(|v| v.parse::<u64>().ok());
+        let total_mb = sysctl("hw.memsize").and_then(|v| v.parse::<u64>().ok()).map(|b| b >> 20);
+        // GPU がいま掴んでいる量と忙しさ(Activity Monitor の GPU タブと同じ出どころ)
+        let (gpu_mb, gpu_util) = std::process::Command::new("ioreg")
+            .args(["-r", "-d1", "-c", "IOAccelerator"]).output().ok()
+            .map(|o| {
+                let t = String::from_utf8_lossy(&o.stdout).to_string();
+                let pick = |key: &str| t.split(key).nth(1)
+                    .and_then(|s| s.split(|c: char| !c.is_ascii_digit()).find(|x| !x.is_empty()))
+                    .and_then(|x| x.parse::<u64>().ok());
+                (pick("\"In use system memory\"").map(|b| b >> 20), pick("\"Device Utilization %\""))
+            }).unwrap_or((None, None));
+        return json!({
+            "kind": "unified", "unit": "統合メモリ",
+            "total_mb": total_mb, "gpu_holding_mb": gpu_mb, "gpu_util": gpu_util,
+            "pressure": pressure,
+            "hard_limit": false,
+            "note": "統合メモリなので固い上限は無い。載せ過ぎると落ちる代わりに全部が遅くなる",
+        });
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let g = &sys["gpu"];
+        json!({
+            "kind": "vram", "unit": "VRAM",
+            "total_mb": g["vram_total_mb"], "used_mb": g["vram_used_mb"],
+            "free_mb": g["vram_total_mb"].as_f64().zip(g["vram_used_mb"].as_f64()).map(|(t, u)| t - u),
+            "gpu_util": g["util"],
+            "hard_limit": true,
+            "note": "VRAM を超えると生成が落ちる",
+        })
+    }
 }
 
 /// 「言葉で探す」の重み(204MB)を取りに行く
