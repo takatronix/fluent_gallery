@@ -5,10 +5,10 @@
 #   bash mac/build_mac.sh --store              # ストア提出版(顔IDなし・YouTube/X拒否・COCOはCC BY系のみ)。既定はフル機能
 #   bash mac/build_mac.sh --no-test            # 回帰テストを飛ばす
 #   bash mac/build_mac.sh --plain              # Tauri殻なし(素のバイナリ+ブラウザ起動の仮.app)
-#   SIGN="Developer ID Application: Your Name (TEAMID)" NOTARY_PROFILE=fg bash mac/build_mac.sh
+#   SIGN="Developer ID Application: Your Name (TEAMID)" NOTARY_PROFILE=fluent bash mac/build_mac.sh
 #       署名(束の中の llama/sd の dylib と実行ファイルも全部)→ dmg → 公証 → staple。Tauri/plain 共通。
 #       事前: developer.apple.com で Developer ID Application 証明書を作ってキーチェーンへ、
-#             xcrun notarytool store-credentials fg --apple-id <Apple ID> --team-id <TEAMID> --password <App用パスワード>
+#             xcrun notarytool store-credentials fluent --apple-id <Apple ID> --team-id <TEAMID> --password <App用パスワード>
 #   SIGN=-  は構造確認(ad-hoc、公証なし)
 #   BUNDLE_ID=com.example.fluentgallery        # 既定 com.takatronix.fluentgallery
 set -euo pipefail
@@ -130,7 +130,7 @@ if [ "$PLAIN" = 0 ]; then
   if [ -n "${SIGN:-}" ] && [ "$SIGN" != "-" ] && [ -n "${NOTARY_PROFILE:-}" ]; then
     step "notarize ($NOTARY_PROFILE)"; notarize_dmg "$APP" "$DMG" "$SIGN" "$NOTARY_PROFILE" || { echo "公証失敗(xcrun notarytool log <id> --keychain-profile $NOTARY_PROFILE で理由を見る)"; exit 1; }
   elif [ -n "${SIGN:-}" ]; then
-    echo "(NOTARY_PROFILE 未指定: 公証なし。xcrun notarytool store-credentials fg --apple-id … --team-id … --password <app用パスワード> で登録して NOTARY_PROFILE=fg)"
+    echo "(NOTARY_PROFILE 未指定: 公証なし。xcrun notarytool store-credentials fluent --apple-id … --team-id … --password <app用パスワード> で登録して NOTARY_PROFILE=fluent)"
   fi
   step "完了"
   ls -lh "$APP/Contents/MacOS/"* "$DMG" | awk '{print $5, $9}'
