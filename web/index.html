@@ -164,10 +164,13 @@
   /* 種別アイコンの色(収集=青 / 生成=紫)と、動作中の行(脈打つ点+行の淡い光) docs/gen-design.md §3.2 */
   .kic { display:flex; align-items:center; flex:none; }
   .kic.crawl { color:#7fa7e0; } .kic.gen { color:#b48cff; }
-  .nav.running { background:linear-gradient(90deg, transparent 0%, #6ee7a014 50%, transparent 100%); background-size:200% 100%; animation:navglow 6s linear infinite; }
+  /* 仕事中の行: 流れる光+左の緑バー+種別アイコンの脈動。「動いてる」が一目で分かる強さに(2026-09-06要望) */
+  .nav.running { background:linear-gradient(90deg, transparent 0%, #6ee7a028 50%, transparent 100%); background-size:200% 100%; animation:navglow 2.4s linear infinite; box-shadow:inset 2px 0 0 var(--ok); }
   @keyframes navglow { from { background-position:200% 0; } to { background-position:-200% 0; } }
   .nav .st.live svg { animation:pulse 1.2s ease infinite; }
-  @media (prefers-reduced-motion: reduce) { .nav.running { animation:none; } .nav .st.live svg { animation:none; } }
+  .nav.running .kic svg { animation:workpulse 1.6s ease infinite; }
+  @keyframes workpulse { 50% { transform:scale(1.3); opacity:.7; } }
+  @media (prefers-reduced-motion: reduce) { .nav.running { animation:none; } .nav .st.live svg, .nav.running .kic svg { animation:none; } }
   /* 設定ページ(docs/gen-design.md §8.1): 節ごとのカード、行ごとに自動保存 */
   #grid.page { display:block; }  /* 設定/棚ページはサムネのグリッドではなく普通の文書として流す */
   .lgrid { display:grid; grid-template-columns:repeat(auto-fill, minmax(230px, 1fr)); gap:14px; }
@@ -1037,7 +1040,7 @@ function renderSide() {
         : !a.agent?.auto ? ''
         : (a.count ?? 0) >= (a.agent?.target || 200)
           ? `<span class="st" style="opacity:.45" title="自動: 目標 ${a.agent?.target || 200} 枚に達したので休止中(『まで』を上げるか +200 で再開)">${ic('check', 11)}</span>`
-          : `<span class="st" title="自動${a.kind === 'gen' ? '生成' : '収集'}: 30分ごとに見回り、あと ${(a.agent?.target || 200) - (a.count ?? 0)} 枚を補充">${ic('loop', 11)}</span>`}
+          : `<span class="st" title="自動${a.kind === 'gen' ? '生成' : '収集'}: あと ${(a.agent?.target || 200) - (a.count ?? 0)} 枚を補充${apInfo?.next_at ? ` — 次の見回りまで約${Math.max(0, Math.round((apInfo.next_at * 1000 - Date.now()) / 60000))}分` : '(30分ごとに見回り)'}">${ic('loop', 11)}</span>`}
       <span class="n">${(a.agent?.spent_usd || 0) > 0
         ? `${a.count ?? 0} · <span style="color:#e5c07b; cursor:pointer" onclick="cycleCostMode(event)"
              title="このフォルダの累計消費(クリックで トークン/$/¥ 切替)">${fmtCost(a.agent?.spent_tok, a.agent.spent_usd)}</span>`
@@ -2229,13 +2232,16 @@ async function runGenNow() {
   const a = albumsCache.find(x => x.name === loc.key); if (!a) return;
   const batch = a.agent?.batch || 30;
   const n = Math.max(1, Math.min(batch, Math.max(batch, (a.agent?.target || 200) - (a.count || 0))));
+  const btn = document.querySelector('#viewhead button[onclick="runGenNow()"]');
+  if (btn) { btn.disabled = true; btn.innerHTML = `${ic('play', 12)} 動き出しました…`; }
   try {
     const r = await j('/api/gen', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({album: loc.key, n})});
+    if (!r.queued) optimisticRun = {name: loc.key, kind: 'gen', until: Date.now() + 30000};
     if (r.queued) toast(`順番待ちに入れました(${r.position}番目) — いま「${r.now || ''}」を生成中。終わり次第自動で始まります`);
     else toast(r.dropped_lora?.length ? `生成開始(+${n}枚目標) — 親モデル違いの LoRA を外しました: ${r.dropped_lora.join(', ')}` : `生成開始(+${n}枚目標) — 初回はモデル取得とエンジン起動で数分かかります`);
     await loadAlbums(); renderViewhead();
-  } catch (e) { toast('❌ ' + e.message); }
+  } catch (e) { toast('❌ ' + e.message); renderViewhead(); }
 }
 async function cancelGenQueue(name) {
   try { await j('/api/gen/queue/' + encodeURIComponent(name), {method: 'DELETE'}); toast('順番待ちから外しました'); await loadAlbums(); renderViewhead(); }
@@ -2273,6 +2279,7 @@ function folderHeadHtml(a, isNew) {
         ? `<button class="pri" onclick="stopCrawlHead()" title="この収集を止める(順番待ちがあれば5秒で次が始まります)">${ic('stop', 12)} 収集を止める</button>`
         : `<button class="pri" onclick="runCrawlNow()" ${!a.goal ? 'disabled style="opacity:.5"' : ''}
         title="その場で1回だけ収集。()内は推定コスト: 目標枚数÷採用率(実績)×目利き単価で概算">${ic('play', 12)} 今すぐ1回集める <span style="opacity:.75; font-weight:400">${crawlCostEst(a)}</span></button>`}
+      ${a.queued && !a.running ? `<span class="engchip on" style="cursor:default" title="いまの収集が終わり次第、自動で始まります">${ic('clock', 12)} 順番待ち ${a.queued}番目</span>` : ''}
       <span class="switch ${a.agent?.boost ? 'on' : ''}" onclick="toggleBoostHead()"
         title="有料AIがクエリ生成と目利きを担当。判定も並列で速い。目利きモデルは設定欄のAI配役で選択(標準=OpenRouter Qwen72B 約0.05円/枚)。
 【使い分けの目安】
@@ -2554,13 +2561,17 @@ async function runCrawlNow() {
   const a = albumsCache.find(x => x.name === loc.key); if (!a) return;
   const batch = a.agent?.batch || 30;
   const n = Math.max(1, Math.min(batch, Math.max(batch, (a.agent?.target || 200) - (a.count || 0))));
+  // 押した瞬間に応える(サーバ応答を待つ間の「何も起きてない?」を無くす)
+  const btn = document.querySelector('#viewhead button[onclick="runCrawlNow()"]');
+  if (btn) { btn.disabled = true; btn.innerHTML = `${ic('play', 12)} 動き出しました…`; }
   try {
     const r = await j('/api/crawl', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({album: loc.key, n})});
+    if (!r.queued) optimisticRun = {name: loc.key, kind: 'crawl', until: Date.now() + 30000};
     toast(r.queued ? `順番待ちに入れました(${r.position}番目) — 前の収集が終わり次第自動で始まります`
                    : `収集開始(+${n}枚目標) — ゲート通過だけ収蔵されます`);
     await loadAlbums(); renderViewhead();
-  } catch (e) { toast('❌ ' + e.message); }
+  } catch (e) { toast('❌ ' + e.message); renderViewhead(); }
 }
 async function stopCrawlHead() {
   try {
@@ -2630,10 +2641,46 @@ async function delAlbum(n) {
   if (loc.type === 'folder' && loc.key === n) go({type: 'lib', key: 'all', criteria: {}});
   loadAlbums();
 }
+// 自動収集の「次はいつ動くか」を秒まで見せる(「いつ仕事が走るか全然わからない」対策 2026-09-06)。
+// apInfo は /api/activity の autopilot {interval_secs, next_at}。開いているフォルダの ah_cycle を毎秒更新
+let apInfo = null;
+function tickCycle() {
+  const el = document.getElementById('ah_cycle');
+  if (!el) return;
+  const a = loc.type === 'folder' ? albumsCache.find(x => x.name === loc.key) : null;
+  const label = a?.kind === 'gen' ? '自動生成' : '自動収集';
+  if (!a || !a.agent?.auto || a.running) { el.textContent = ''; return; }
+  if ((a.count ?? 0) >= (a.agent?.target || 200)) {
+    el.textContent = `${label}: 目標達成で休止中`;
+    el.style.color = 'var(--faint)';
+    return;
+  }
+  if (!apInfo?.next_at) {
+    el.textContent = `${label}: ${Math.round((apInfo?.interval_secs || 1800) / 60)}分ごと`;
+    return;
+  }
+  const left = Math.max(0, (apInfo.next_at * 1000 - Date.now()) / 1000);
+  const m = Math.floor(left / 60), s = Math.floor(left % 60);
+  el.textContent = `あと${m ? m + '分' : ''}${String(s).padStart(2, '0')}秒で${label}を開始します`;
+  el.style.color = 'var(--tx)';
+}
+setInterval(tickCycle, 1000);
+
+// 「今すぐ1回」を押した瞬間から動いて見せる(サーバの running 反映を待たず、押した=動き出したが見える)。
+// サーバが running/queued を返し始めたら実測に引き継ぐ。30秒で諦める(起動失敗時に嘘をつき続けない)
+let optimisticRun = null; // {name, kind, until}
+function applyOptimisticRun() {
+  if (!optimisticRun) return;
+  const a = albumsCache.find(x => x.name === optimisticRun.name);
+  if (!a || a.running || a.queued || Date.now() > optimisticRun.until) { optimisticRun = null; return; }
+  a.running = true;
+  a.running_kind = optimisticRun.kind;
+}
 async function loadAlbums() {
   try {
     const [al, gr] = await Promise.all([j('/api/albums'), j('/api/groups')]);
     albumsCache = al; groupsCache = gr;
+    applyOptimisticRun();
     renderSide();
   } catch (e) {}
 }
@@ -5445,9 +5492,9 @@ async function watchActivity() {
     // ♻自動収集: 周期と次回時刻を必ず出す(ON/OFF に関わらず「いつ動くか」が見えるように)
     const apRow = () => {
       const ap = a.autopilot || {}; const x = w.autopilot || {};
+      apInfo = ap; // フォルダ上部のカウントダウン(tickCycle)の材料
       const left = ap.next_at ? Math.max(0, Math.round((ap.next_at * 1000 - Date.now()) / 60000)) : null;
       const cyc = `${Math.round((ap.interval_secs || 1800) / 60)}分ごと` + (left != null ? ` · 次回 ${left}分後` : '');
-      const el = document.getElementById('ah_cycle'); if (el && el.textContent) el.textContent = cyc;
       return row('loop', '自動収集', !!x.on, (x.detail ? x.detail + ' · ' : '') + cyc);
     };
     const wrow = (icon, name, key) => {
