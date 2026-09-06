@@ -2387,6 +2387,56 @@ async fn api_seg_auto(State(app): S, Json(q): Json<SegAutoIn>) -> impl IntoRespo
     Json(json!({"ok": true, "masked": done, "total": total, "prompt": used})).into_response()
 }
 
+/// いま GPU を実際に掴んでいるプロセス(nvidia-smi の実測。誰が VRAM を食っているかを隠さない)
+fn gpu_residents() -> Value {
+    let out = std::process::Command::new("nvidia-smi")
+        .args(["--query-compute-apps=pid,used_memory,process_name", "--format=csv,noheader,nounits"])
+        .output();
+    let Ok(o) = out else { return json!([]) };
+    let me = std::process::id();
+    let rows: Vec<Value> = String::from_utf8_lossy(&o.stdout).lines().filter_map(|l| {
+        let mut it = l.split(',').map(|x| x.trim());
+        let pid: u32 = it.next()?.parse().ok()?;
+        let mb: u64 = it.next()?.parse().ok()?;
+        let name = it.next().unwrap_or("").to_string();
+        let short = name.rsplit('/').next().unwrap_or(&name).to_string();
+        Some(json!({"pid": pid, "mb": mb, "name": short, "is_me": pid == me}))
+    }).collect();
+    json!(rows)
+}
+
+/// 「どのモデルがどこで動いているか」。置き場・メモリ・速度を1枚にまとめる。
+/// 速度は 2026-09-06 に 4090 で測った実測値(CPU=このアプリの既定、CUDA=ORTのEP切替時)。
+/// ORT は今 CPU 実行なので、SAM2/DINO/CLIP の where は "cpu" 固定
+async fn api_ai_placement(State(app): S) -> Json<Value> {
+    let sys = sys_stats();
+    let g = gen::engine_status(&app.root, &app.gen);
+    let ext = gen::external_base();
+    let models = json!([
+        {"id": "gen", "label": "生成(画像を作る)", "model": g["model"], "present": g["present"],
+         "where": if ext.is_some() { "remote" } else { "gpu" }, "remote": ext,
+         "mem_mb": g["size_mb"], "secs": 6.1, "secs_note": "1024²/4steps(tiling時)",
+         "gpu_gain": "GPU必須(CPUでは実用外)", "movable": false},
+        {"id": "vlm", "label": "目利き・属性付け(VLM)", "model": "qwen2.5vl:7b", "present": true,
+         "where": "gpu", "mem_mb": 8758, "secs": null, "secs_note": "ollama が常駐",
+         "gpu_gain": "GPU必須", "movable": false},
+        {"id": "sam", "label": "マスク(SAM2)", "model": "sam2-hiera-tiny", "present": sam::present(&app.root),
+         "where": "cpu", "mem_mb": 512, "secs": 1.57, "secs_note": "encode 1枚",
+         "gpu_gain": "GPUなら0.028秒(56倍)", "movable": true},
+        {"id": "dino", "label": "言葉で探す(検出)", "model": "grounding-dino-tiny(int8)", "present": dino::present(&app.root),
+         "where": "cpu", "mem_mb": 900, "secs": 1.9, "secs_note": "1枚",
+         "gpu_gain": "GPUでも1.87秒(int8はCUDA不可・fp16で横ばい)", "movable": false},
+        {"id": "clip", "label": "似た画像・意味検索(CLIP)", "model": "clip-vit-base-patch32", "present": onnx::status(&app.root)["present"],
+         "where": "cpu", "mem_mb": 600, "secs": null, "secs_note": null,
+         "gpu_gain": null, "movable": false},
+    ]);
+    Json(json!({
+        "gpu": sys["gpu"], "ram": sys["ram"], "residents": gpu_residents(),
+        "models": models,
+        "note": "ORT(ONNX側)は今すべてCPU実行。GPUのVRAMは生成とVLMが使っている",
+    }))
+}
+
 /// 「言葉で探す」の重み(204MB)を取りに行く
 async fn api_dino_pull(State(app): S) -> Json<Value> {
     tokio::spawn(async move {
@@ -3929,6 +3979,7 @@ async fn main() {
         .route("/api/sam/pull", post(api_sam_pull))
         .route("/api/seg/auto", post(api_seg_auto))
         .route("/api/dino/pull", post(api_dino_pull))
+        .route("/api/ai/placement", get(api_ai_placement))
         .route("/micro/{sha1}", get(micro))
         .route("/atlas/{key}", get(atlas))
         .route("/cutout/{sha1}", get(cutout))
