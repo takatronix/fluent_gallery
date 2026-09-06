@@ -1698,8 +1698,12 @@ async function renderSettings() {
       ${row('モデル', `<select data-path="gen.model" onchange="setSetting(this)">${(G.models || []).map(m => `<option value="${m.id}" ${(C.gen?.model || G.default) === m.id ? 'selected' : ''}>${esc(m.label)}${m.present ? '' : '(未取得)'}</option>`).join('')}</select>`, 'フォルダ側で選んでいない時')}
       ${row('サイズ', `<select data-path="gen.size" onchange="setSetting(this)">${['1024x1024', '768x768', '1024x768', '768x1024', '1280x768', '768x1280'].map(s => `<option value="${s}" ${(C.gen?.size || '1024x1024') === s ? 'selected' : ''}>${s.replace('x', ' × ')}</option>`).join('')}</select>`)}
       ${(G.models || []).map(m => row(`ステップ数 — ${esc(m.label.replace(/[(（].*$/, '').trim())}`, num(`gen.model_steps.${m.id}`, 1, 50),
-        m.id === G.default ? '少なすぎるとノイズが残った絵になる。モデルごとに適正値が違う' : '')).join('')}
-      ${row('途中経過を見る', sw('gen.preview'), 'ローカル生成(sd-cli)で各ステップの途中画像を出す。1枚あたり数秒遅くなる')}
+        ({ // モデルごとに適正値が違う(蒸留モデルは少なく、非蒸留は多く)。出荷時の値と根拠を添える
+          'flux2-klein-4b': '蒸留モデル。出荷時 4(cfg 1 固定)。少なすぎるとノイズが残る',
+          'z-image-turbo': '蒸留モデル。出荷時 8(cfg 1 固定)',
+          'qwen-image-edit-2509': '非蒸留の 20B。出荷時 20(cfg 2.5・flow-shift 3 = sd.cpp の推奨)。公式カードは 40 steps・cfg 4.0 で、ここは速度優先の半分。cfg 2.5 で毎ステップ 2 回計算するので 1 枚数分。速くするなら Lightning LoRA(4〜8 steps)を棚へ',
+        })[m.id] || '')).join('')}
+      ${row('途中経過を見る', sw('gen.preview'), 'ローカル生成(sd-cli)で各ステップの途中画像を出す(ヘッダの「いま」、ホバーで拡大)。実測では時間は変わらない(M3 Ultra・klein 1024²: 4 steps 39.2→39.0 秒、20 steps 131→130 秒)')}
       ${row('VRAM 節約(offload)', `<select data-path="gen.offload" onchange="setSetting(this)">${[['auto', '自動(Linux で 12GB 超のモデルだけ)'], ['on', '常に'], ['off', '使わない']].map(([v, l]) => `<option value="${v}" ${(C.gen?.offload || 'auto') === v ? 'selected' : ''}>${l}</option>`).join('')}</select>`, '重みを RAM に置いて必要な層だけ GPU へ(sd.cpp --offload-to-cpu)。Mac の統合メモリでは不要')}
     </div>
 
