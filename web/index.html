@@ -1621,6 +1621,7 @@ async function renderSettings() {
       ${model('CLIP(似た画像・意味検索)', A.clip, 'clip', '350MB')}
       ${A.faceid?.enabled ? model('顔ID(SCRFD+ArcFace・非商用)', A.faceid, 'faceid', '288MB') : ''}
       ${model('マスク(内蔵SAM2)', A.sam, 'sam', '155MB')}
+      ${model('言葉で探す(検出・自動マスク用)', A.dino, 'dino', '204MB')}
       ${(G.models || []).map(m => `<div class="setrow"><span class="lbl">生成 ${esc(m.label.split('(')[0])}</span><span style="flex:1; font-size:11.5px; color:var(--dim)" title="${esc(m.note || '')}">${esc(m.id)} · ${(m.size_mb / 1024).toFixed(1)}GB · ${esc(m.license)}${m.refs ? ' · 参照OK' : ''}</span>${m.present ? '<span class="ok">取得済</span>' : (G.downloading && G.dl_model === m.id) ? `<span class="note">DL ${Math.round(100 * G.got_mb / (G.total_mb || 1))}%</span>` : `<button class="ghost" onclick="aiPull('gen', '${m.id}')">取得 ${(m.size_mb / 1024).toFixed(1)}GB</button>`}</div>`).join('')}
     </div>
 
@@ -1976,7 +1977,7 @@ function folderHeadHtml(a, isNew) {
                ${JUDGE_MODELS.map(([id, label]) => `<option value="${id}" ${(a.agent?.judge_model || '') === id ? 'selected' : ''}>${label}</option>`).join('')}
              </select>${aiMark('key_judge')}`
           : `クエリ生成 = 内蔵Qwen3-4B${aiMark('llm')} · 目利き = 内蔵qwen2.5vl${aiMark('vlm')}`}
-        · 属性付け = 内蔵qwen2.5vl${aiMark('vlm')} · マスク = 内蔵SAM2${aiMark('sam')} · 似た画像 = CLIP${aiMark('clip')}${caps.faceid ? ` · 顔ID = insightface${aiMark('faceid')}` : ''}
+        · 属性付け = 内蔵qwen2.5vl${aiMark('vlm')} · マスク = 内蔵SAM2${aiMark('sam')} · 言葉で探す = 内蔵DINO${aiMark('dino')} · 似た画像 = CLIP${aiMark('clip')}${caps.faceid ? ` · 顔ID = insightface${aiMark('faceid')}` : ''}
       </span>
     </div>
     <div class="frow">
@@ -1999,6 +2000,8 @@ function folderHeadHtml(a, isNew) {
       <span class="sp"></span>
       <button class="ghost" style="padding:2px 9px; font-size:11px" onclick="resetLedger()"
         title="使ったクエリ/見たURLの記録を忘れて、もう一度最初から探させる(収集が枯れた時に)">${ic('reset', 12)} 検索履歴リセット</button>
+      <button class="ghost" style="padding:2px 9px; font-size:11px" onclick="runSegAuto()"
+        title="言葉で対象を探して輪郭を切る(内蔵GroundingDINO+SAM2・完全ローカル)">${ic('smart', 12)} マスク生成</button>
 </div>` : ''}`;
 }
 
@@ -3442,6 +3445,17 @@ function segCutout() {
 // ---- マスクの削除(残っているマスクを消す。作成はしない) ----
 let segDrag = null;
 // 内蔵SAM2で切る。1枚目のクリックだけ画像の埋め込み(約1.5秒)が要り、2回目からは即返る
+// フォルダ一括の自動マスク。対象語は聞く(空ならフォルダの目標を使う)
+async function runSegAuto() {
+  const prompt = window.prompt('何を切りますか(英語のクラス語をピリオド区切りで。例: person. dog. car)\n空ならフォルダの目標をそのまま使います', 'person');
+  if (prompt === null) return;
+  toast('マスク生成中… (1枚あたり約3秒)');
+  try {
+    const r = await j('/api/seg/auto', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({album: loc.key, prompt})});
+    toast(`マスク生成おわり — ${r.masked}/${r.total}枚に「${r.prompt}」で付きました`);
+  } catch (e) { toast('❌ ' + e.message); }
+}
 async function segRefine(p) {
   const sha = items[lbIdx]?.sha1; if (!sha) return;
   toast('切り出し中…');
@@ -4617,6 +4631,7 @@ function aiMarkHtml(k) {
     case 'llm': return A.llm.present ? ok(A.llm.ready ? '常駐中' : '取得済') : A.llm.downloading ? dl(A.llm, 'llm') : ng('未取得', pull('llm', '2.4GB'));
     case 'clip': return A.clip.present ? ok('モデルあり') : A.clip.downloading ? dl(A.clip, 'clip') : ng('未取得', pull('clip', '350MB'));
     case 'sam': return A.sam?.present ? ok('モデルあり') : A.sam?.downloading ? dl(A.sam, 'sam') : ng('未取得', pull('sam', '155MB'));
+    case 'dino': return A.dino?.present ? ok('モデルあり') : A.dino?.downloading ? dl(A.dino, 'dino') : ng('未取得', pull('dino', '204MB'));
     case 'vlm': {
       const L = A.vlm.local || {};
       if (A.vlm.backend === 'llama-server') return ok('内蔵VLM 稼働中(' + (L.model || '') + ')');
@@ -4644,9 +4659,9 @@ function aiMark(k) { return `<span class="aimark" data-k="${k}">${aiMarkHtml(k)}
 function aiMarksRefresh() { document.querySelectorAll('.aimark').forEach(el => { el.innerHTML = aiMarkHtml(el.dataset.k); }); }
 async function aiPull(kind, model) {
   try {
-    await j({llm: '/api/llm/pull', clip: '/api/clip/pull', faceid: '/api/faces/pull', vlm: '/api/vlm/pull', gen: '/api/gen/pull', sam: '/api/sam/pull'}[kind],
+    await j({llm: '/api/llm/pull', clip: '/api/clip/pull', faceid: '/api/faces/pull', vlm: '/api/vlm/pull', gen: '/api/gen/pull', sam: '/api/sam/pull', dino: '/api/dino/pull'}[kind],
       kind === 'gen' && model ? {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({model})} : {method: 'POST'});
-    toast({llm: '内蔵LLM(2.4GB)の取得を開始しました', clip: 'CLIPモデル(350MB+テキスト側254MB)の取得を開始しました', faceid: '顔IDモデル(288MB・非商用限定)の取得を開始しました', vlm: '内蔵VLM(Qwen3-VL-4B, 3.3GB)の取得と起動を開始しました — 終わると属性付け・AIフォルダが動きます', gen: '生成エンジン(FLUX.2 klein 4B, 7.1GB)の取得と起動を開始しました — 終わると生成フォルダが動きます', sam: 'マスク用のSAM2(155MB)の取得を開始しました — 終わるとライトボックスの「マスク」で切れます'}[kind]);
+    toast({llm: '内蔵LLM(2.4GB)の取得を開始しました', clip: 'CLIPモデル(350MB+テキスト側254MB)の取得を開始しました', faceid: '顔IDモデル(288MB・非商用限定)の取得を開始しました', vlm: '内蔵VLM(Qwen3-VL-4B, 3.3GB)の取得と起動を開始しました — 終わると属性付け・AIフォルダが動きます', gen: '生成エンジン(FLUX.2 klein 4B, 7.1GB)の取得と起動を開始しました — 終わると生成フォルダが動きます', sam: 'マスク用のSAM2(155MB)の取得を開始しました — 終わるとライトボックスの「マスク」で切れます', dino: '検出モデル(204MB)の取得を開始しました — 終わると言葉だけで自動マスクが付けられます'}[kind]);
   } catch (e) { toast('❌ ' + e.message); }
 }
 async function watchActivity() {
