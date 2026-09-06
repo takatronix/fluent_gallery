@@ -2559,7 +2559,7 @@ function seenKey(a) { return a ? 'src:' + (a.criteria?.source || a.name) : 'src:
 // 状態: gen(世代=画像が変わるたび++、遅延応答は世代不一致で全部捨てる) / tier(手元の最良: thumb→pv→full、render=編集焼き)
 // サイズ規則: 通常=ビューポートへアスペクトフィット(小原本も拡大)、編集レンダ=自然寸法(クロップで比率が変わるため)
 const lbView = {
-  gen: 0, sha: null, tier: null, edited: false, comparing: false,
+  gen: 0, shownGen: 0, sha: null, tier: null, edited: false, comparing: false,
   cancelPending() {
     ++this.gen;
     if (this._probe) { this._probe.onload = this._probe.onerror = null; this._probe.src = ''; this._probe = null; }
@@ -2590,14 +2590,20 @@ const lbView = {
   async decoded(url) {
     const pre = new Image();
     pre.src = url;
+    if (pre.complete && pre.naturalWidth) return pre; // キャッシュ済みは待たない(押しっぱなしでもコマ落ちしない)
     if (pre.decode) await pre.decode();
     else if (!pre.complete) await new Promise((resolve, reject) => { pre.onload = resolve; pre.onerror = reject; });
     if (!pre.naturalWidth) throw new Error('画像を読み込めませんでした');
     return pre;
   },
   // 唯一のsrc書き込み口。デコード完了後に差し替える=空白フレームを出さない
+  // 押しっぱなし送り: キーリピート(~30/秒)ごとに gen が進むと、サムネのデコードが間に合わず全部「古い gen」で捨てられて
+  // 画面が止まったままになる(キャッシュ済みの間は流れ、未読込の所で固まる 2026-09-06)。
+  // → サムネは gen が最新でなくても「いま出ている物(shownGen)より新しければ」出す=前へは戻らないが、必ず前進する。
+  //   重い層(pv/full/render)は従来どおり最新 gen だけ
   async apply(gen, url, tier, nw, nh, reportError = false) {
-    if (gen !== this.gen) return false;
+    const stale = () => gen < (this.shownGen || 0) || (gen !== this.gen && tier !== 'thumb');
+    if (stale()) return false;
     let pre;
     try {
       pre = await this.decoded(url);
@@ -2605,13 +2611,14 @@ const lbView = {
       if (gen === this.gen && reportError) throw new Error('画像を表示できませんでした。もう一度お試しください');
       return false;
     }
-    if (gen !== this.gen) return false;
+    if (stale()) return false;
     const order = {thumb: 1, pv: 2, full: 3};
-    if (order[tier] && order[tier] < (order[this.tier] || 0)) return false;
+    if (gen === this.shownGen && order[tier] && order[tier] < (order[this.tier] || 0)) return false;
     const img = $('lbimg');
     this.box(nw === undefined ? pre.naturalWidth : nw, nh === undefined ? pre.naturalHeight : nh);
     img.dataset.tier = tier;
     this.tier = tier;
+    this.shownGen = gen;
     img.src = url;
     // 原寸昇格はpreviewが見えて一息ついてから(送り中の原寸DL乱発で回線を塞がない)
     if (tier === 'pv') {
@@ -3929,9 +3936,12 @@ async function lbShow(i, dir) {
   $('lbinfo').style.display = 'none';
   $('lbsrcbtn').style.display = 'none';
   lbView.show(items[lbIdx], dir); // 表示はここに全部任せる(src/サイズを他で触らない)
+  $('lbmeta').innerHTML = `${lbIdx + 1} / ${items.length}`;
+  // 送り(dir)中は 150ms 落ち着くまで、隣の先読みと meta 取得を出さない。
+  // キーリピートごとに preview 2 本 + meta 1 本を投げると回線を塞ぎ、肝心のサムネが届かず画面が止まる
+  if (dir) { await new Promise(r => setTimeout(r, 150)); if (context !== lbContext) return; }
   [1, -1].forEach(d => { const n = items[(lbIdx + d + items.length) % items.length];
     if (n) new Image().src = tierUrl(n, 'preview'); });
-  $('lbmeta').innerHTML = `${lbIdx + 1} / ${items.length}`;
   try {
     let m;
     // 保存前に始まったメタ応答で、保存済みの履歴を巻き戻さない。
