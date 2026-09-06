@@ -531,7 +531,6 @@
     <span class="kic" id="lora_ic"></span><span class="nm">LoRA</span><span class="n" id="n_lora"></span></div>
   <div id="side_spacer" style="flex:1"></div>
   <div id="sidefoot">
-    <div id="libline" style="padding:8px 10px 4px" title="このライブラリの枚数・容量と、これまでに使ったAPI代"></div>
     <div class="sec" id="ai_head" style="display:flex; align-items:center; gap:4px; cursor:pointer"
          onclick="cycleAiView()" title="仕事の行の見せ方: 全部 → 稼働中のみ → 閉じる(枚数・料金・メーターは常に出ます)">
       <span id="ai_tri" style="display:flex; flex:none"></span><span style="white-space:nowrap">AI稼働状況</span>
@@ -542,6 +541,7 @@
          onclick="openPlacement()" title="クリックで、どのモデルがどこで動いているかを見る"></div>
     <div id="ai_meters" style="padding:0 10px 4px; font-size:11px; color:var(--faint); cursor:pointer"
          onclick="openPlacement()" title="クリックで、どのモデルがどこで動いているかを見る"></div>
+    <div id="libline" style="padding:2px 10px 6px" title="このライブラリの枚数・容量と、これまでに使ったAPI代"></div>
     <div class="nav" data-loc="settings:" onclick="go({type:'settings', key:'', criteria:{}})" title="AIの役・接続先・APIキー・モデル・自動運転・保存先(行ごとに自動保存)">
       <span class="kic" id="settings_ic"></span><span class="nm">設定</span></div>
   </div>
@@ -4848,12 +4848,12 @@ async function watchActivity() {
     $('ai_meters').innerHTML = disk + cpu + gpu + ram;
     // 枚数・容量・料金が一番見たい物。小さく添えるのではなく、下部の頭に大きく置く
     if (facetsCache) $('libline').innerHTML = `
-      <div style="display:flex; gap:5px; align-items:baseline; color:var(--tx)">
-        <b style="font-size:17px; font-variant-numeric:tabular-nums">${facetsCache.total.toLocaleString()}</b>
+      <div style="display:flex; gap:5px; align-items:baseline; color:var(--tx); padding-top:3px; border-top:1px solid var(--hair)">
+        <b style="font-size:15px; font-variant-numeric:tabular-nums">${facetsCache.total.toLocaleString()}</b>
         <span style="font-size:11px; color:var(--faint)">枚</span>
         <span style="font-size:11.5px; color:var(--dim)">${(facetsCache.bytes / 1073741824).toFixed(1)}GB</span>
         ${facetsCache.cost_usd > 0
-          ? `<b style="margin-left:auto; font-size:14px; color:#e0a83c; font-variant-numeric:tabular-nums">$${facetsCache.cost_usd.toFixed(2)}</b>`
+          ? `<b style="margin-left:auto; font-size:13.5px; color:#e0a83c; font-variant-numeric:tabular-nums">$${facetsCache.cost_usd.toFixed(2)}</b>`
           : `<span style="margin-left:auto; font-size:11px; color:var(--ok)">API代 0円</span>`}
       </div>`;
 
