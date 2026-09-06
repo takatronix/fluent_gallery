@@ -2654,6 +2654,28 @@ async function delAlbum(n) {
   if (loc.type === 'folder' && loc.key === n) go({type: 'lib', key: 'all', criteria: {}});
   loadAlbums();
 }
+// フリーズの飛行記録(2026-09-07「かたまった」対策): メインスレッドが2秒以上詰まったら、
+// その瞬間の場所と状態を localStorage(fg_stalls)とサーバ(store/client_log.jsonl)に残す。
+// 裏タブはタイマーが間引かれて偽の「詰まり」に見えるので、非表示中と復帰直後はリセットだけする
+{
+  let last = performance.now();
+  document.addEventListener('visibilitychange', () => { last = performance.now(); });
+  setInterval(() => {
+    const now = performance.now(), stall = Math.round(now - last - 1000);
+    last = now;
+    if (document.hidden || stall < 2000) return;
+    const rec = {t: new Date().toISOString(), stall, loc: `${loc.type}:${loc.key || ''}`,
+      items: items.length, lb: $('lb').classList.contains('show'),
+      renaming: !!renaming, drag: !!dragNav_, ua: navigator.userAgent.slice(0, 60)};
+    try {
+      const log = JSON.parse(localStorage.getItem('fg_stalls') || '[]');
+      log.push(rec);
+      localStorage.setItem('fg_stalls', JSON.stringify(log.slice(-50)));
+    } catch (e) {}
+    try { navigator.sendBeacon('/api/client-log', new Blob([JSON.stringify(rec)], {type: 'application/json'})); } catch (e) {}
+  }, 1000);
+}
+
 // 自動収集の「次はいつ動くか」を秒まで見せる(「いつ仕事が走るか全然わからない」対策 2026-09-06)。
 // apInfo は /api/activity の autopilot {interval_secs, next_at}。開いているフォルダの ah_cycle を毎秒更新
 let apInfo = null;
