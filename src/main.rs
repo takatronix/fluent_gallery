@@ -2632,7 +2632,7 @@ async fn api_gen_pull(State(app): S, body: Option<Json<GenPullIn>>) -> Json<Valu
         if let Err(e) = gen::ensure_models(&app.root, &app.http, &app.gen, s).await {
             println!("🪄 生成モデル取得失敗({}): {e}", s.id);
         } else if gen::cli_bin(&app.root).is_none() && gen::external_base().is_none() {
-            if let Err(e) = gen::start_server(&app.root, &app.http, &app.gen, s).await { println!("🪄 生成エンジン起動失敗: {e}"); }
+            if let Err(e) = gen::start_server(&app.root, &app.http, &app.gen, s, None).await { println!("🪄 生成エンジン起動失敗: {e}"); }
         }
     });
     Json(json!({"ok": true, "model": id, "note": "進捗は GET /api/gen/engine"}))
