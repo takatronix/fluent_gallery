@@ -127,6 +127,16 @@
              color:var(--faint); cursor:pointer; display:inline-flex; gap:5px; align-items:center;
              transition:all .15s; }
   .engchip svg { opacity:.55; flex:none; }
+  /* フォルダ種別(集める/作る): OFF でも読める。ON は種別色(集める=青、作る=紫)で塗る */
+  .kchip { font-size:12px; font-weight:600; padding:5px 13px; border-radius:99px; border:1px solid var(--line);
+           color:var(--tx); background:rgba(255,255,255,.04); cursor:pointer; display:inline-flex; gap:6px; align-items:center; transition:all .15s; }
+  .kchip svg { opacity:.9; flex:none; }
+  .kchip:hover { border-color:var(--dim); background:rgba(255,255,255,.08); }
+  /* 数値欄の上下ボタン(スピナー)は要らない(小さくて押しにくい・見た目がうるさい)。キー入力とホイールで十分 */
+  input[type=number] { -moz-appearance:textfield; appearance:textfield; }
+  input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer-spin-button { -webkit-appearance:none; margin:0; }
+  .kchip.on { color:#fff; background:#2f6bff; border-color:#2f6bff; box-shadow:0 0 0 3px rgba(47,107,255,.22); }
+  .kchip.gen.on { background:#7c5cff; border-color:#7c5cff; box-shadow:0 0 0 3px rgba(124,92,255,.25); }
   /* ブーストの怪しいアイコン(2026-09-03指示「金と薬」): OFF=モノクロ、ON=フルカラー+金色の怪しい光 */
   .boost-glyph { font-size:12px; line-height:1; filter:grayscale(1); opacity:.55; letter-spacing:-2px; }
   .switch.on .boost-glyph { filter:none; opacity:1; text-shadow:0 0 9px #e5c07baa; }
@@ -1428,9 +1438,11 @@ function renderViewhead() {
 }
 // 新規フォルダの種別チップ(集める/作る)。名前欄の入力は保って描き替える
 function kindChips() {
-  return `<span style="display:flex; gap:4px; flex:none">
-    <span class="engchip ${newKind === 'crawl' ? 'on' : ''}" onclick="setNewKind('crawl')" title="Web から集める(AI収集)">${ic('globe', 11)} 集める</span>
-    <span class="engchip ${newKind === 'gen' ? 'on' : ''}" onclick="setNewKind('gen')" title="内蔵の画像生成AIで作る(棚の素材)">${ic('wand', 11)} 作る</span></span>`;
+  // 種別は engchip(任意の検索元用・OFFが薄い)ではなく、両方とも読める切替に(「作る」が薄くて自動精製に気づけなかった 2026-09-06)
+  return `<span class="kinds" style="display:flex; gap:6px; flex:none; align-items:center">
+    <span class="kchip ${newKind === 'crawl' ? 'on' : ''}" onclick="setNewKind('crawl')" title="Web から集める(AI収集)">${ic('globe', 12)} 集める</span>
+    <span class="kchip gen ${newKind === 'gen' ? 'on' : ''}" onclick="setNewKind('gen')" title="内蔵の画像生成AIで作る。目標まで自動で作り続ける(自動精製)">${ic('wand', 12)} 作る</span>
+    <span class="lbl" style="width:auto; color:var(--faint); font-size:11px">${newKind === 'gen' ? '内蔵の生成AIで、目標枚数まで自動で作り続けます' : 'Web から集めます。生成で増やすなら「作る」'}</span></span>`;
 }
 // ================= LoRA 棚(G4, docs/gen-design.md §5) =================
 let loraCache = [];
