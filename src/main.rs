@@ -274,9 +274,11 @@ fn build_where(q: &Q) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
         wh.push("source LIKE ?".into());
         args.push(Box::new(format!("{}%", q.source)));
     }
-    // 実写/生成はVLMの見た目(style)を最優先(sourceからの推定はイラストDLを「実写」と嘘をつく)
+    // 実写/生成はVLMの見た目(style)を最優先(sourceからの推定はイラストDLを「実写」と嘘をつく)。
+    // ただし origin='synthetic' は自分の生成時に刻んだ確実な事実なので、見た目が写真的でも「実写」には絶対に出さない
+    // (フォトリアル生成が style=photo 判定されて実写フィルタに混入していた 2026-09-06)
     match q.origin.as_str() {
-        "real" => wh.push("(style='photo' OR (style IS NULL AND origin='real'))".into()),
+        "real" => wh.push("((style='photo' OR (style IS NULL AND origin='real')) AND ifnull(origin,'') != 'synthetic')".into()),
         "synthetic" => {
             wh.push("(origin='synthetic' OR style IN ('illustration','anime','3dcg','painting','sketch'))".into())
         }

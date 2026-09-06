@@ -4261,13 +4261,14 @@ async function lbShow(i, dir) {
           `<br>プロンプト: <span title="${esc(m.gen.prompt || '')} (クリックでコピー)" style="cursor:copy; text-decoration:underline dotted" onclick="navigator.clipboard?.writeText(lbMeta?.gen?.prompt || ''); toast('プロンプトをコピーしました')">` +
           `${esc((m.gen.prompt || '').length > 140 ? (m.gen.prompt || '').slice(0, 140) + '…' : (m.gen.prompt || ''))}</span>` : '');
     }
-    const kind = (() => { // 見た目の種別はVLMのstyleが正(ソース推定は嘘をつく)
+    const kind = (() => { // 見た目の種別はVLMのstyleが正(ソース推定は嘘をつく)。ただし自家生成(origin=synthetic)は事実なので最優先
       const st = m.vlm?.attrs?.style;
+      if (m.origin === 'synthetic') return st === 'photo' ? '生成(実写風)' : '生成';
       if (st === 'photo') return '実写';
       if (st === 'anime') return 'アニメ絵';
       if (st === '3dcg') return '3DCG';
       if (['illustration', 'painting', 'sketch'].includes(st)) return 'イラスト';
-      return m.origin === 'synthetic' ? '生成' : '実写?';
+      return '実写?';
     })();
     const line1 = `<b>${lbIdx + 1} / ${items.length}</b> · ${m.w}×${m.h} · ${(m.bytes / 1024).toFixed(0)}KB · ${esc(m.source || '')} ·
       <span class="tag" style="cursor:pointer" title="AIの判定ミスはクリックで修正(実写→イラスト→アニメ絵→3DCGの順に切替)"
