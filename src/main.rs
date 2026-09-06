@@ -2870,6 +2870,9 @@ fn start_gen(app: &'static App, album: &str, n: usize, minutes: u64) -> Result<S
     st.recent.lock().unwrap().clear();
     *st.album.lock().unwrap() = slug.clone();
     *st.last.lock().unwrap() = "起動中…".into();
+    st.prompt.lock().unwrap().clear(); // 前の仕事のプロンプト/進捗を新しい仕事の「いま」に見せない
+    st.step.store(0, Relaxed);
+    st.steps.store(0, Relaxed);
     let limits = gen::Limits { max_n: n.clamp(1, 2000), max_secs: minutes.clamp(1, 720) * 60, w: snap(w), h: snap(h), steps, min_quality };
     tokio::spawn(gen::run(app.root.clone(), app.http.clone(), st, app.llm.clone(), app.enrich.clone(), slug.clone(), goal, model, refs, lora_list, limits));
     *LAST_DROPPED_LORA.lock().unwrap() = dropped_lora;
@@ -2934,6 +2937,7 @@ async fn api_gen_pull(State(app): S, body: Option<Json<GenPullIn>>) -> Json<Valu
 }
 /// 途中経過(sd-cli の --preview が各ステップで書く PNG)。生成中だけ存在する
 async fn api_gen_preview(State(app): S) -> impl IntoResponse {
+    if !app.gen.alive.load(Relaxed) { return StatusCode::NOT_FOUND.into_response(); } // 止まっている時に古い途中経過を見せない
     match std::fs::read(gen::preview_path(&app.root)) {
         Ok(b) if b.len() > 100 => ([(header::CONTENT_TYPE, "image/png"), (header::CACHE_CONTROL, "no-store")], b).into_response(),
         _ => StatusCode::NOT_FOUND.into_response(),

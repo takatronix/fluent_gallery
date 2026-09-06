@@ -205,7 +205,12 @@ pub async fn chat_t(
     engine_tx(root.to_path_buf())
         .send(Req { prompt, max_tokens, temp, resp: tx })
         .map_err(|_| "内蔵LLMスレッド死亡")?;
-    let r = rx.await.map_err(|_| "内蔵LLM応答なし".to_string())?;
+    // エンジンスレッドが Metal/モデル読込で固まると全部の LLM 呼び出しが永遠に待つ(2026-09-06 検証サーバで 12 分以上) → 上限を切って呼び手を進める
+    let r = match tokio::time::timeout(std::time::Duration::from_secs(300), rx).await {
+        Ok(Ok(r)) => r,
+        Ok(Err(_)) => { st.busy.store(false, Relaxed); return Err("内蔵LLM応答なし".into()); }
+        Err(_) => { st.busy.store(false, Relaxed); println!("🧠 内蔵LLM が 300 秒応答しません(GPU の取り合いかモデル読込の失敗)"); return Err("内蔵LLMが300秒応答しません".into()); }
+    };
     st.busy.store(false, Relaxed);
     if r.is_ok() {
         st.ready.store(true, Relaxed);

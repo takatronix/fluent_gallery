@@ -580,7 +580,8 @@
     <div id="cr_strip" style="display:flex; gap:3px; overflow-x:auto; flex:1; min-width:60px"></div>
     <button class="ghost" style="flex:none; padding:1px 8px" onclick="j('/api/crawl/stop',{method:'POST'})">停止</button></div>
   <div id="genbar" style="align-items:center; gap:8px"><span class="pulse" style="flex:none; background:#b48cff"></span>
-    <img id="gn_prev" alt="" title="いま描いている1枚の途中経過" onerror="this.style.visibility='hidden'" onload="this.style.visibility='visible'">
+    <img id="gn_prev" alt="" title="いま描いている1枚の途中経過。ホバーで大きく" style="cursor:zoom-in" onerror="this.style.visibility='hidden'" onload="this.style.visibility='visible'"
+      onmouseenter="hoverPv(this, 'いま描いている途中(ステップごとに更新)', true)" onmouseleave="hoverPvHide()">
     <span id="gn_prog" style="flex:none; white-space:nowrap"></span>
     <div id="gn_strip" style="display:flex; gap:3px; overflow-x:auto; flex:1; min-width:60px"></div>
     <button class="ghost" style="flex:none; padding:1px 8px" onclick="j('/api/gen/stop',{method:'POST'})">停止</button></div>
@@ -1819,7 +1820,8 @@ function genHeadHtml(a, isNew) {
     </div>
     ${!isNew && a.running ? `<div class="frow" style="margin-top:8px; align-items:flex-start">
       <span class="lbl">いま</span>
-      <img id="ah_prev" alt="" onerror="this.style.visibility='hidden'" onload="this.style.visibility='visible'" title="途中経過(各ステップ)">
+      <img id="ah_prev" alt="" onerror="this.style.visibility='hidden'" onload="this.style.visibility='visible'" title="途中経過(各ステップ)。ホバーで大きく"
+        style="cursor:zoom-in" onmouseenter="hoverPv(this, 'いま描いている途中(ステップごとに更新)', true)" onmouseleave="hoverPvHide()">
       <span class="lbl" id="ah_now" style="width:auto; flex:1; white-space:normal; line-height:1.6"></span></div>` : ''}
     <div class="details">
     <div class="frow" style="margin-top:6px">
@@ -4564,14 +4566,19 @@ async function stopIngest(ev) {
 
 // ================= AI実況(ポーラーは2秒×1本に集約 — 稼働状況/収集バー/取込/完了リフレッシュ全部) =================
 // ホバーで大きく見る(実況ストリップの26pxじゃ分からん問題)
-function hoverPv(el, why) {
+function hoverPv(el, why, big) {
   const r = el.getBoundingClientRect();
   const pv = $('hoverpv');
-  $('hoverpv_img').src = el.src;
+  const size = big ? Math.min(720, innerWidth - 40, innerHeight - r.bottom - 40 > 360 ? innerHeight - r.bottom - 40 : innerHeight - 80) : 280;
+  const im = $('hoverpv_img');
+  im.style.maxWidth = size + 'px'; im.style.maxHeight = size + 'px';
+  im.src = el.src;
+  hoverPv._el = el; // 途中経過(ah_prev/gn_prev)はポーリングで差し替わるので、出している間は追従させる(watchGenPart)
   $('hoverpv_cap').textContent = why || '';
   pv.style.display = 'block';
-  pv.style.left = Math.min(r.left, innerWidth - 300) + 'px';
-  pv.style.top = (r.bottom + 8) + 'px';
+  pv.style.left = Math.min(r.left, innerWidth - size - 20) + 'px';
+  // 下に入り切らなければ上に出す
+  pv.style.top = (r.bottom + 8 + size + 30 < innerHeight ? r.bottom + 8 : Math.max(8, r.top - size - 30)) + 'px';
   // ふわっと出る(サムネの位置から、しゅっと)
   pv.animate([
     {opacity: 0, transform: 'scale(.6) translateY(-8px)', transformOrigin: 'top left'},
@@ -4579,6 +4586,7 @@ function hoverPv(el, why) {
   ], {duration: 180, easing: 'cubic-bezier(.2,1.2,.3,1)'});
 }
 function hoverPvHide() {
+  hoverPv._el = null;
   const pv = $('hoverpv');
   pv.animate([{opacity: 1}, {opacity: 0, transform: 'scale(.9)'}], {duration: 110, easing: 'ease-in'})
     .onfinish = () => pv.style.display = 'none';
@@ -4604,6 +4612,7 @@ function watchGenPart(s) {
       const pv = '/api/gen/preview?t=' + Date.now();
       $('gn_prev').src = pv;
       const ap = document.getElementById('ah_prev'); if (ap) ap.src = pv;
+      if (hoverPv._el && (hoverPv._el === ap || hoverPv._el.id === 'gn_prev')) $('hoverpv_img').src = pv; // 拡大表示中も追従
       const an = document.getElementById('ah_now'); if (an) an.innerHTML = `${s.steps > 0 ? `${s.step}/${s.steps} ステップ · ` : ''}${esc(s.prompt || s.last || '')}`;
       $('gn_strip').innerHTML = (s.recent || []).map(e =>
         `<img src="${e.ok ? '/thumb/' + e.r : '/crawl/reject/' + e.r}"
