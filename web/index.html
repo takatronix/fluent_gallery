@@ -707,6 +707,21 @@
     <div class="row" id="edactions"></div>
     <div class="row"><span id="edstatus" role="status" aria-live="polite"></span></div>
     <div class="row"><span id="edhist"></span></div>
+    <div id="edstudio">
+      <div class="row studio-prompt">
+        <input id="studio-text" type="text" placeholder="フィルターの指示（例：境界線だけにして）" onkeydown="if(event.key==='Enter'){event.preventDefault();studioGenerate();}">
+        <button id="studio-generate" disabled onclick="studioGenerate()">指示を適用</button>
+      </div>
+      <div class="row">
+        <button id="lbstudiobtn" class="ghost" disabled onclick="studioOpen()">個別に編集</button>
+        <button id="studio-random" disabled onclick="studioCommand('random')">🎲 ランダム</button>
+        <button id="studio-reset" disabled onclick="studioCommand('reset')">フィルターをリセット</button>
+      </div>
+      <div id="studio-inline" hidden>
+        <div class="row"><span id="studio-status" role="status" aria-live="polite"></span><button id="studio-close" class="ghost" onclick="studioClose()">キャンセル</button></div>
+        <div id="studio-frame-wrap"><div id="studio-loading">フィルターを準備しています…</div></div>
+      </div>
+    </div>
   </div>
   <div id="lbmeta" onclick="event.stopPropagation()"></div>
 </div>
@@ -2558,7 +2573,8 @@ const lbView = {
     // 全画面(imm)中は画面いっぱい、通常はバー/メタの余白を残す
     const imm = $('lb').classList.contains('imm');
     const mw = imm ? innerWidth : innerWidth * .94;
-    const mh = imm ? innerHeight : innerHeight * .74;
+    const photoHeight = $('lb').classList.contains('scene-editing') ? (innerWidth <= 900 ? .36 : .42) : .74;
+    const mh = imm ? innerHeight : innerHeight * photoHeight;
     const ar = nw / nh;
     let bw = Math.min(mw, mh * ar), bh = bw / ar;
     if (bh > mh) { bh = mh; bw = bh * ar; }
@@ -3603,8 +3619,7 @@ $('lbbar').innerHTML = `
       onclick="event.stopPropagation()" onkeydown="if(event.key==='Enter'){event.preventDefault(); lbFaceEnroll();}">
     <button class="ghost" onclick="event.stopPropagation(); lbFaceEnroll()">${ic('check', 12)} 登録</button>
   </span>
-  <button id="lbstudiobtn" onclick="studioOpen()" title="fluent_sceneのフィルターエディターでこの画像を開く">${ic('wand', 13)} フィルター</button>
-  <button class="ghost" id="edbtn" onclick="edToggle()" title="露出・色調・クロップの調整 (E)">${ic('sliders', 13)} 写真調整</button>
+  <button class="ghost" id="edbtn" onclick="edToggle()" title="露出・色調・クロップの編集 (E)">${ic('sliders', 13)} 編集</button>
   <button class="ghost" onclick="immToggle()" title="全画面 — UIを消して画像だけ(戻る: クリック/Space/Esc)">${ic('box', 13)} 全画面</button>
   <button class="ghost" id="lbsel" onclick="lbSel()" title="選択に加える (X)">${ic('circle', 13)} 選択</button>
   <button class="ghost" id="edcompare" style="display:none"
@@ -3671,7 +3686,7 @@ $('edactions').innerHTML = `
   <span class="sp"></span>
   <button class="ghost" onclick="edClear()">${ic('broom', 13)} 原本に戻す</button>
   <button onclick="edUndo()" title="履歴を1手戻す (⌘Z)">${ic('undo', 13)} 一手戻す</button>
-  <button class="pri" onclick="edApplyAdjust()" title="スライダの調整を確定">${ic('check', 13)} 適用</button>`;
+  <button class="pri" id="edapply" onclick="edApplyAdjust()" title="写真調整とフィルターを適用">${ic('check', 13)} 適用</button>`;
 
 let lbSegOn = false;
 function lbUrl(sha, w) {
@@ -3854,7 +3869,7 @@ function lbMorphOpen(sha) {
   setTimeout(reveal, 900); // 保険: 読み込みが遅くても必ず出す
 }
 function closeLb() {
-  if (typeof studioClose === 'function') studioClose();
+  if (typeof studioClose === 'function') studioClose(false);
   const lb = $('lb');
   if (!lb.classList.contains('show')) return;
   ++lbContext; lbView.cancelPending(); lbView.comparing = false;
@@ -3900,6 +3915,7 @@ function closeLb() {
   };
 }
 async function lbShow(i, dir) {
+  if (typeof studioClose === 'function') studioClose(false);
   if (!items.length) return;
   clearFaceBoxes(); $('lbfacebox').style.display = 'none'; // 顔選択は画像単位でリセット
   $('lbfacename').value = ''; // 前の画像で打ちかけた名前を持ち越さない(sakuraにgaul残留の実害 2026-09-03)
@@ -4143,7 +4159,11 @@ const ED_FILTERS = [
 $('edfilters').innerHTML = ED_FILTERS.map(f => `<span class="fxchip"
   onmouseenter="$('lbimg').style.filter='${f.css}'" onmouseleave="edLive()"
   onclick="edPush({op:'filter', params:${JSON.stringify({name: f.name, ...(f.params || {})}).replace(/"/g, '&quot;')}})">${f.label}</span>`).join('');
-function edToggle() { $('lb').classList.toggle('editing'); }
+function edToggle() {
+  const on = $('lb').classList.toggle('editing');
+  if (!on && typeof studioClose === 'function') studioClose();
+  if (on && lbMeta?.studio?.recipe?.graph && typeof studioOpen === 'function') studioOpen();
+}
 function edVals() {
   const o = {};
   ED_SLIDERS.forEach(k => { const v = parseInt($('ed_' + k).value) / 100; if (Math.abs(v) > 0.004) o[k] = v; });
@@ -4166,6 +4186,12 @@ function edReset() {
 }
 const ED_LABEL = {adjust: '調整', auto: '自動', filter: 'フィルタ', rotate: '回転', flip: '反転', crop: 'クロップ'};
 function edHist(list) {
+  const draft = typeof studioSession !== 'undefined' && studioSession;
+  if (draft?.photoEdits) {
+    const filters = draft.graph?.n?.filter(n => !['src', 'out'].includes(n.t)).length || 0;
+    $('edhist').textContent = `編集中: 写真調整 ${draft.photoEdits.length}手 · フィルター ${filters}個（適用で保存）`;
+    return;
+  }
   $('edhist').innerHTML = list.length
     ? '履歴: ' + list.map(e => `<span class="tag">${ED_LABEL[e.op] || e.op}${e.op === 'filter' ? ' ' + (e.params?.name || '') : ''}</span>`).join('') + ' <span style="opacity:.6">(原本は不変・1手ずつ戻せます)</span>'
     : lbMeta?.filter_source_sha || lbMeta?.studio?.source_sha
@@ -4175,11 +4201,15 @@ function edHist(list) {
 const edQueues = new Map(), edEpoch = new Map(), edStates = new Map();
 function edSyncStatus() {
   const state = edStates.get(items[lbIdx]?.sha1);
-  const busy = !!state?.pending;
+  const sceneBusy = typeof studioIsBusy === 'function' && studioIsBusy();
+  const busy = !!state?.pending || sceneBusy;
   $('edauto').disabled = busy;
+  $('edapply').disabled = sceneBusy;
+  for (const el of document.querySelectorAll('#edactions button:not(#edauto):not(#edapply), #editpanel input[type=range]')) el.disabled = sceneBusy;
   $('edauto').setAttribute('aria-busy', String(busy));
   $('editpanel').setAttribute('aria-busy', String(busy));
-  $('edstatus').textContent = busy ? (state.activeAuto ? '自動補正中…' : '画像を更新中…') : state?.message || '';
+  $('edstatus').textContent = busy ? (state?.activeAuto ? '自動補正中…' : '画像を更新中…')
+    : typeof studioSession !== 'undefined' && studioSession ? '' : state?.message || '';
 }
 function edRefreshGrid(it) {
   const sha = it.sha1, revision = it.erev;
@@ -4241,21 +4271,50 @@ function edMutate(body) {
   task.finally(() => { if (edQueues.get(sha) === task) edQueues.delete(sha); });
   return task;
 }
-function edPush(edit) { return edMutate({action: 'push', edit}); }
+function edPush(edit) {
+  if (typeof studioSession !== 'undefined' && studioSession) return studioPhotoEdit({action: 'push', edit});
+  return edMutate({action: 'push', edit});
+}
 function edAuto() {
   const sha = items[lbIdx]?.sha1;
   if (edStates.get(sha)?.pending) return edQueues.get(sha) || Promise.resolve(false);
   return edPush({op: 'auto', params: {version: 3}});
 }
-function edUndo() { return edMutate({action: 'pop'}); }
+function edUndo() {
+  if (typeof studioSession !== 'undefined' && studioSession) return studioUndo();
+  return edMutate({action: 'pop'});
+}
+async function edOriginal(sha) {
+  const response = await fetch('/api/original/' + sha);
+  const text = await response.text();
+  if (response.ok) return JSON.parse(text);
+  // HTML is served from disk. Keep Reset functional while an older server
+  // binary is still running and the new provenance route is not installed yet.
+  if (response.status !== 404 || text.trim()) {
+    let detail;
+    try { detail = JSON.parse(text).detail; } catch (_) {}
+    throw new Error(detail || '元画像を確認できませんでした');
+  }
+  const chain = [];
+  for (let depth = 0; depth < 64; depth++) {
+    if (!/^[a-f0-9]{40}$/.test(sha) || chain.includes(sha)) throw new Error('元画像への参照が不正です');
+    chain.push(sha);
+    const meta = await j('/api/meta/' + sha);
+    const parent = meta.studio?.source_sha ?? meta.filter_source_sha;
+    if (parent === undefined || parent === null) return {ok: true, sha1: sha, meta, derived: chain.length > 1, chain};
+    sha = parent;
+  }
+  throw new Error('元画像への参照が長すぎます');
+}
 async function edClear() {
+  if (typeof studioSession !== 'undefined' && studioSession) return studioResetAll();
   const sha = items[lbIdx]?.sha1, context = lbContext;
   if (!sha) return false;
   try {
     await edQueues.get(sha);
     if (context !== lbContext || items[lbIdx]?.sha1 !== sha) return false;
     $('edstatus').textContent = '元画像を確認しています…';
-    const original = await j('/api/original/' + sha);
+    const original = await edOriginal(sha);
     if (context !== lbContext || items[lbIdx]?.sha1 !== sha) return false;
     if (!original.derived) return edMutate({action: 'clear'});
     // Baked pixels have no edit stack to undo. Follow provenance and select the
@@ -4297,6 +4356,7 @@ async function edClear() {
   }
 }
 async function edApplyAdjust() {
+  if (typeof studioSession !== 'undefined' && studioSession) return studioSave();
   const v = edVals();
   if (!Object.keys(v).length) return toast('スライダを動かしてから適用');
   return edPush({op: 'adjust', params: v});
@@ -4341,6 +4401,7 @@ function cropUp(e) {
     fw: +fw.toFixed(4), fh: +fh.toFixed(4)}});
 }
 function edCompare(on) {
+  if (typeof studioSession !== 'undefined' && studioSession) return studioCompare(on);
   const sha = items[lbIdx]?.sha1;
   if (!sha) return Promise.resolve(false);
   if (on) $('lbimg').style.filter = '';

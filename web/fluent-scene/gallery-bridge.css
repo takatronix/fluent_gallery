@@ -29,3 +29,52 @@ body.gallery-embed.gallery-exporting #insp { pointer-events: none; opacity: .6; 
   body.gallery-embed #aiText { flex-basis: calc(100% - 94px); }
   body.gallery-embed #lookRow { width: 95vw; }
 }
+
+/* Inline integration: the gallery owns the photograph, language and save
+   controls. Keep the real Studio node graph and inspector together here. */
+body.gallery-inline {
+  width: 100%; height: auto; min-height: 0; padding: 4px; gap: 8px;
+  display: grid; grid-template-columns: minmax(0, 1fr) 236px; align-items: start;
+  background: transparent; overflow-x: hidden;
+}
+body.gallery-inline header, body.gallery-inline #aurora,
+body.gallery-inline #srcBtns, body.gallery-inline #bar,
+body.gallery-inline #aibar, body.gallery-inline #lookRow, body.gallery-inline #aiSay,
+body.gallery-inline #aiEdit, body.gallery-inline #dockClose,
+body.gallery-inline #btnSnap, body.gallery-inline #btnShare { display: none !important; }
+body.gallery-inline #frame {
+  position: fixed !important; left: -10000px !important; top: 0 !important;
+  width: 1px !important; height: 1px !important; overflow: hidden;
+  opacity: 0; pointer-events: none;
+}
+body.gallery-inline #aibar, body.gallery-inline #lookRow,
+body.gallery-inline #aiSay, body.gallery-inline #dock,
+body.gallery-inline #insp { width: 100%; max-width: 100%; margin: 0; }
+body.gallery-inline #aibar { border-radius: 10px; padding: 6px 8px; box-shadow: none; }
+body.gallery-inline #dock {
+  position: relative !important; inset: auto !important; flex: none;
+  grid-column: 1;
+  min-height: 0; padding: 6px; border-radius: 10px; box-shadow: none;
+}
+body.gallery-inline:has(#insp[hidden]) #dock { grid-column: 1 / -1; }
+body.gallery-inline #toolbar { flex-wrap: wrap; gap: 4px; }
+body.gallery-inline #toolbar button { padding: 4px 9px; }
+body.gallery-inline #dockMain { flex: none; }
+body.gallery-inline #dockMain #graph { height: 200px; min-height: 200px; max-height: 200px; }
+body.gallery-inline #insp {
+  position: static !important; inset: auto !important;
+  grid-column: 2;
+  height: auto !important; max-height: none !important;
+  border-radius: 10px; box-shadow: none; padding: 9px;
+}
+body.gallery-inline #params { display: grid !important; grid-template-columns: minmax(0, 1fr); gap: 9px 18px; }
+body.gallery-inline #params > .slider { min-width: 0; }
+body.gallery-inline #inspPin { display: none; }
+body.gallery-inline #aiSay:empty { display: none; }
+@media (max-width: 620px) {
+  body.gallery-inline { grid-template-columns: minmax(0, 1fr); }
+  body.gallery-inline #insp { grid-column: 1; }
+  body.gallery-inline #aiText { flex-basis: calc(100% - 94px); }
+  body.gallery-inline #dockMain #graph { flex: none; width: 100%; height: 180px; min-height: 180px; max-height: 180px; }
+  body.gallery-inline #toolbar #tail { margin-left: 0; }
+}

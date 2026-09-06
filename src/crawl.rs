@@ -723,10 +723,12 @@ async fn ensure_brief(root: &Path, client: &reqwest::Client, llm_st: &llm::LlmSt
 /// 「まだ試していない角度」の生成に専念する。テンプレは実戦の採用実績から随時追記する台帳。
 /// テンプレの主語: フォルダ名が識別子っぽい(英数字と_だけ)なら goal の先頭句を使う。
 /// 「test_shiba_local fanart」のような無意味な検索になっていた(2026-09-04 実測: 192検査で1枚)
+/// 検索の主語。**目標があれば必ず目標**が主語で、フォルダ名は目標が空のときの代用でしかない。
+/// (以前はフォルダ名が ASCII 英数字のときだけ目標を見ていたため、「AV女優」のような
+///  日本語名のフォルダでは目標「河北彩花」が無視され、フォルダ名で検索して何も集まらなかった)
 fn seed_subject(album: &str, goal: &str) -> String {
     let a = album.trim();
-    let ident = !a.is_empty() && a.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
-    if !ident || goal.trim().is_empty() {
+    if goal.trim().is_empty() {
         return a.to_string();
     }
     let head: String = goal

@@ -55,7 +55,248 @@ fn validate_recipe(recipe: &Value) -> Result<(), Failure> {
             return Err(bad("source_edits_rev が不正です"));
         }
     }
+    if let Some(edits) = recipe.get("photo_edits") {
+        validate_photo_edits(edits)?;
+    }
     Ok(())
+}
+
+fn allowed_params(params: &serde_json::Map<String, Value>, names: &[&str]) -> Result<(), Failure> {
+    if params.keys().any(|name| !names.contains(&name.as_str())) {
+        return Err(bad("未対応の写真調整パラメータです"));
+    }
+    Ok(())
+}
+
+fn bounded(
+    params: &serde_json::Map<String, Value>,
+    name: &str,
+    min: f64,
+    max: f64,
+) -> Result<(), Failure> {
+    if let Some(value) = params.get(name) {
+        if !value
+            .as_f64()
+            .is_some_and(|value| value.is_finite() && value >= min && value <= max)
+        {
+            return Err(bad(&format!(
+                "{name} は {min}〜{max} の数値で指定してください"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_photo_edit(edit: &Value) -> Result<(), Failure> {
+    let params = edit["params"]
+        .as_object()
+        .ok_or_else(|| bad("各写真調整に params が必要です"))?;
+    match edit["op"].as_str() {
+        Some("adjust") => {
+            let names = ["exposure", "contrast", "saturation", "temperature"];
+            allowed_params(params, &names)?;
+            for name in names {
+                bounded(params, name, -1.0, 1.0)?;
+            }
+        }
+        Some("filter") => {
+            crate::filter_commands::validate(
+                &json!({"op": "pipeline", "params": {"edits": [edit]}}),
+            )
+            .map_err(|message| bad(&message))?;
+            for (name, min, max) in [
+                ("levels", 2.0, 32.0),
+                ("amount", 0.1, 3.0),
+                ("sigma", 0.3, 5.0),
+                ("low", 0.0, 1020.0),
+                ("high", 0.0, 1020.0),
+            ] {
+                bounded(params, name, min, max)?;
+            }
+        }
+        Some("auto") => {
+            allowed_params(params, &["version"])?;
+            if params
+                .get("version")
+                .is_some_and(|version| version != 2 && version != edits::AUTO_VERSION)
+            {
+                return Err(bad("未対応の自動補正バージョンです"));
+            }
+        }
+        Some("rotate") => {
+            allowed_params(params, &["deg"])?;
+            if !params
+                .get("deg")
+                .and_then(Value::as_i64)
+                .is_some_and(|deg| (-360..=360).contains(&deg) && deg % 90 == 0)
+            {
+                return Err(bad("回転は -360〜360 度の 90 度単位で指定してください"));
+            }
+        }
+        Some("flip") => {
+            allowed_params(params, &["dir"])?;
+            if !matches!(params.get("dir").and_then(Value::as_str), Some("h" | "v")) {
+                return Err(bad("反転の方向は h または v です"));
+            }
+        }
+        Some("crop") => {
+            let fractional = params.keys().any(|key| key.starts_with('f'));
+            let names = if fractional {
+                ["fx", "fy", "fw", "fh"]
+            } else {
+                ["x", "y", "w", "h"]
+            };
+            allowed_params(params, &names)?;
+            if names.iter().any(|name| !params.contains_key(*name)) {
+                return Err(bad("切り抜きの位置と幅・高さが必要です"));
+            }
+            for name in names {
+                bounded(
+                    params,
+                    name,
+                    0.0,
+                    if fractional { 1.0 } else { f64::from(MAX_EDGE) },
+                )?;
+            }
+            if params[names[2]].as_f64().unwrap() <= 0.0
+                || params[names[3]].as_f64().unwrap() <= 0.0
+            {
+                return Err(bad("切り抜きの幅・高さは正の値にしてください"));
+            }
+            if fractional {
+                if params["fx"].as_f64().unwrap() + params["fw"].as_f64().unwrap() > 1.000001
+                    || params["fy"].as_f64().unwrap() + params["fh"].as_f64().unwrap() > 1.000001
+                {
+                    return Err(bad("切り抜きが画像の範囲を超えています"));
+                }
+            } else if names.iter().any(|name| params[*name].as_u64().is_none()) {
+                return Err(bad("ピクセルの切り抜き位置・寸法は整数で指定してください"));
+            }
+        }
+        _ => return Err(bad("未対応の写真調整です")),
+    }
+    Ok(())
+}
+
+fn validate_photo_edits(edits: &Value) -> Result<(), Failure> {
+    let list = edits
+        .as_array()
+        .filter(|list| list.len() <= 64)
+        .ok_or_else(|| bad("写真調整は 64 操作以下の配列で指定してください"))?;
+    let mut operations = list.len();
+    for edit in list {
+        if edit["op"] == "pipeline" {
+            crate::filter_commands::validate(edit).map_err(|message| bad(&message))?;
+            let children = edit["params"]["edits"].as_array().unwrap();
+            operations += children.len();
+            for child in children {
+                validate_photo_edit(child)?;
+            }
+        } else {
+            validate_photo_edit(edit)?;
+        }
+        if operations > 64 {
+            return Err(bad("写真調整は 64 操作以下にしてください"));
+        }
+    }
+    Ok(())
+}
+
+/// Render draft photo controls from the source file, without changing its saved edit stack.
+pub async fn preview(
+    State(app): S,
+    AxPath(sha): AxPath<String>,
+    Json(request): Json<Value>,
+) -> Response {
+    if sha.len() != 40 || !sha.bytes().all(|c| c.is_ascii_hexdigit()) {
+        return crate::err_json(StatusCode::BAD_REQUEST, "元画像の ID が不正です");
+    }
+    if let Err((status, message)) = validate_photo_edits(&request["edits"]) {
+        return crate::err_json(status, &message);
+    }
+    let revision = match request.get("source_edits_rev") {
+        Some(Value::String(value))
+            if value.len() == 12 && value.bytes().all(|c| c.is_ascii_hexdigit()) =>
+        {
+            Some(value.clone())
+        }
+        Some(_) => return crate::err_json(StatusCode::BAD_REQUEST, "source_edits_rev が不正です"),
+        None => None,
+    };
+    app.touch_ui();
+    // Slider bursts cannot run unbounded full-size decodes in parallel.
+    static PREVIEWS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+    let Ok(permit) = PREVIEWS.acquire().await else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    match tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        render_photo_preview(app, &sha, &request["edits"], revision.as_deref())
+    })
+    .await
+    {
+        Ok(Ok(bytes)) => (
+            [
+                (axum::http::header::CONTENT_TYPE, "image/png"),
+                (axum::http::header::CACHE_CONTROL, "no-store"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Ok(Err((status, message))) => crate::err_json(status, &message),
+        Err(_) => crate::err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "写真調整のプレビューを作成できませんでした",
+        ),
+    }
+}
+
+fn render_photo_preview(
+    app: &'static App,
+    sha: &str,
+    draft: &Value,
+    requested_rev: Option<&str>,
+) -> Result<Vec<u8>, Failure> {
+    let (original, revision) = {
+        let _db = app.db.lock().unwrap_or_else(|p| p.into_inner());
+        let original = source_meta(&app.root, sha)?;
+        let revision = edits::rev(&history(&original));
+        if requested_rev.is_some_and(|requested| requested != revision) {
+            return Err(fail(
+                StatusCode::CONFLICT,
+                "元画像の編集内容が変わりました。開き直してください",
+            ));
+        }
+        (original, revision)
+    };
+    let path = store::image_path(&app.root, sha, original["ext"].as_str().unwrap());
+    let (w, h) = ImageReader::open(&path)
+        .map_err(|_| bad("元画像を読み取れませんでした"))?
+        .into_dimensions()
+        .map_err(|_| bad("元画像を読み取れませんでした"))?;
+    if w == 0 || h == 0 || w > MAX_EDGE || h > MAX_EDGE || u64::from(w) * u64::from(h) > MAX_PIXELS
+    {
+        return Err(bad(
+            "画像は各辺 8192 px 以下、3200 万画素以下にしてください",
+        ));
+    }
+    let mut reader = ImageReader::open(&path).map_err(|_| bad("元画像を読み取れませんでした"))?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_EDGE);
+    limits.max_image_height = Some(MAX_EDGE);
+    limits.max_alloc = Some(512 << 20);
+    reader.limits(limits);
+    let image = reader
+        .decode()
+        .map_err(|_| bad("元画像を読み取れませんでした"))?;
+    let image = edits::apply(image, draft);
+    let mut png = Cursor::new(Vec::new());
+    image
+        .write_to(&mut png, ImageFormat::Png)
+        .map_err(io_error)?;
+    let _db = app.db.lock().unwrap_or_else(|p| p.into_inner());
+    check_snapshot(&app.root, sha, &revision)?;
+    Ok(png.into_inner())
 }
 
 /// Serve the actual scene editor bundle, with URL traversal handled by ServeDir.
@@ -618,5 +859,34 @@ mod tests {
             StatusCode::CONFLICT
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn validates_draft_photo_geometry_and_bounded_operations() {
+        assert!(validate_photo_edits(&json!([])).is_ok());
+        let draft = json!([
+            {"op": "adjust", "params": {"exposure": 0.3}},
+            {"op": "auto", "params": {}},
+            {"op": "rotate", "params": {"deg": 270}},
+            {"op": "flip", "params": {"dir": "h"}},
+            {"op": "crop", "params": {"fx": 0.1, "fy": 0.2, "fw": 0.5, "fh": 0.6}},
+            {"op": "pipeline", "params": {"edits": [{"op": "filter", "params": {"name": "canny"}}]}}
+        ]);
+        assert!(validate_photo_edits(&draft).is_ok());
+        for invalid in [
+            json!([{"op": "adjust", "params": {"exposure": 99}}]),
+            json!([{"op": "filter", "params": {"name": "blur", "amount": -1}}]),
+            json!([{"op": "rotate", "params": {"deg": 45}}]),
+            json!([{"op": "flip", "params": {"dir": "diagonal"}}]),
+            json!([{"op": "crop", "params": {"fx": 0.5, "fy": 0.0, "fw": 1, "fh": 1}}]),
+            json!([{"op": "crop", "params": {"x": 0, "y": 0, "w": 0, "h": 1}}]),
+            json!([{"op": "unknown", "params": {}}]),
+            json!(vec![json!({"op": "auto", "params": {}}); 65]),
+        ] {
+            assert!(validate_photo_edits(&invalid).is_err(), "{invalid}");
+        }
+        let invalid_recipe = json!({"graph": {"n": [{"i": "n1", "t": "src"}], "e": []},
+            "sceneYaml": "scene: {}", "photo_edits": [{"op": "unknown", "params": {}}]});
+        assert!(validate_recipe(&invalid_recipe).is_err());
     }
 }

@@ -141,6 +141,8 @@ fluent_gallery (Rust, axum, 単一バイナリ, :8790)
 node tests/ui_regression.js   # 単体実行(サーバ稼働中に)
 FG_URL=http://127.0.0.1:18890 node tests/auto_adjust.js  # 隔離ストアで自動補正・原本保持・表示競合を検証
 FG_URL=http://127.0.0.1:18890 node tests/edit_metadata_race.js  # ローカル模擬VLMで分類待ち中の編集保持を検証
+FG_URL=http://127.0.0.1:18890 npm --prefix tests run test:studio  # 実Studio・保存・原本復帰を隔離ストアで検証
+FG_URL=http://127.0.0.1:18890 npm --prefix tests run test:edit-ui  # 元の編集UI・Studioからの復帰・スマホの操作を検証
 node tests/thumbnail_perf.js  # 1920x1080・DPR1で縮小 + 1万件往復scrollの性能予算
 PERF_DPR=2 node tests/thumbnail_perf.js  # Retina相当
 ```
@@ -148,6 +150,10 @@ PERF_DPR=2 node tests/thumbnail_perf.js  # Retina相当
 検査項目: フォルダ切替の追い越し / ライトボックス表示 / 送りのサイズ一貫性 / クロップ / ⭐トグル / サムネ属性記号 / 超小型サムネ / iPhone縦横+iPad縦横 / モバイルの選択・ライトボックス・取込パネル / 顔IDパネル / 押しっぱなし送り / キーボード操作 / 連続削除 / JSエラー。テスト画像は `tests/fixtures/` を `_uitest` ソースへ収蔵し、最後に自動で掃除する(実データには触らない)。
 
 新しいUI操作を足したら、回帰テストに検査を1本足してからコミットする。
+
+画像を開いて「編集」（E）を押すと、露出・コントラスト・彩度・色温度・自動補正・回転・反転・クロップと、言語指示・個別フィルター・🎲・リセットを同じパネルで使える。fluent_sceneの実際のノードとパラメーターUIをパネル内に配置し、結果をギャラリーの写真へ表示する。フィルター編集中の写真調整は下書きで、既存の「適用」ボタンが両方を原寸PNGへ保存する。加工結果は別ID、元画像とその編集履歴は保持する。「一手戻す」は写真調整とフィルターに共通。「フィルターをリセット」は写真調整を残し、「原本に戻す」は両方を戻す。保存構造は [docs/studio-storage.md](docs/studio-storage.md)。上流の更新は `python3 tools/sync_scene_editor.py ../fluent_scene` で取り込む。
+
+UI回帰テストは一覧全体も操作するため、同じ隔離サーバー上で画像を追加・削除する他のテストとは直列に実行する。
 
 ---
 

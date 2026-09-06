@@ -46,13 +46,14 @@ function rgbaPixel(bytes, x, y) {
     if (type === 'IDAT') parts.push(data);
     offset += size + 12;
   }
-  assert.equal(depth, 8); assert.equal(color, 6, 'RGBA must remain RGBA');
-  const packed = zlib.inflateSync(Buffer.concat(parts)), stride = width * 4;
+  assert.equal(depth, 8); assert([2, 6].includes(color), 'RGB or RGBA PNG required');
+  const channels = color === 6 ? 4 : 3;
+  const packed = zlib.inflateSync(Buffer.concat(parts)), stride = width * channels;
   let previous = Buffer.alloc(stride);
   for (let row = 0; row <= y; row++) {
     const start = row * (stride + 1), filter = packed[start], current = Buffer.from(packed.subarray(start + 1, start + stride + 1));
     for (let i = 0; i < stride; i++) {
-      const a = i >= 4 ? current[i - 4] : 0, b = previous[i], c = i >= 4 ? previous[i - 4] : 0;
+      const a = i >= channels ? current[i - channels] : 0, b = previous[i], c = i >= channels ? previous[i - channels] : 0;
       const p = a + b - c, pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c);
       const prediction = filter === 0 ? 0 : filter === 1 ? a : filter === 2 ? b : filter === 3 ? Math.floor((a + b) / 2)
         : filter === 4 ? (pa <= pb && pa <= pc ? a : pb <= pc ? b : c) : NaN;
@@ -60,7 +61,9 @@ function rgbaPixel(bytes, x, y) {
     }
     previous = current;
   }
-  return {width, height, pixel: [...previous.subarray(x * 4, x * 4 + 4)]};
+  const pixel = [...previous.subarray(x * channels, x * channels + channels)];
+  if (channels === 3) pixel.push(255);
+  return {width, height, pixel};
 }
 async function api(path, body, method = body === undefined ? 'GET' : 'POST') {
   const response = await fetch(BASE + path, {method, headers: body === undefined ? {} : {'Content-Type': 'application/json'},
@@ -80,6 +83,15 @@ async function save(sha, image, recipe, expected = 200) {
   const value = JSON.parse(text); if (value.sha1) created.add(value.sha1);
   return value;
 }
+async function preview(sha, body, expected = 200) {
+  const response = await fetch(BASE + '/api/studio/' + sha + '/preview', {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+  assert.equal(response.status, expected, `preview ${await (response.status === expected ? Promise.resolve('') : response.text())}`);
+  if (expected !== 200) return null;
+  assert.equal(response.headers.get('content-type'), 'image/png');
+  assert.equal(response.headers.get('cache-control'), 'no-store');
+  return Buffer.from(await response.arrayBuffer());
+}
 
 (async () => {
   await api('/api/enrich/stop', {});
@@ -90,7 +102,28 @@ async function save(sha, image, recipe, expected = 200) {
   const sha = hash(original); created.add(sha);
   const edit = await api('/api/edits/' + sha, {action: 'push', edit: {op: 'adjust', params: {exposure: .25}}}, 'PUT');
   const before = await api('/api/meta/' + sha);
+  const basePreview = await preview(sha, {edits: [], source_edits_rev: edit.rev});
+  assert.deepEqual(rgbaPixel(basePreview, 10, 20), rgbaPixel(original, 10, 20));
+  const photoEdits = [{op: 'adjust', params: {exposure: .5}}];
+  const adjustedPreview = await preview(sha, {edits: photoEdits, source_edits_rev: edit.rev});
+  assert.equal(rgbaPixel(adjustedPreview, 1200, 900).pixel[0], 80, 'draft runs on original pixels without reapplying current edits');
+  const geometry = await preview(sha, {edits: [{op: 'crop', params: {fx: 0, fy: 0, fw: .5, fh: .5}},
+    {op: 'rotate', params: {deg: 90}}], source_edits_rev: edit.rev});
+  const cropped = rgbaPixel(geometry, 0, 0);
+  assert.equal(cropped.width, 480); assert.equal(cropped.height, 640);
+  assert.deepEqual(cropped.pixel, rgbaPixel(original, 0, 479).pixel);
+  assert.deepEqual(await api('/api/meta/' + sha), before);
+  assert.equal(hash(await bytes('/img/' + sha)), hash(original));
+  assert.equal((await api('/api/images?' + new URLSearchParams({source}))).total, 1);
+  passed('写真調整 draft preview applies exact supplied history at full resolution without saving or altering source');
+  await preview(sha, {edits: [], source_edits_rev: '0'.repeat(12)}, 409);
+  await preview(sha, {edits: [{op: 'adjust', params: {exposure: 99}}]}, 400);
+  await preview(sha, {edits: [{op: 'crop', params: {fx: 0, fy: 0, fw: 0, fh: 1}}]}, 400);
+  await preview(sha, {edits: Array.from({length: 65}, () => ({op: 'auto', params: {version: 3}}))}, 400);
+  await preview(sha, {edits: [], ignored: 'x'.repeat(1 << 20)}, 413);
+  passed('draft preview rejects stale revisions, invalid parameters, excessive operations and oversized requests');
   const recipe = {version: 1, source_edits_rev: edit.rev, width: 1280, height: 960, time: 0,
+    photo_edits: photoEdits,
     graph: {n: [{i: 'n1', t: 'src', x: 40, y: 100, k: 'smp'}, {i: 'n2', t: 'filter', x: 240, y: 100, f: 'grayscale', v: {}},
       {i: 'n3', t: 'out', x: 440, y: 100}], e: [['n1', 0, 'n2', 0], ['n2', 0, 'n3', 0]]},
     sceneYaml: 'scene:\n  width: 1280\n  height: 960\n# ' + nonce};
@@ -168,6 +201,7 @@ async function save(sha, image, recipe, expected = 200) {
   await save('0'.repeat(40), rendered, {...recipe, source_edits_rev: current.rev}, 404);
   await save(sha, Buffer.from('broken png'), {...recipe, source_edits_rev: current.rev}, 400);
   await save(sha, rendered, {...recipe, graph: {}}, 400);
+  await save(sha, rendered, {...recipe, photo_edits: [{op: 'adjust', params: {exposure: 99}}]}, 400);
   await save(sha, rendered, {...recipe, sceneYaml: 'x'.repeat(16 << 20)}, 413);
   passed('stale edits, missing source, malformed PNG/graph and oversized recipe rejected');
 

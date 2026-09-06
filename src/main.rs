@@ -4302,6 +4302,7 @@ async fn main() {
         .route("/render/{sha1}", get(render_img))
         .route("/api/edits/{sha1}", get(api_edits_get).put(api_edits_put))
         .route("/api/studio/{sha1}/save", post(studio::save).layer(axum::extract::DefaultBodyLimit::max(96 << 20)))
+        .route("/api/studio/{sha1}/preview", post(studio::preview).layer(axum::extract::DefaultBodyLimit::max(1 << 20)))
         .route("/api/original/{sha1}", get(studio::original))
         .route("/api/filters/plan", post(api_filter_plan))
         .route("/api/filters/status", get(api_folder_filter_status))

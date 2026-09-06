@@ -1,4 +1,4 @@
-// Real fluent_scene iframe + gallery save/reopen/original restoration integration.
+// Inline fluent_scene iframe + gallery save/reopen/original restoration integration.
 // FG_URL=http://127.0.0.1:<isolated-test-port> node tests/studio_editor.js
 // Requires a disposable /tmp data root; fixtures and derived PNGs belong only to this run.
 const assert = require('node:assert/strict');
@@ -10,7 +10,8 @@ const target = new URL(BASE);
 assert(['127.0.0.1', 'localhost'].includes(target.hostname) && target.port !== '8790');
 const nonce = crypto.randomBytes(8).toString('hex'), source = `crawl:_studio_${nonce}`;
 const album = `_studio_${nonce}`, created = new Set(), retainedBytes = new Map(), errors = [];
-let browser, page, albumCreated = false, missingOriginal = '', checks = 0;
+let browser, page, albumCreated = false, missingOriginal = '', unknownOriginalRoute = false, checks = 0;
+const emptyOriginalRequests = [], metadataRequests = [];
 const passed = label => { checks++; console.log(`PASS ${label}`); };
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 async function api(path, body, method = body === undefined ? 'GET' : 'POST') {
@@ -45,7 +46,7 @@ async function show(sha) {
 async function openStudio(sha) {
   await show(sha);
   await page.click('#lbstudiobtn');
-  await page.waitForFunction(() => studioSession?.ready && !$('studio-save').disabled,
+  await page.waitForFunction(() => studioSession?.ready && !$('edapply').disabled,
     {timeout: 120000});
   const frame = await (await page.$('#studio-frame')).contentFrame();
   assert(frame && frame.url().includes('/fluent-scene/edit.html?gallery=1'));
@@ -63,13 +64,13 @@ async function imageSignature(sha) {
 }
 async function closeStudio() {
   await page.click('#studio-close');
-  await page.waitForFunction(() => !studioSession && !$('studio-dialog').open && !$('studio-frame'));
+  await page.waitForFunction(() => !studioSession && !$('studio-frame') && !document.querySelector('dialog[open]'));
   assert(!page.frames().some(frame => frame.url().includes('/fluent-scene/edit.html')));
 }
 async function saveStudio() {
   const waiting = page.waitForResponse(response => response.request().method() === 'POST' &&
     /^\/api\/studio\/[a-f0-9]+\/save$/.test(new URL(response.url()).pathname), {timeout: 120000});
-  await page.click('#studio-save');
+  await page.click('#edapply');
   const response = await waiting, saved = await response.json();
   assert(response.ok(), JSON.stringify(saved)); created.add(saved.sha1);
   await page.waitForFunction(sha => !studioSession && items[lbIdx]?.sha1 === sha &&
@@ -115,6 +116,11 @@ async function restore(derived, original) {
   await page.setRequestInterception(true);
   page.on('request', request => {
     const path = new URL(request.url()).pathname;
+    if (path.startsWith('/api/meta/')) metadataRequests.push(path);
+    if (unknownOriginalRoute && path.startsWith('/api/original/')) {
+      emptyOriginalRequests.push(path);
+      return request.respond({status: 404, body: ''});
+    }
     if (path === '/api/enrich/one') return request.respond({status: 409, contentType: 'application/json',
       body: JSON.stringify({detail: 'VLM disabled for isolated editor test'})});
     if (missingOriginal && path === '/api/original/' + missingOriginal) return request.respond({status: 404,
@@ -128,6 +134,18 @@ async function restore(derived, original) {
   });
   await page.goto(BASE, {waitUntil: 'networkidle2', timeout: 60000});
   await page.waitForFunction(() => typeof studioOpen === 'function' && typeof go === 'function');
+  assert.equal(await page.$eval('#lbstudiobtn', button => button.disabled), false);
+  const legacyPage = await browser.newPage(), legacyErrors = [];
+  legacyPage.on('pageerror', error => legacyErrors.push(error.message));
+  await legacyPage.setRequestInterception(true);
+  legacyPage.on('request', request => new URL(request.url()).pathname === '/studio-gallery.js'
+    ? request.respond({status: 404, body: ''}) : request.continue());
+  await legacyPage.goto(BASE, {waitUntil: 'networkidle2', timeout: 60000});
+  assert.equal(await legacyPage.$eval('#lbstudiobtn', button => button.disabled), true);
+  assert.equal(await legacyPage.evaluate(() => typeof studioOpen), 'undefined');
+  assert.deepEqual(legacyErrors, [], 'missing editor script must not throw browser exceptions');
+  await legacyPage.close();
+  passed('old server without Studio script keeps its button disabled; loaded editor enables the button');
   await page.evaluate(() => localStorage.setItem('fg_lbseg', '0'));
   const upload = await page.evaluate(async ({source, nonce}) => {
     const form = new FormData(); form.append('source', source);
@@ -167,16 +185,23 @@ async function restore(derived, original) {
   for (const item of folderItems) { created.add(item.sha1); retainedBytes.set(item.sha1, hash(await bytes(item.sha1))); }
   await restore(folderOutput.sha1, sha);
   passed('folder pipeline baked image with no live edits restores its original and has accurate history text');
+  unknownOriginalRoute = true;
+  await restore(folderOutput.sha1, sha);
+  unknownOriginalRoute = false;
+  assert(emptyOriginalRequests.includes('/api/original/' + folderOutput.sha1));
+  passed('old server empty 404 falls back through folder metadata and displays exact original pixels');
 
   const folderFrame = await openStudio(folderOutput.sha1);
   assert.equal(await page.evaluate(() => studioSession.source.sha1), sha);
   assert.equal(await folderFrame.evaluate(() => __studio.nodes.filter(node => node.type === 'filter').length), 0);
-  assert((await page.$eval('#studio-status', element => element.textContent)).includes('元画像から編集'));
+  assert.equal(await page.$$eval('#editpanel #studio-frame', frames => frames.length), 1);
+  assert.equal(await page.$$eval('dialog[open]', dialogs => dialogs.length), 0);
   const folderBaseline = await folderFrame.evaluate(async () => __testImageSignature((await __studio.gallery.export()).image));
   assert.equal(folderBaseline.hash, originalSignature.hash, 'folder editor started with previously baked pixels');
   await invert(folderFrame);
   await page.screenshot({path: '/tmp/fg-studio-ready.png'});
-  await folderFrame.click('#tbReset');
+  await page.click('#studio-reset');
+  await folderFrame.waitForFunction(() => __studio.nodes.every(node => node.type !== 'filter'));
   const resetPixels = await folderFrame.evaluate(async () => __testImageSignature((await __studio.gallery.export()).image));
   assert.equal(resetPixels.hash, originalSignature.hash, 'Studio Reset failed to recover the actual original pixels');
   await closeStudio();
@@ -186,7 +211,7 @@ async function restore(derived, original) {
   assert.deepEqual(await frame.evaluate(() => __studio.gallery.size), [1280, 960]);
   assert.equal(await frame.evaluate(() => __studio.nodes.filter(node => node.type === 'filter').length), 0);
   assert.deepEqual(await frame.evaluate(() => __studio.nodes.map(node => node.type).sort()), ['out', 'src']);
-  passed('actual Studio iframe opens via gallery button and completes image init without default filters');
+  passed('actual Studio iframe opens inside the gallery editing panel and completes image init without default filters');
   await invert(frame);
   const saved = await saveStudio(), savedSignature = await imageSignature(saved.sha1);
   assert.notEqual(saved.sha1, sha); assert.deepEqual([savedSignature.width, savedSignature.height], [1280, 960]);
@@ -215,13 +240,20 @@ async function restore(derived, original) {
   await api('/api/edits/' + sha, {action: 'push', edit: {op: 'adjust', params: {exposure: 0.1}}}, 'PUT');
   await restore(nested.sha1, sha);
   passed('nested baked derivation resolves to root original and clears its pending edit history');
+  unknownOriginalRoute = true;
+  await restore(nested.sha1, sha);
+  unknownOriginalRoute = false;
+  assert(emptyOriginalRequests.includes('/api/original/' + nested.sha1));
+  passed('old server empty 404 follows every nested parent and displays exact root original pixels');
   await show(nested.sha1); missingOriginal = nested.sha1;
+  metadataRequests.length = 0;
   await page.click('#editpanel button[onclick="edClear()"]');
   await page.waitForFunction(() => document.body.textContent.includes('テスト: 原本が見つかりません'));
   assert.equal(await page.evaluate(() => items[lbIdx]?.sha1), nested.sha1);
-  assert(!(await page.$eval('#edstatus', element => element.textContent)).includes('原本に戻しました'));
+  assert(!/(元画像に戻りました|原本に戻しました)/.test(await page.$eval('#edstatus', element => element.textContent)));
+  assert(!metadataRequests.includes('/api/meta/' + nested.sha1), 'JSON 404 incorrectly triggered the metadata fallback');
   missingOriginal = '';
-  passed('missing original reports error without navigating or claiming successful restoration');
+  passed('JSON 404 preserves its error without metadata fallback, navigation or false restoration success');
 
   frame = await openStudio(sha); await invert(frame);
   await page.evaluate(() => {
@@ -235,8 +267,8 @@ async function restore(derived, original) {
       return window.__studioRealFetch(input, init);
     };
   });
-  await page.click('#studio-save');
-  await page.waitForFunction(() => studioSession?.ready && !studioSession.saving && !$('studio-save').disabled &&
+  await page.click('#edapply');
+  await page.waitForFunction(() => studioSession?.ready && !studioSession.saving && !$('edapply').disabled &&
     $('studio-status').textContent.includes('テスト: 保存に失敗しました'), {timeout: 120000});
   assert.equal(await frame.evaluate(() => __studio.nodes.filter(node => node.type === 'filter' && node.name === 'invert').length), 1);
   passed('failed save retains the real editor, current graph and enabled retry button');
@@ -252,7 +284,7 @@ async function restore(derived, original) {
       return response;
     };
   });
-  await page.click('#studio-save');
+  await page.click('#edapply');
   await page.waitForFunction(() => window.__studioSaveGate.received, {timeout: 120000});
   const lateSha = await page.evaluate(() => window.__studioSaveGate.saved.sha1); created.add(lateSha);
   await closeStudio();

@@ -35,6 +35,70 @@ function galleryNeedsFrame() {
 function galleryPost(type, data = {}) {
   parent.postMessage({ type, session: galleryState.session, ...data }, location.origin);
 }
+function galleryPublishHeight() {
+  if (!GALLERY_INLINE) return;
+  const height = Math.ceil(document.body.getBoundingClientRect().height);
+  if (height > 0 && height !== galleryState.inlineHeight) {
+    galleryState.inlineHeight = height;
+    galleryPost('fg-studio-height', { height });
+  }
+}
+function galleryScheduleState() {
+  if (!GALLERY_INLINE || galleryState.stateTimer) return;
+  galleryState.stateTimer = setTimeout(() => {
+    galleryState.stateTimer = null;
+    galleryPublishState(); galleryPublishHeight();
+  }, 40);
+}
+function galleryPublishState(force = false, extra = {}) {
+  if (!GALLERY_INLINE || !galleryState.loaded || galleryState.loading) return;
+  const graph = packGraph();
+  const signature = JSON.stringify([graph, galleryState.sourceRevision]);
+  if (!force && signature === galleryState.stateSignature) return;
+  galleryState.stateSignature = signature;
+  const filters = nodes.filter(n => n.type === 'filter').map(node => ({
+    id: node.id, name: node.name, label: jaLabel(node.name), on: node.on,
+    params: SPEC[node.name].params.filter(p => p.name !== 'time').map(param => {
+      const index = SPEC[node.name].params.indexOf(param), [min, max, step] = rangeFor(param);
+      return { name: param.name, value: node.vals[index], default: param.def, min, max, step };
+    })
+  }));
+  galleryPost('fg-studio-state', { graph, time: simT, sourceRevision: galleryState.sourceRevision,
+    selectedId: selId, filters, editId: galleryState.editId, ...extra });
+}
+function galleryQueuePreview(delay) {
+  if (galleryState.previewTimer) return;
+  galleryState.previewTimer = setTimeout(() => {
+    galleryState.previewTimer = null;
+    // One final render supplies the final slider position even when the first
+    // preview was throttled. No timer remains once the image is up to date.
+    if (galleryState.loaded && !galleryState.loading && !galleryState.exporting &&
+        galleryState.previewFrame !== galleryState.frames) {
+      galleryState.dirty = Math.max(1, galleryState.dirty);
+    }
+  }, Math.max(1, delay));
+}
+function galleryPublishPreview() {
+  if (!GALLERY_INLINE || !galleryState.loaded || galleryState.loading || galleryState.exporting) return;
+  if (galleryState.previewBusy) return;
+  const now = performance.now(), wait = 125 - (now - galleryState.previewAt);
+  if (wait > 0) { galleryQueuePreview(wait); return; }
+  const target = postState.on && postState.c ? postState.c : canvas;
+  const width = target.width, height = target.height;
+  const epoch = galleryState.refreshEpoch, sourceRevision = galleryState.sourceRevision;
+  const revision = ++galleryState.previewRevision;
+  galleryState.previewBusy = true;
+  galleryState.previewAt = now; galleryState.previewFrame = galleryState.frames;
+  target.toBlob(image => {
+    galleryState.previewBusy = false;
+    if (image && epoch === galleryState.refreshEpoch && sourceRevision === galleryState.sourceRevision && !galleryState.loading) {
+      galleryPost('fg-studio-preview', { image, width, height, revision, sourceRevision });
+    }
+    if (galleryState.previewFrame !== galleryState.frames) {
+      galleryQueuePreview(125 - (performance.now() - galleryState.previewAt));
+    }
+  }, 'image/png');
+}
 function galleryPreviewSize() {
   // CPU art filters can have hundreds of samples per pixel. Keep interaction
   // inexpensive; the original pixels are fed again only for the saved PNG.
@@ -83,6 +147,8 @@ async function galleryRestoreAssets(assets) {
 async function galleryInit(message) {
   if (galleryState.loading || galleryState.exporting) throw new Error('画像を処理中です');
   galleryState.loading = true; galleryState.loaded = false;
+  const epoch = ++galleryState.refreshEpoch;
+  galleryState.sourceRevision = message.sourceRevision ?? '';
   try {
     const image = await galleryDecode(message.image);
     gallerySetSize(image.naturalWidth, image.naturalHeight);
@@ -116,12 +182,79 @@ async function galleryInit(message) {
     say('画像を読み込みました — 言葉・🎲・ノードでフィルタを編集できます');
   } finally { galleryState.loading = false; }
   // Render and commit the selected image before the host enables Save.
+  await galleryWaitFrame(epoch);
+  if (epoch !== galleryState.refreshEpoch) return;
+  galleryPublishState(true, { reason: 'init', requestId: message.requestId });
+  galleryPost('fg-studio-loaded', { width: galleryState.width, height: galleryState.height, sourceRevision: galleryState.sourceRevision, requestId: message.requestId });
+}
+async function galleryWaitFrame(epoch) {
   const before = galleryState.frames;
   await new Promise(resolve => {
-    const poll = () => galleryState.frames > before ? resolve() : requestAnimationFrame(poll);
+    const poll = () => galleryState.frames > before || epoch !== galleryState.refreshEpoch ? resolve() : requestAnimationFrame(poll);
     requestAnimationFrame(poll);
   });
-  galleryPost('fg-studio-loaded', { width: galleryState.width, height: galleryState.height });
+}
+async function galleryRefresh(message) {
+  if (!galleryState.base) throw new Error('初期画像の読み込みが終わっていません');
+  if (galleryState.exporting) throw new Error('画像を保存中です');
+  const epoch = ++galleryState.refreshEpoch;
+  galleryState.loading = true;
+  try {
+    const image = await galleryDecode(message.image);
+    if (epoch !== galleryState.refreshEpoch) return;
+    const oldStage = [STAGE_W, STAGE_H];
+    gallerySetSize(image.naturalWidth, image.naturalHeight);
+    galleryState.base = { image, blob: message.image, name: galleryState.base.name };
+    galleryState.bindings.set('gallery', galleryState.base);
+    for (const node of nodes) {
+      if (node.type === 'src' && node.galleryBinding === 'gallery') galleryBindSource(node, 'gallery');
+      if (node.type === 'xform') node.pos = [node.pos[0] * STAGE_W / oldStage[0], node.pos[1] * STAGE_H / oldStage[1]];
+    }
+    galleryState.sourceRevision = message.sourceRevision ?? '';
+    rebuildScene(); renderGraph(); renderInspector(); updateSrcUI();
+    galleryState.dirty = 4;
+  } catch (error) {
+    if (epoch === galleryState.refreshEpoch) throw error;
+    return;
+  } finally {
+    if (epoch === galleryState.refreshEpoch) galleryState.loading = false;
+  }
+  await galleryWaitFrame(epoch);
+  if (epoch !== galleryState.refreshEpoch) return;
+  galleryPublishState(true, { reason: 'refresh', requestId: message.requestId });
+  galleryPost('fg-studio-loaded', { width: galleryState.width, height: galleryState.height, sourceRevision: galleryState.sourceRevision, requestId: message.requestId });
+}
+async function galleryCommand(message) {
+  if (!galleryState.loaded || galleryState.loading) throw new Error('画像を読み込み中です');
+  if (galleryState.exporting) throw new Error('画像を保存中です');
+  const action = message.action;
+  if (action === 'generate') {
+    if (aiGo.disabled) throw new Error('フィルタを生成中です');
+    aiText.value = String(message.text || '').slice(0, 4000);
+    await generate();
+  } else if (action === 'random') {
+    const random = composeRandom(); await setBranchChain(random.chain, random.comment);
+  } else if (action === 'reset') {
+    $('tbReset').click();
+  } else if (action === 'undo') {
+    undo();
+  } else if (action === 'restore') {
+    const graph = message.graph;
+    if (!graph || !Array.isArray(graph.n) || !Array.isArray(graph.e) || graph.n.length > 80) throw new Error('復元するグラフが不正です');
+    ++applySeq; ++galleryState.generation;
+    for (const node of nodes) if (node.type === 'src') releaseSource(node);
+    unpackGraph(graph);
+    const first = nodes.find(node => node.type === 'src');
+    if (first && !first.galleryBinding) galleryBindSource(first, 'gallery');
+    if (Number.isFinite(message.time)) simT = Math.max(0, message.time);
+    simLast = performance.now(); selId = null;
+    applyGraph(true);
+    say('編集状態を戻しました');
+  } else throw new Error('未対応のエディター操作です');
+  if (aiSay.classList.contains('err')) throw new Error(aiSay.textContent.replace(/^✦\s*/, ''));
+  galleryState.dirty = Math.max(3, galleryState.dirty);
+  galleryPublishState(true, { reason: action, requestId: message.requestId });
+  galleryPost('fg-studio-command-done', { action, requestId: message.requestId, sourceRevision: galleryState.sourceRevision });
 }
 async function galleryDataUrl(blob) {
   return new Promise((resolve, reject) => {
@@ -232,19 +365,24 @@ if (GALLERY_EMBED) {
   if (queryWidth > 0 && queryHeight > 0) gallerySetSize(queryWidth, queryHeight);
   // Resume only when Studio changes, or when an animated graph actually needs frames.
   for (const event of ['input', 'click', 'pointermove', 'keydown', 'visibilitychange']) {
-    document.addEventListener(event, () => { galleryState.dirty = Math.max(3, galleryState.dirty); }, { passive: true });
+    document.addEventListener(event, () => {
+      galleryState.dirty = Math.max(3, galleryState.dirty);
+      if (event !== 'pointermove') galleryScheduleState();
+    }, { passive: true });
   }
   window.addEventListener('message', async event => {
     if (event.source !== parent || event.origin !== location.origin || event.data?.session !== galleryState.session) return;
     const message = event.data;
     try {
       if (message.type === 'fg-studio-init') await galleryInit(message);
+      else if (message.type === 'fg-studio-refresh') await galleryRefresh(message);
+      else if (message.type === 'fg-studio-command') await galleryCommand(message);
       else if (message.type === 'fg-studio-export') {
         const result = await galleryExport();
         galleryPost('fg-studio-exported', { requestId: message.requestId, ...result });
       }
     } catch (error) {
-      galleryPost('fg-studio-error', { requestId: message.requestId, message: error.message || String(error) });
+      galleryPost('fg-studio-error', { requestId: message.requestId, sourceRevision: message.sourceRevision ?? galleryState.sourceRevision, message: error.message || String(error) });
       say(error.message || String(error), true);
     }
   });
@@ -252,7 +390,17 @@ if (GALLERY_EMBED) {
     get loaded() { return galleryState.loaded; }, get exporting() { return galleryState.exporting; },
     get frames() { return galleryState.frames; }, get size() { return [galleryState.width, galleryState.height]; },
     get feedSize() { return [FEED_W, FEED_H]; }, get stageSize() { return [STAGE_W, STAGE_H]; },
+    get sourceRevision() { return galleryState.sourceRevision; },
     export: galleryExport, pack: packGraph
   } });
+  if (GALLERY_INLINE) {
+    document.body.classList.add('gallery-inline');
+    document.addEventListener('pointerdown', () => { ++galleryState.editId; }, { capture: true, passive: true });
+    document.addEventListener('keydown', event => { if (!event.repeat) ++galleryState.editId; }, { capture: true, passive: true });
+    dock.hidden = false;
+    setDockView('graph');
+    new ResizeObserver(galleryPublishHeight).observe(document.body);
+    galleryPublishHeight();
+  }
   galleryPost('fg-studio-ready');
 }

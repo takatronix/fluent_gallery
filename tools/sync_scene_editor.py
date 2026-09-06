@@ -34,15 +34,22 @@ def patch(old, new, count=1):
 patch("const STAGE_W = 1280, STAGE_H = 720;", """// Gallery embedding keeps the actual Studio and renderer, with a still-image host.
 const galleryQuery = new URLSearchParams(location.search);
 const GALLERY_EMBED = galleryQuery.get('gallery') === '1' && parent !== window;
+const GALLERY_INLINE = GALLERY_EMBED && galleryQuery.get('mode') === 'inline';
 const galleryState = { session: galleryQuery.get('session') || '', loaded: false,
   exporting: false, loading: false, dirty: 3, frames: 0, bindings: new Map(),
-  width: 1280, height: 720, base: null, chainTask: null, sourceSerial: 0, generation: 0 };
+  width: 1280, height: 720, base: null, chainTask: null, sourceSerial: 0, generation: 0,
+  sourceRevision: '', refreshEpoch: 0, previewBusy: false, previewAt: -Infinity,
+  previewRevision: 0, previewFrame: -1, previewTimer: null, stateTimer: null,
+  stateSignature: '', inlineHeight: 0, editId: 0 };
 let STAGE_W = 1280, STAGE_H = 720;""")
 patch("sourceSerial: 0, generation: 0", "sourceSerial: 0, generation: 0, statefulNames: new Set(" + json.dumps(stateful_names) + ")")
 patch("const FEED_W = COARSE ? 640 : STAGE_W, FEED_H = COARSE ? 360 : STAGE_H;",
       "let FEED_W = COARSE ? 640 : STAGE_W, FEED_H = COARSE ? 360 : STAGE_H;")
 patch("  nodes.push(n);\n  return n;", "  if (GALLERY_EMBED && type === 'src' && extra.galleryBinding) galleryBindSource(n, extra.galleryBinding);\n  nodes.push(n);\n  return n;")
 patch("function pushChains(t) {\n  if (!inst) return;", "function pushChains(t) {\n  if (GALLERY_EMBED) galleryState.dirty = Math.max(galleryState.dirty, 3);\n  if (!inst) return;")
+patch("function saveHash() {\n  clearTimeout(hashTimer);", "function saveHash() {\n  if (GALLERY_INLINE) galleryScheduleState();\n  clearTimeout(hashTimer);")
+patch("function placeInsp() {\n  const insp", "function placeInsp() {\n  if (GALLERY_INLINE) return;\n  const insp")
+patch(": n.type === 'src' ? 'プレビュー左上のボタンでソース切替'", ": n.type === 'src' ? (GALLERY_INLINE ? '写真調整の結果をフィルタに入力します' : 'プレビュー左上のボタンでソース切替')")
 patch("  if (!confirm('グラフを最初の状態に戻しますか?')) return;", "  if (!GALLERY_EMBED && !confirm('グラフを最初の状態に戻しますか?')) return;\n  ++applySeq;")
 patch("  const keep = nodes.find(n => n.type === 'src');\n  for (const n of nodes)", "  const keep = nodes.find(n => n.type === 'src');\n  if (GALLERY_EMBED) galleryResetSource(keep);\n  for (const n of nodes)")
 patch("      if (n.type === 'src') o.k = n.kind === 'camera' ? 'cam' : 'smp';", "      if (n.type === 'src') {\n        o.k = n.kind === 'camera' ? 'cam' : 'smp';\n        if (GALLERY_EMBED && n.galleryBinding) o.gb = n.galleryBinding;\n      }")
@@ -54,7 +61,10 @@ patch("            { kind: o.k === 'cam' ? 'camera' : 'sample' });", "          
 patch("async function setBranchChain(spec, comment, pick = null) {", "async function studioSetBranchChain(spec, comment, pick = null) {")
 patch("const RECIPES = [", "const RECIPES = [\n  // Gallery's common outline instruction uses the real Studio edge filter.\n  [/境界線|輪郭線|輪郭だけ|線画|エッジだけ|canny/, [['edge_sobel', {}]], '境界線を抽出しました (Sobel)'],")
 patch("if (!/人物|背景|ポートレ|自分以外|人だけ/.test(t)) {", "if (!/人物|背景|ポートレ|自分以外|人だけ|境界線|輪郭線|輪郭だけ|エッジだけ|canny/.test(t)) {")
+patch("[/ネガ|negative|色反転/, [['invert', {}]], '色を反転しました'],", "[/ネガ|negative|色(?:を)?反転|^(?:反転して|反転する|反転してください)[。！!\\s]*$/, [['invert', {}]], '色を反転しました'],")
 patch("async function generate() {\n  const text", "async function generate() {\n  const galleryGeneration = galleryState.generation;\n  const text")
+patch("  const text = aiText.value.trim();\n  if (!text)", "  const text = aiText.value.trim();\n  if (GALLERY_INLINE && !text) { say('フィルタの指示を入力してください', true); return; }\n  if (!text)")
+patch("        const rnd = composeRandom();\n        rnd.comment", "        if (GALLERY_INLINE) throw new Error('この指示をフィルタに変換できませんでした。「白黒にして」「境界線だけにして」「色を反転」などで指定してください');\n        const rnd = composeRandom();\n        rnd.comment")
 for provider in ["askClaude", "askOpenAI"]:
     line = "      const r = parseAiJson(await " + provider + "(text));"
     patch(line, line + "\n      if (GALLERY_EMBED && galleryGeneration !== galleryState.generation) return;")
@@ -66,6 +76,7 @@ patch("if (!loadHash()) {\n  const src", "if (GALLERY_EMBED) {\n  const src = ad
 patch("setTheater(localStorage.getItem('fs_theater') === '1');", "setTheater(!GALLERY_EMBED && localStorage.getItem('fs_theater') === '1');")
 patch("  if (gpu) return;\n  if (fpsShown > 0", "  if (gpu || GALLERY_EMBED) return;\n  if (fpsShown > 0")
 patch("function tick() {\n  const now", "function tick() {\n  if (GALLERY_EMBED && !galleryNeedsFrame()) { requestAnimationFrame(tick); return; }\n  if (GALLERY_EMBED) { galleryState.dirty = Math.max(0, galleryState.dirty - 1); ++galleryState.frames; }\n  const now")
+patch("  drawPost(t);\n  if (peekOn) drawPeek();", "  drawPost(t);\n  if (peekOn) drawPeek();\n  if (GALLERY_INLINE) galleryPublishPreview();")
 patch("requestAnimationFrame(tick);\n</script>", (DEST / "gallery-bridge.js").read_text() + "\nrequestAnimationFrame(tick);\n</script>")
 patch("</style>\n<div id=\"aurora\">", "</style>\n<link rel=\"stylesheet\" href=\"./gallery-bridge.css\">\n<div id=\"aurora\">")
 
