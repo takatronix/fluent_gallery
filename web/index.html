@@ -656,7 +656,7 @@
   <div id="segfix" onclick="event.stopPropagation()" style="display:none; gap:6px; align-items:center; padding:8px 4px 0; cursor:default">
     <button class="ghost" onclick="segClear()" title="間違いマスクを消す">マスク削除</button>
     <button class="ghost" onclick="segCutout()" title="背景を透過にした切り抜きPNGを開く(保存できます)">切り抜きPNG</button>
-    <span style="font-size:11px; color:var(--faint)">右クリック=そのマスクを削除</span>
+    <span style="font-size:11px; color:var(--faint)">画像をクリック=そこを切って追加 · ドラッグ=範囲で切る · 右クリック=そのマスクを削除</span>
   </div>
   <div id="editpanel" onclick="event.stopPropagation()">
     <div class="row"><label>露出</label><input type="range" id="ed_exposure" min="-100" max="100" value="0"
@@ -1616,6 +1616,7 @@ async function renderSettings() {
       ${model('VLM(属性付け・目利き)', L.bin ? {model: L.model, size_mb: L.size_mb, present: L.present, downloading: L.downloading, got_mb: L.got_mb, total_mb: L.total_mb, running: L.running} : {model: V.model, present: V.present}, 'vlm', '3.3GB')}
       ${model('CLIP(似た画像・意味検索)', A.clip, 'clip', '350MB')}
       ${A.faceid?.enabled ? model('顔ID(SCRFD+ArcFace・非商用)', A.faceid, 'faceid', '288MB') : ''}
+      ${model('マスク(内蔵SAM2)', A.sam, 'sam', '155MB')}
       ${(G.models || []).map(m => `<div class="setrow"><span class="lbl">生成 ${esc(m.label.split('(')[0])}</span><span style="flex:1; font-size:11.5px; color:var(--dim)" title="${esc(m.note || '')}">${esc(m.id)} · ${(m.size_mb / 1024).toFixed(1)}GB · ${esc(m.license)}${m.refs ? ' · 参照OK' : ''}</span>${m.present ? '<span class="ok">取得済</span>' : (G.downloading && G.dl_model === m.id) ? `<span class="note">DL ${Math.round(100 * G.got_mb / (G.total_mb || 1))}%</span>` : `<button class="ghost" onclick="aiPull('gen', '${m.id}')">取得 ${(m.size_mb / 1024).toFixed(1)}GB</button>`}</div>`).join('')}
     </div>
 
@@ -1969,7 +1970,7 @@ function folderHeadHtml(a, isNew) {
                ${JUDGE_MODELS.map(([id, label]) => `<option value="${id}" ${(a.agent?.judge_model || '') === id ? 'selected' : ''}>${label}</option>`).join('')}
              </select>${aiMark('key_judge')}`
           : `クエリ生成 = 内蔵Qwen3-4B${aiMark('llm')} · 目利き = 内蔵qwen2.5vl${aiMark('vlm')}`}
-        · 属性付け = 内蔵qwen2.5vl${aiMark('vlm')} · 似た画像 = CLIP${aiMark('clip')}${caps.faceid ? ` · 顔ID = insightface${aiMark('faceid')}` : ''}
+        · 属性付け = 内蔵qwen2.5vl${aiMark('vlm')} · マスク = 内蔵SAM2${aiMark('sam')} · 似た画像 = CLIP${aiMark('clip')}${caps.faceid ? ` · 顔ID = insightface${aiMark('faceid')}` : ''}
       </span>
     </div>
     <div class="frow">
@@ -3289,8 +3290,8 @@ $('lbbar').innerHTML = `
   <button class="ghost" id="edcompare" style="display:none"
     onpointerdown="edCompare(true)" onpointerup="edCompare(false)" onpointerleave="edCompare(false)"
     title="押している間だけ原本">${ic('eye', 13)} 原本</button>
-  <button class="ghost" id="lbsegbtn" style="display:none" onclick="lbSegToggle()"
-    title="自動マスク(輪郭)の表示On/Off">${ic('smart', 13)} マスク</button>
+  <button class="ghost" id="lbsegbtn" onclick="lbSegToggle()"
+    title="マスク(内蔵SAM2)。ONにして画像をクリック/ドラッグすると切れる">${ic('smart', 13)} マスク</button>
   <button class="ghost" id="lbsrcbtn" style="display:none" onclick="lbOpenSource()"
     title="この画像の取得元ページをブラウザで開く (O)">${ic('globe', 13)} 元ページ ↗</button>
   <button class="ghost" onclick="lbDownload()" title="原本をそのまま保存 (⌘S)">${ic('upload', 13)} 保存</button>
@@ -3400,7 +3401,6 @@ async function segClear() {
     lbMeta = {...lbMeta, seg: null};
     lbSegOn = false;
     $('lbsegbtn').classList.remove('on');
-    $('lbsegbtn').style.display = 'none';
     $('segfix').style.display = 'none';
     lbCrossfade(lbUrl(sha, 1600));
     toast('マスクを消しました(開き直せばまた自動で切ります)');
@@ -3411,8 +3411,59 @@ function segCutout() {
   if (sha) window.open('/cutout/' + sha, '_blank');
 }
 // ---- マスクの削除(残っているマスクを消す。作成はしない) ----
+let segDrag = null;
+// 内蔵SAM2で切る。1枚目のクリックだけ画像の埋め込み(約1.5秒)が要り、2回目からは即返る
+async function segRefine(p) {
+  const sha = items[lbIdx]?.sha1; if (!sha) return;
+  toast('切り出し中…');
+  try {
+    const m = await j('/api/seg/refine', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({sha1: sha, ...p})});
+    if (items[lbIdx]?.sha1 !== sha) return;
+    lbMeta = m;
+    $('lbsegbtn').style.display = '';
+    lbCrossfade(lbUrl(sha, 1600) + '&t=' + Date.now());
+    toast('切りました(間違いは右クリックで削除)');
+  } catch (e) { toast('❌ ' + e.message); }
+}
+function drawSegRect(e) {
+  let el = $('segrect');
+  if (!el) {
+    el = document.createElement('div'); el.id = 'segrect';
+    el.style.cssText = 'position:fixed; border:1.5px dashed var(--acc); background:#4d9fff22; z-index:41; pointer-events:none; border-radius:4px';
+    document.body.appendChild(el);
+  }
+  el.style.left = Math.min(segDrag.x, e.clientX) + 'px';
+  el.style.top = Math.min(segDrag.y, e.clientY) + 'px';
+  el.style.width = Math.abs(e.clientX - segDrag.x) + 'px';
+  el.style.height = Math.abs(e.clientY - segDrag.y) + 'px';
+}
 function segBindPointer() {
   const img = $('lbimg');
+  img.addEventListener('click', e => { if (lbSegOn) { e.stopImmediatePropagation(); e.preventDefault(); } }, true);
+  img.addEventListener('mousedown', e => {
+    if (!lbSegOn || e.button !== 0) return;
+    e.preventDefault(); e.stopImmediatePropagation();
+    segDrag = {x: e.clientX, y: e.clientY, moved: false};
+  }, true);
+  addEventListener('mousemove', e => {
+    if (!segDrag) return;
+    if (Math.abs(e.clientX - segDrag.x) + Math.abs(e.clientY - segDrag.y) > 8) segDrag.moved = true;
+    if (segDrag.moved) drawSegRect(e);
+  });
+  addEventListener('mouseup', e => {
+    if (!segDrag) return;
+    const d = segDrag; segDrag = null; $('segrect')?.remove();
+    const r = img.getBoundingClientRect();
+    if (!r.width) return;
+    const nx = v => Math.min(1, Math.max(0, v));
+    if (d.moved) {
+      segRefine({box: [nx((Math.min(d.x, e.clientX) - r.left) / r.width), nx((Math.min(d.y, e.clientY) - r.top) / r.height),
+                       nx((Math.max(d.x, e.clientX) - r.left) / r.width), nx((Math.max(d.y, e.clientY) - r.top) / r.height)]});
+    } else {
+      segRefine({points: [[nx((e.clientX - r.left) / r.width), nx((e.clientY - r.top) / r.height)]], labels: [1]});
+    }
+  });
   img.addEventListener('contextmenu', e => {
     if (!lbSegOn) { const sha = items[lbIdx]?.sha1; if (sha) ctxMenu(e, 'image', sha); return; } // 通常時=画像メニュー(保存/zip/…)
     e.preventDefault(); e.stopImmediatePropagation();
@@ -3556,9 +3607,9 @@ async function lbShow(i, dir) {
     $('edcompare').style.display = eds.length ? '' : 'none';
     lbSegOn = localStorage.getItem('fg_lbseg') === '1'; // マスク表示は記憶して画像を跨いで維持(2026-09-03指示)
     const hasSeg = !!m.seg?.shapes?.length;
-    $('lbsegbtn').classList.toggle('on', lbSegOn && hasSeg);
-    $('segfix').style.display = lbSegOn && hasSeg ? 'flex' : 'none';
-    $('lbsegbtn').style.display = hasSeg ? '' : 'none';
+    $('lbsegbtn').classList.toggle('on', lbSegOn);
+    $('segfix').style.display = lbSegOn ? 'flex' : 'none';
+    $('lbsegbtn').style.display = ''; // マスクが無くてもONにすればその場で切れる
     // 編集レンダ/マスク焼きは自然寸法モードでlbViewへ(原寸昇格はlbView.showが担当済み)
     if (lbSegOn && hasSeg) lbView.render(lbUrl(sha, 1600));
     edHist(eds);
@@ -4536,6 +4587,7 @@ function aiMarkHtml(k) {
   switch (k) {
     case 'llm': return A.llm.present ? ok(A.llm.ready ? '常駐中' : '取得済') : A.llm.downloading ? dl(A.llm, 'llm') : ng('未取得', pull('llm', '2.4GB'));
     case 'clip': return A.clip.present ? ok('モデルあり') : A.clip.downloading ? dl(A.clip, 'clip') : ng('未取得', pull('clip', '350MB'));
+    case 'sam': return A.sam?.present ? ok('モデルあり') : A.sam?.downloading ? dl(A.sam, 'sam') : ng('未取得', pull('sam', '155MB'));
     case 'vlm': {
       const L = A.vlm.local || {};
       if (A.vlm.backend === 'llama-server') return ok('内蔵VLM 稼働中(' + (L.model || '') + ')');
@@ -4563,9 +4615,9 @@ function aiMark(k) { return `<span class="aimark" data-k="${k}">${aiMarkHtml(k)}
 function aiMarksRefresh() { document.querySelectorAll('.aimark').forEach(el => { el.innerHTML = aiMarkHtml(el.dataset.k); }); }
 async function aiPull(kind, model) {
   try {
-    await j({llm: '/api/llm/pull', clip: '/api/clip/pull', faceid: '/api/faces/pull', vlm: '/api/vlm/pull', gen: '/api/gen/pull'}[kind],
+    await j({llm: '/api/llm/pull', clip: '/api/clip/pull', faceid: '/api/faces/pull', vlm: '/api/vlm/pull', gen: '/api/gen/pull', sam: '/api/sam/pull'}[kind],
       kind === 'gen' && model ? {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({model})} : {method: 'POST'});
-    toast({llm: '内蔵LLM(2.4GB)の取得を開始しました', clip: 'CLIPモデル(350MB+テキスト側254MB)の取得を開始しました', faceid: '顔IDモデル(288MB・非商用限定)の取得を開始しました', vlm: '内蔵VLM(Qwen3-VL-4B, 3.3GB)の取得と起動を開始しました — 終わると属性付け・AIフォルダが動きます', gen: '生成エンジン(FLUX.2 klein 4B, 7.1GB)の取得と起動を開始しました — 終わると生成フォルダが動きます'}[kind]);
+    toast({llm: '内蔵LLM(2.4GB)の取得を開始しました', clip: 'CLIPモデル(350MB+テキスト側254MB)の取得を開始しました', faceid: '顔IDモデル(288MB・非商用限定)の取得を開始しました', vlm: '内蔵VLM(Qwen3-VL-4B, 3.3GB)の取得と起動を開始しました — 終わると属性付け・AIフォルダが動きます', gen: '生成エンジン(FLUX.2 klein 4B, 7.1GB)の取得と起動を開始しました — 終わると生成フォルダが動きます', sam: 'マスク用のSAM2(155MB)の取得を開始しました — 終わるとライトボックスの「マスク」で切れます'}[kind]);
   } catch (e) { toast('❌ ' + e.message); }
 }
 async function watchActivity() {

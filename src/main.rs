@@ -12,6 +12,7 @@ mod llm;
 mod media;
 #[cfg(feature = "faceid")]
 mod faceid;
+mod sam;
 mod samples;
 mod urlimport;
 mod onnx;
@@ -2251,6 +2252,74 @@ fn store_hamming(a: &str, b: &str) -> u32 {
     }
 }
 
+// ---------- マスク(内蔵SAM2・外部サービス無し) ----------
+
+#[derive(Deserialize)]
+struct SegRefineIn {
+    sha1: String,
+    #[serde(default)] points: Vec<Vec<f64>>, // 正規化0-1 [[x,y],..] クリック点
+    #[serde(default)] labels: Vec<i64>,      // 1=前景 / 0=背景
+    #[serde(default, rename = "box")] box_: Option<Vec<f64>>, // 正規化 [x1,y1,x2,y2] 範囲選択
+    #[serde(default)] cls: String,
+    #[serde(default)] replace: bool,         // true=全置換 / false=既存マスクに足す
+}
+
+/// クリック/範囲から内蔵SAM2でマスクを切る。画像の埋め込みは sha1 で使い回すので2回目以降は速い
+async fn api_seg_refine(State(app): S, Json(s): Json<SegRefineIn>) -> impl IntoResponse {
+    let Some(mut m) = store::load_meta(&app.root, &s.sha1) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if s.points.is_empty() && s.box_.is_none() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"detail": "pointsかboxが必要です"}))).into_response();
+    }
+    if !sam::present(&app.root) {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"detail": "SAM2 未取得(設定のモデルから取得できます)"}))).into_response();
+    }
+    let cls = if s.cls.trim().is_empty() {
+        m["seg"]["shapes"][0]["cls"].as_str()
+            .or(m["vlm"]["attrs"]["subject"].as_str())
+            .unwrap_or("object").to_string()
+    } else { s.cls.trim().to_string() };
+    let ext = m["ext"].as_str().unwrap_or("jpg").to_string();
+    let path = store::image_path(&app.root, &s.sha1, &ext);
+    let pts: Vec<(f32, f32, f32)> = s.points.iter().enumerate()
+        .filter(|(_, p)| p.len() >= 2)
+        .map(|(i, p)| (p[0] as f32, p[1] as f32, *s.labels.get(i).unwrap_or(&1) as f32))
+        .collect();
+    let bx = s.box_.as_ref().filter(|b| b.len() >= 4).map(|b| [b[0] as f32, b[1] as f32, b[2] as f32, b[3] as f32]);
+    let (root, sha) = (app.root.clone(), s.sha1.clone());
+    // ONNX は同期で重い(初回1.5秒)ので tokio のワーカーを塞がない
+    let cut = tokio::task::spawn_blocking(move || {
+        let img = image::open(&path).ok()?;
+        let f = sam::encode(&root, &sha, &img)?;
+        sam::segment(&root, &f, &pts, bx)
+    }).await.ok().flatten();
+    let Some((mask, iou)) = cut else {
+        return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({"detail": "そこには物体を見つけられませんでした"}))).into_response();
+    };
+    let shapes = sam::mask_to_shapes(&mask, &cls, iou);
+    if shapes.is_empty() {
+        return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({"detail": "そこには物体を見つけられませんでした"}))).into_response();
+    }
+    let mut cur: Vec<Value> = if s.replace { vec![] } else { m["seg"]["shapes"].as_array().cloned().unwrap_or_default() };
+    cur.extend(shapes);
+    m["seg"] = json!({"prompt": cls, "model": "sam2-hiera-tiny", "shapes": cur,
+        "ts": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64()});
+    if store::save_meta(&app.root, &m).is_ok() {
+        store::index_meta(&app.db.lock().unwrap(), &m);
+    }
+    edits::clear_renders(&app.root, &s.sha1);
+    Json(m).into_response()
+}
+
+/// SAM2 の重み(155MB)を取りに行く
+async fn api_sam_pull(State(app): S) -> Json<Value> {
+    tokio::spawn(async move {
+        if let Err(e) = sam::ensure_model(&app.root, &app.http).await { println!("⚠ SAM2 取得失敗: {e}"); }
+    });
+    Json(json!({"ok": true, "note": "進捗は GET /api/ai/status の sam"}))
+}
+
 // ---------- 内蔵LLM(本当の内蔵: llama.cpp直リンク・GGUF自動DL・API代ゼロ) ----------
 
 async fn api_llm_status(State(app): S) -> Json<Value> {
@@ -2416,6 +2485,7 @@ async fn ai_status(app: &'static App) -> Value {
         "clip": onnx::status(&app.root),
         "vlm": {"backend": if local_vlm { "llama-server" } else { "ollama" }, "model": if local_vlm { vlm::MODEL_FILE } else { enrich::BUILTIN_MODEL },
                 "reachable": vlm_reachable, "present": vlm_present || vlm::models_present(&app.root), "local": vlm::status(&app.root, &app.vlm)},
+        "sam": sam::status(&app.root),
         "gen": gen::engine_status(&app.root, &app.gen),
         "faceid": faceid_status(),
         "store": cfg!(feature = "store"),
@@ -3513,6 +3583,7 @@ async fn api_meta_patch(State(app): S, Json(p): Json<MetaPatchIn>) -> impl IntoR
         if let Some(o) = m.as_object_mut() {
             o.remove("seg");
         }
+        sam::forget(&p.sha1); // 埋め込みも捨てる(次に切る時は編集後の絵から取り直す)
         edits::clear_renders(&app.root, &p.sha1);
     }
     if store::save_meta(&app.root, &m).is_err() {
@@ -3751,6 +3822,8 @@ async fn main() {
         .route("/api/enrich", post(api_enrich))
         .route("/api/enrich/one", post(api_enrich_one))
         .route("/api/meta/patch", post(api_meta_patch))
+        .route("/api/seg/refine", post(api_seg_refine))
+        .route("/api/sam/pull", post(api_sam_pull))
         .route("/micro/{sha1}", get(micro))
         .route("/atlas/{key}", get(atlas))
         .route("/cutout/{sha1}", get(cutout))
