@@ -51,11 +51,18 @@ async function show(sha) {
   await page.waitForFunction(sha => items[lbIdx]?.sha1 === sha && lbMeta?.sha1 === sha &&
     $('lbimg').complete && $('lbimg').naturalWidth > 0, {timeout: 60000}, sha);
 }
+async function openFilterPanel() {
+  if (await page.$eval('#edstudio', panel => panel.hidden || panel.classList.contains('is-concealed') || getComputedStyle(panel).visibility === 'hidden' || getComputedStyle(panel).display === 'none'))
+    await page.click('#edfilteropen');
+  await page.waitForSelector('#edstudio', {visible: true});
+}
 async function openStudio(sha) {
   await show(sha);
+  await openFilterPanel();
   await page.click('#lbstudiobtn');
-  await page.waitForFunction(() => studioSession?.ready && !$('edapply').disabled,
+  await page.waitForFunction(() => !studioSession || studioSession.ready && !$('edapply').disabled,
     {timeout: 120000});
+  assert(await page.evaluate(() => !!studioSession?.ready), 'opening Studio was canceled before it became ready');
   const frame = await (await page.$('#studio-frame')).contentFrame();
   assert(frame && frame.url().includes('/fluent-scene/edit.html?gallery=1'));
   assert(await frame.evaluate(() => !!window.__studio?.gallery.loaded));
@@ -232,7 +239,7 @@ async function restore(derived, original) {
       return response;
     };
   }, sha);
-  await page.click('#lbstudiobtn');
+  await openFilterPanel(); await page.click('#lbstudiobtn');
   await page.waitForFunction(() => !studioSession && !$('studio-frame') &&
     $('edstatus').textContent.includes('更新済みサーバー'), {timeout: 60000});
   assert.equal(saveRequests.length, savesBeforeGate, 'new UI posted a save to an old server that would duplicate images');
@@ -250,7 +257,7 @@ async function restore(derived, original) {
   const folderFrame = await openStudio(folderOutput.sha1);
   assert.equal(await page.evaluate(() => studioSession.source.sha1), sha);
   assert.equal(await folderFrame.evaluate(() => __studio.nodes.filter(node => node.type === 'filter').length), 0);
-  assert.equal(await page.$$eval('#editpanel #studio-frame', frames => frames.length), 1);
+  assert.equal(await page.$$eval('#edstudio #studio-frame', frames => frames.length), 1);
   assert.equal(await page.$$eval('dialog[open]', dialogs => dialogs.length), 0);
   const folderBaseline = await folderFrame.evaluate(async () => __testImageSignature((await __studio.gallery.export()).image));
   assert.equal(folderBaseline.hash, originalSignature.hash, 'folder editor started with previously baked pixels');
@@ -272,7 +279,7 @@ async function restore(derived, original) {
   assert.deepEqual(await frame.evaluate(() => __studio.gallery.size), [1280, 960]);
   assert.equal(await frame.evaluate(() => __studio.nodes.filter(node => node.type === 'filter').length), 0);
   assert.deepEqual(await frame.evaluate(() => __studio.nodes.map(node => node.type).sort()), ['out', 'src']);
-  passed('actual Studio iframe opens inside the gallery editing panel and completes image init without default filters');
+  passed('actual Studio iframe opens in the separate filter float and initializes without replacing the inline photo controls');
   await invert(frame);
   const originalThumb = await page.evaluate(async sha => __testImageSignature(await (await fetch('/thumb/' + sha)).blob()), sha);
   const saved = await saveStudio(), savedSignature = await renderSignature(sha, saved.meta);
@@ -306,6 +313,10 @@ async function restore(derived, original) {
   await assertCounts('Repeated Apply');
   await page.reload({waitUntil: 'networkidle2', timeout: 60000});
   await page.waitForFunction(() => typeof studioOpen === 'function');
+  // URL restoration opens the image after a 700ms boot timer. Wait for that
+  // actual navigation before starting another edit on the restored photograph.
+  await page.waitForFunction(sha => $('lb').classList.contains('show') && items[lbIdx]?.sha1 === sha &&
+    lbMeta?.sha1 === sha && $('lbimg').complete, {timeout: 30000}, sha);
   await show(sha);
   assert.equal((await renderSignature(sha)).hash, savedSignature.hash, 'saved appearance did not survive page reload');
   assert.equal(await page.evaluate(() => items[lbIdx].sha1), sha);

@@ -1,4 +1,4 @@
-#edstudio { border-top:1px solid var(--line); margin-top:10px; padding-top:8px; }
+#edstudio .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin:6px 0; }
 #edstudio .studio-prompt { flex-wrap:nowrap; }
 #studio-text { flex:1; width:0; min-width:120px; font-size:12px; }
 #edstudio button { white-space:nowrap; }
@@ -9,14 +9,45 @@
 #studio-frame { display:block; width:100%; height:360px; border:1px solid var(--line); border-radius:8px; background:#111117; }
 #studio-loading { position:absolute; inset:0; display:grid; place-items:center; background:var(--panel); color:var(--dim); z-index:1; }
 #studio-loading[hidden] { display:none; }
-#lb.scene-editing { justify-content:flex-start; overflow-y:auto; }
-#lb.scene-editing #lbimg { flex:none; max-height:42vh; }
-#lb.scene-editing #editpanel { flex:none; width:min(960px,94vw); }
+/* Keep the float outside the scrolling/backdrop-filter lightbox so fixed
+   coordinates stay relative to the viewport. Photo controls stay inline. */
+#edstudio {
+  position:fixed; z-index:26; top:24px; right:16px; margin:0; padding:12px 16px;
+  border:1px solid var(--line); border-radius:14px; cursor:default; backdrop-filter:blur(14px);
+  width:min(760px,calc(100vw - 32px)); max-width:var(--filter-panel-available-width,calc(100vw - 16px));
+  max-height:min(calc(100dvh - 48px),var(--filter-panel-available-height,100dvh));
+  overflow:auto; overscroll-behavior:contain; scrollbar-width:thin;
+  background:#14151af5; box-shadow:0 16px 46px #000a;
+}
+#filter-panel-header {
+  position:sticky; top:-12px; z-index:2; display:flex; align-items:center; gap:6px;
+  margin:-12px -16px 12px; padding:8px 10px; border-bottom:1px solid var(--line);
+  background:#191a20; border-radius:13px 13px 0 0;
+}
+#filter-panel-drag {
+  flex:1; min-width:0; text-align:left; border:0; background:transparent;
+  color:var(--tx); font-size:12px; font-weight:600; cursor:grab; touch-action:none;
+  user-select:none;
+}
+#filter-panel-drag::before { content:'⠿'; margin-right:8px; color:var(--dim); }
+#filter-panel-header > button:not(#filter-panel-drag) { flex:none; min-width:32px; padding:5px 9px; }
+#edstudio.is-dragging #filter-panel-drag { cursor:grabbing; }
+#edstudio.is-minimized { height:calc(var(--filter-panel-header-height,48px) + 2px); overflow:hidden; }
+#edstudio.is-minimized #filter-panel-header { border-bottom:0; border-radius:13px; }
 @media(max-width:900px) {
-  #lb.scene-editing #lbimg { max-height:36svh; }
-  #lb.scene-editing #editpanel { width:100%; max-height:none; overflow:visible; }
+  #edstudio {
+    top:auto; right:max(8px,env(safe-area-inset-right)); bottom:calc(16px + env(safe-area-inset-bottom));
+    width:calc(100vw - 16px - env(safe-area-inset-left) - env(safe-area-inset-right));
+    max-height:min(65svh,calc(100dvh - 24px),var(--filter-panel-available-height,100dvh));
+  }
+  #filter-panel-header > button { min-height:40px; }
   #studio-frame { height:430px; }
   #edstudio button { min-height:40px; }
   #edstudio .studio-prompt { flex-wrap:wrap; }
   #studio-text { min-width:160px; }
 }
+
+#edstudio[hidden], #lb:not(.editing) ~ #edstudio, #lb:not(.show) ~ #edstudio, #lb.imm ~ #edstudio { display:none; }
+#edstudio.is-concealed { clip-path:inset(50%); opacity:0; pointer-events:none; }
+.ed-filter-tools { display:inline-flex; align-items:center; gap:6px; padding-left:10px; border-left:1px solid var(--line); }
+#edfilteropen { white-space:nowrap; font-size:11px; padding:3px 9px; }

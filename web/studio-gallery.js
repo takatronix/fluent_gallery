@@ -1,6 +1,7 @@
 // The gallery owns the photo controls, preview and save. Studio supplies its
-// renderer and real node/parameter editor inside the same editing panel.
+// renderer and real node/parameter editor in a floating filter panel.
 let studioSession = null;
+$('edfilteropen').disabled = false;
 $('lbstudiobtn').disabled = false;
 $('lbstudiobtn').title = 'フィルターを個別に編集';
 for (const id of ['studio-generate', 'studio-random', 'studio-reset']) $(id).disabled = false;
@@ -22,7 +23,7 @@ function studioSetBusy(state) {
   for (const id of ['studio-generate', 'studio-random', 'studio-reset', 'lbstudiobtn']) $(id).disabled = busy;
   // Photo sliders remain usable while their debounced input image is loading.
   // Keep graph gestures out of a source replacement; commands wait for it below.
-  state.frame?.style.setProperty('pointer-events', busy || studioAdjustPending(state) ? 'none' : 'auto');
+  state.frame?.style.setProperty('pointer-events', busy || studioAdjustPending(state) || $('edstudio').classList.contains('is-dragging') ? 'none' : 'auto');
   edSyncStatus();
   if (!busy) studioScheduleAdjust(state);
 }
@@ -142,6 +143,7 @@ async function studioCancelAdjust(state) {
   finally { state.cancelAdjust = false; }
 }
 async function studioOpen() {
+  filterPanelFloating.open();
   if (studioSession) {
     const existing = studioSession;
     try { await existing.initialized; } catch (_) { return null; }
@@ -152,7 +154,8 @@ async function studioOpen() {
   const state = {session: studioId(), selectedSha: item.sha1, context: lbContext,
     controller: new AbortController(), ready: false, saving: false, updating: false, busy: 0,
     frame: null, requests: new Map(), history: [], graph: null, time: 0, sourceRevision: '0', previewRevision: -1,
-    adjustValues: structuredClone(edVals()), adjustVersion: 0, previewAdjustVersion: 0};
+    adjustValues: structuredClone(edVals()), adjustVersion: 0, previewAdjustVersion: 0,
+    naturalSize: lbView.tier === 'render'};
   state.initialized = new Promise((resolve, reject) => { state.resolveReady = resolve; state.rejectReady = reject; });
   state.initialized.catch(() => {});
   studioSession = state;
@@ -247,7 +250,7 @@ function studioPaint(state, blob) {
   const url = URL.createObjectURL(blob);
   state.previewUrls ??= new Set(); state.previewUrls.add(url);
   lbView.edited = true; lbView.comparing = false;
-  return lbView.apply(lbView.cancelPending(), url, 'scene', undefined, undefined, true).then(applied => {
+  return lbView.apply(lbView.cancelPending(), url, 'scene', state.width, state.height, true, state.naturalSize).then(applied => {
     if (!applied || studioSession !== state || adjustVersion !== state.adjustVersion || sourceRevision !== state.sourceRevision) {
       URL.revokeObjectURL(url); state.previewUrls.delete(url); return false;
     }
@@ -513,3 +516,154 @@ function studioClose(restore = true) {
     lbShow(lbIdx, 0).finally(() => { for (const url of urls || []) URL.revokeObjectURL(url); });
   } else { for (const url of urls || []) URL.revokeObjectURL(url); }
 }
+
+// Only the language prompt and native filter editor float over the photograph.
+// Moving, minimizing or hiding them preserves the shared photo/filter draft.
+const filterPanelFloating = (() => {
+  const panel = $('edstudio'), lightbox = $('lb');
+  const header = document.createElement('div');
+  header.id = 'filter-panel-header';
+  header.innerHTML = '<button type="button" id="filter-panel-drag" aria-label="フィルターを移動" aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight" title="ドラッグ、または矢印キーで移動（Shiftで大きく移動）">フィルター</button>' +
+    '<button type="button" id="filter-panel-minimize" aria-controls="edstudio" aria-expanded="true" title="フィルターを最小化">最小化</button>' +
+    '<button type="button" id="filter-panel-close" aria-label="フィルターを閉じる" title="フィルターを閉じる（編集中の内容は保持）">×</button>';
+  panel.prepend(header);
+  panel.setAttribute('role', 'region');
+  panel.setAttribute('aria-label', 'フィルター');
+  const handle = $('filter-panel-drag'), minimize = $('filter-panel-minimize');
+  const previousInert = new Map();
+  let drag = null, scheduled = 0, savedScroll = 0;
+
+  function visible() {
+    return lightbox.classList.contains('show') && lightbox.classList.contains('editing') &&
+      !panel.hidden && !panel.classList.contains('is-concealed') && panel.getClientRects().length > 0;
+  }
+  function viewport() {
+    const view = window.visualViewport;
+    return {left: view?.offsetLeft || 0, top: view?.offsetTop || 0,
+      width: view?.width || innerWidth, height: view?.height || innerHeight};
+  }
+  function setProperty(name, value) {
+    if (panel.style.getPropertyValue(name) !== value) panel.style.setProperty(name, value);
+  }
+  function place(left, top) {
+    const view = viewport(), rect = panel.getBoundingClientRect(), margin = 8;
+    const minLeft = view.left + margin, minTop = view.top + margin;
+    left = Math.max(minLeft, Math.min(left, Math.max(minLeft, view.left + view.width - rect.width - margin)));
+    top = Math.max(minTop, Math.min(top, Math.max(minTop, view.top + view.height - rect.height - margin)));
+    setProperty('left', Math.round(left) + 'px');
+    setProperty('top', Math.round(top) + 'px');
+    setProperty('right', 'auto'); setProperty('bottom', 'auto');
+  }
+  function clamp() {
+    const view = viewport();
+    setProperty('--filter-panel-available-width', Math.max(1, view.width - 16) + 'px');
+    setProperty('--filter-panel-available-height', Math.max(1, view.height - 16) + 'px');
+    if (!visible()) return;
+    setProperty('--filter-panel-header-height', Math.ceil(header.getBoundingClientRect().height) + 'px');
+    const rect = panel.getBoundingClientRect();
+    place(rect.left, rect.top);
+  }
+  function scheduleClamp() {
+    if (scheduled) return;
+    scheduled = requestAnimationFrame(() => { scheduled = 0; clamp(); });
+  }
+  function setMinimized(on) {
+    if (panel.classList.contains('is-minimized') === on) return;
+    if (on) {
+      savedScroll = panel.scrollTop;
+      panel.scrollTop = 0;
+      for (const child of panel.children) if (child !== header) {
+        previousInert.set(child, child.inert);
+        child.inert = true;
+      }
+    } else {
+      for (const [child, inert] of previousInert) child.inert = inert;
+      previousInert.clear();
+    }
+    panel.classList.toggle('is-minimized', on);
+    minimize.setAttribute('aria-expanded', String(!on));
+    minimize.textContent = on ? '展開' : '最小化';
+    minimize.title = on ? 'フィルターを展開' : 'フィルターを最小化';
+    if (!on) panel.scrollTop = savedScroll;
+    clamp();
+  }
+  function open() {
+    if (!lightbox.classList.contains('show')) return;
+    lightbox.classList.add('editing');
+    panel.hidden = false;
+    panel.classList.remove('is-concealed');
+    panel.inert = false;
+    panel.removeAttribute('aria-hidden');
+    $('edfilteropen')?.setAttribute('aria-expanded', 'true');
+    setMinimized(false);
+    clamp();
+  }
+  function hide(force = false) {
+    finishDrag();
+    // Keep the iframe laid out while a draft exists: source refresh/Undo waits
+    // for its next animation frame, including when this panel is out of view.
+    const keepRendering = !!studioSession && !force;
+    panel.classList.toggle('is-concealed', keepRendering);
+    panel.hidden = !keepRendering;
+    panel.inert = true;
+    panel.setAttribute('aria-hidden', 'true');
+    $('edfilteropen')?.setAttribute('aria-expanded', 'false');
+  }
+  function finishDrag(event) {
+    if (!drag || (event?.pointerId !== undefined && event.pointerId !== drag.pointerId)) return;
+    const pointerId = drag.pointerId;
+    drag = null;
+    panel.classList.remove('is-dragging');
+    try { if (handle.hasPointerCapture(pointerId)) handle.releasePointerCapture(pointerId); } catch (_) {}
+    if (studioSession) studioSetBusy(studioSession);
+    scheduleClamp();
+  }
+  handle.addEventListener('pointerdown', event => {
+    if (event.button !== 0 || event.isPrimary === false || !visible()) return;
+    event.preventDefault(); event.stopPropagation();
+    finishDrag(); clamp();
+    const rect = panel.getBoundingClientRect();
+    drag = {pointerId: event.pointerId, x: event.clientX, y: event.clientY, left: rect.left, top: rect.top};
+    panel.classList.add('is-dragging');
+    if (studioSession) studioSetBusy(studioSession);
+    handle.focus({preventScroll: true});
+    try { handle.setPointerCapture(event.pointerId); } catch (_) {}
+  });
+  window.addEventListener('pointermove', event => {
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    event.preventDefault(); event.stopPropagation();
+    place(drag.left + event.clientX - drag.x, drag.top + event.clientY - drag.y);
+  }, {capture: true, passive: false});
+  window.addEventListener('pointerup', finishDrag, true);
+  window.addEventListener('pointercancel', finishDrag, true);
+  handle.addEventListener('lostpointercapture', finishDrag);
+  window.addEventListener('blur', () => finishDrag());
+  handle.addEventListener('keydown', event => {
+    const offset = {ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1]}[event.key];
+    if (!offset) return;
+    event.preventDefault(); event.stopPropagation();
+    const rect = panel.getBoundingClientRect(), step = event.shiftKey ? 40 : 10;
+    place(rect.left + offset[0] * step, rect.top + offset[1] * step);
+  });
+  // Space/Enter must activate these buttons without invoking the viewer's
+  // global Space shortcut; moving the panel must not select another photo.
+  [header, $('edfilteropen')].forEach(controls => controls.addEventListener('keydown', event => {
+    if (event.key === ' ' || event.key === 'Enter' || event.key.startsWith('Arrow')) event.stopPropagation();
+  }));
+  minimize.addEventListener('click', () => setMinimized(!panel.classList.contains('is-minimized')));
+  $('filter-panel-close').addEventListener('click', () => {
+    hide();
+    $('edfilteropen')?.focus({preventScroll: true});
+  });
+  new MutationObserver(() => {
+    if (!lightbox.classList.contains('show') || !lightbox.classList.contains('editing')) hide(true);
+    else if (visible()) clamp();
+  }).observe(lightbox, {attributes: true, attributeFilter: ['class']});
+  const observer = new ResizeObserver(scheduleClamp);
+  observer.observe(panel); observer.observe(header);
+  window.addEventListener('resize', scheduleClamp, {passive: true});
+  window.visualViewport?.addEventListener('resize', scheduleClamp, {passive: true});
+  window.visualViewport?.addEventListener('scroll', scheduleClamp, {passive: true});
+  scheduleClamp();
+  return {open, hide, clamp, expand: () => setMinimized(false), toggleMinimized: () => setMinimized(!panel.classList.contains('is-minimized'))};
+})();

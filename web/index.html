@@ -705,11 +705,14 @@
         oninput="edLive()"><span class="val" id="edv_saturation">0</span>
       <label>色温度</label><input type="range" id="ed_temperature" min="-100" max="100" value="0"
         oninput="edLive()"><span class="val" id="edv_temperature">0</span></div>
-    <div class="row" id="edfilters"></div>
+    <div class="row" id="edfilters"><span class="ed-filter-tools" role="group" aria-label="言語・フローフィルター"><button id="edfilteropen" class="ghost" aria-controls="edstudio" aria-expanded="false" disabled onclick="filterPanelFloating.open()">言語・フィルター</button></span></div>
     <div class="row" id="edactions"></div>
     <div class="row"><span id="edstatus" role="status" aria-live="polite"></span></div>
     <div class="row"><span id="edhist"></span></div>
-    <div id="edstudio">
+  </div>
+  <div id="lbmeta" onclick="event.stopPropagation()"></div>
+</div>
+  <div id="edstudio" hidden onclick="event.stopPropagation()">
       <div class="row studio-prompt">
         <input id="studio-text" type="text" placeholder="フィルターの指示（例：境界線だけにして）" onkeydown="if(event.key==='Enter'){event.preventDefault();studioGenerate();}">
         <button id="studio-generate" disabled onclick="studioGenerate()">指示を適用</button>
@@ -723,10 +726,7 @@
         <div class="row"><span id="studio-status" role="status" aria-live="polite"></span><button id="studio-close" class="ghost" onclick="studioClose()">キャンセル</button></div>
         <div id="studio-frame-wrap"><div id="studio-loading">フィルターを準備しています…</div></div>
       </div>
-    </div>
   </div>
-  <div id="lbmeta" onclick="event.stopPropagation()"></div>
-</div>
 <div id="toast"></div>
 <div id="hoverpv" style="display:none; position:fixed; z-index:40; pointer-events:none">
   <img id="hoverpv_img" style="max-width:280px; max-height:280px; border-radius:10px;
@@ -2774,14 +2774,14 @@ const lbView = {
     return this.gen;
   },
   // 表示箱。nw/nh=0で解除(自然寸法モード)
-  box(nw, nh) {
+  box(nw, nh, naturalSize = false) {
     const img = $('lbimg');
     if (!nw || !nh) { img.removeAttribute('width'); img.removeAttribute('height'); return; }
     // 全画面(imm)中は画面いっぱい、通常はバー/メタの余白を残す
     const imm = $('lb').classList.contains('imm');
-    const mw = imm ? innerWidth : innerWidth * .94;
-    const photoHeight = $('lb').classList.contains('scene-editing') ? (innerWidth <= 900 ? .36 : .42) : .74;
-    const mh = imm ? innerHeight : innerHeight * photoHeight;
+    const mw = Math.min(imm ? innerWidth : innerWidth * .94, naturalSize ? nw : Infinity);
+    // The filter panel floats, so opening it never reduces the photo fit.
+    const mh = Math.min(imm ? innerHeight : innerHeight * .74, naturalSize ? nh : Infinity);
     const ar = nw / nh;
     let bw = Math.min(mw, mh * ar), bh = bw / ar;
     if (bh > mh) { bh = mh; bw = bh * ar; }
@@ -2792,6 +2792,7 @@ const lbView = {
   refit() {
     const img = $('lbimg');
     if (this.tier === 'render') return; // 編集レンダは自然寸法のまま
+    if (this.tier === 'scene' && this._sceneBox) { this.box(...this._sceneBox); return; }
     if (img.naturalWidth) this.box(img.naturalWidth, img.naturalHeight);
   },
   async decoded(url) {
@@ -2808,7 +2809,7 @@ const lbView = {
   // 画面が止まったままになる(キャッシュ済みの間は流れ、未読込の所で固まる 2026-09-06)。
   // → サムネは gen が最新でなくても「いま出ている物(shownGen)より新しければ」出す=前へは戻らないが、必ず前進する。
   //   重い層(pv/full/render)は従来どおり最新 gen だけ
-  async apply(gen, url, tier, nw, nh, reportError = false) {
+  async apply(gen, url, tier, nw, nh, reportError = false, naturalSize = false) {
     const stale = () => gen < (this.shownGen || 0) || (gen !== this.gen && tier !== 'thumb');
     if (stale()) return false;
     let pre;
@@ -2822,7 +2823,9 @@ const lbView = {
     const order = {thumb: 1, pv: 2, full: 3};
     if (gen === this.shownGen && order[tier] && order[tier] < (order[this.tier] || 0)) return false;
     const img = $('lbimg');
-    this.box(nw === undefined ? pre.naturalWidth : nw, nh === undefined ? pre.naturalHeight : nh);
+    const size = [nw === undefined ? pre.naturalWidth : nw, nh === undefined ? pre.naturalHeight : nh, naturalSize];
+    this.box(...size);
+    if (tier === 'scene') this._sceneBox = size;
     img.dataset.tier = tier;
     this.tier = tier;
     this.shownGen = gen;
@@ -3907,7 +3910,11 @@ function lbUrl(sha, w) {
   const edited = lbMeta && lbMeta.sha1 === sha && (lbMeta.edits || []).length;
   const seg = lbSegOn && lbMeta?.sha1 === sha && lbMeta.seg?.shapes?.length;
   if (edited || seg) {
-    return '/render/' + sha + '?v=' + (lbMeta.edits_rev || '0') + (w ? '&w=' + w : '') + (seg ? '&seg=1' : '');
+    // View a saved filter image at its actual dimensions, just as immediately
+    // after Apply. The 1600px thumbnail can upscale a small crop on Cancel.
+    const baked = !seg && lbMeta.edits?.at(-1)?.op === 'studio';
+    return '/render/' + sha + '?v=' + (lbMeta.edits_rev || '0') +
+      (baked ? '&w=0' : w ? '&w=' + w : '') + (seg ? '&seg=1' : '');
   }
   return w ? '/preview/' + sha : '/img/' + sha;
 }
@@ -4373,9 +4380,9 @@ const ED_FILTERS = [
   {name: 'sharpen', label: 'シャープ', css: 'contrast(1.12)'},
   {name: 'blur', label: 'ぼかし', css: 'blur(2px)'},
 ];
-$('edfilters').innerHTML = ED_FILTERS.map(f => `<span class="fxchip"
+$('edfilters').insertAdjacentHTML('afterbegin', ED_FILTERS.map(f => `<span class="fxchip"
   onmouseenter="$('lbimg').style.filter='${f.css}'" onmouseleave="edLive()"
-  onclick="edPush({op:'filter', params:${JSON.stringify({name: f.name, ...(f.params || {})}).replace(/"/g, '&quot;')}})">${f.label}</span>`).join('');
+  onclick="edPush({op:'filter', params:${JSON.stringify({name: f.name, ...(f.params || {})}).replace(/"/g, '&quot;')}})">${f.label}</span>`).join(''));
 function edToggle() {
   const on = $('lb').classList.toggle('editing');
   if (!on && typeof studioClose === 'function') studioClose();
@@ -5530,7 +5537,10 @@ function fsSync() {
   $('fsbtn').classList.toggle('on', on);
 }
 document.addEventListener('fullscreenchange', () => { fsSync(); setTimeout(() => { commitCell(); lbView.refit(); }, 60); });
-window.addEventListener('resize', () => { if (tauriWin()) fsSync(); }); // ネイティブ全画面(緑ボタン)にもボタン表記を追従
+window.addEventListener('resize', () => {
+  if (tauriWin()) fsSync(); // ネイティブ全画面(緑ボタン)にもボタン表記を追従
+  if ($('lb').classList.contains('show')) lbView.refit();
+});
 // Macアプリ(Tauri/WKWebView)は target=_blank / window.open の新規窓を黙って捨てる → 外部URLは既定ブラウザで開く
 function openExternal(u) {
   const op = window.__TAURI__?.opener?.openUrl;

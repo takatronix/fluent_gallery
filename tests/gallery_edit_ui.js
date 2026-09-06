@@ -177,7 +177,13 @@ async function waitSamples(expected, label, tolerance = 3) {
   }
   throw new Error(`${label}: actual=${JSON.stringify(latest)} expected=${JSON.stringify(expected)}`);
 }
+async function openFilterPanel() {
+  if (await page.$eval('#edstudio', panel => panel.hidden || panel.classList.contains('is-concealed') || getComputedStyle(panel).visibility === 'hidden' || getComputedStyle(panel).display === 'none'))
+    await page.click('#edfilteropen');
+  await page.waitForSelector('#edstudio', {visible: true});
+}
 async function languageInvert() {
+  await openFilterPanel();
   await page.$eval('#studio-text', input => { input.value = '色反転'; });
   await page.click('#studio-generate'); await filterIdle();
   const frame = await (await page.$('#studio-frame')).contentFrame();
@@ -187,16 +193,18 @@ async function languageInvert() {
 async function integratedFiltersAndMobile(sha, originalPixels) {
   assert.equal(await page.$$eval('#lbbar #lbstudiobtn', elements => elements.length), 0);
   for (const selector of ['#studio-text', '#studio-generate', '#studio-random', '#studio-reset', '#lbstudiobtn']) {
-    assert.equal(await page.$$eval('#editpanel ' + selector, elements => elements.length), 1);
+    assert.equal(await page.$$eval('#edstudio ' + selector, elements => elements.length), 1);
   }
   const invertedSamples = originalPixels.samples.map(pixel => pixel.map((value, index) => index < 3 ? 255 - value : value));
   let frame = await languageInvert();
   assert(frame.url().includes('mode=inline'));
-  assert.equal(await page.$$eval('#editpanel #studio-frame', elements => elements.length), 1);
+  assert.equal(await page.$$eval('#edstudio #studio-frame', elements => elements.length), 1);
+  assert.equal(await page.$$eval('#editpanel #edstudio', elements => elements.length), 0);
+  assert.equal(await page.$$eval('#editpanel #edfilteropen', elements => elements.length), 1);
   await waitSamples(invertedSamples, 'language filter did not change the actual gallery preview');
   await assertGalleryRemainsVisible();
   assert.equal((await api('/api/edits/' + sha)).edits.length, 0, 'filter draft mutated original metadata');
-  pass('language filter runs inline in the photo panel and changes the actual main image without opening another screen');
+  pass('language filters float separately from the original inline photo controls and update the same main image');
 
   // Exercise the real Studio inspector slider, then the gallery's shared Undo.
   const exposureId = await frame.evaluate(() => {
@@ -302,9 +310,10 @@ async function integratedFiltersAndMobile(sha, originalPixels) {
   assert.deepEqual(await counts(), initialCounts, 'Reset changed gallery, source, or album membership');
 
   await show(sha); await page.setViewport({width: 390, height: 844});
+  if (!await page.$eval('#edstudio', panel => panel.hidden || panel.classList.contains('is-concealed'))) await page.click('#filter-panel-close');
   const controls = ['#ed_exposure', '#ed_contrast', '#ed_saturation', '#ed_temperature', '#edauto', '#cropbtn',
     '#edactions button[onclick="edUndo()"]', '#edactions button[onclick="edClear()"]', '#edapply',
-    '#studio-text', '#studio-generate', '#studio-random', '#studio-reset', '#lbstudiobtn'];
+    '#edfilteropen'];
   for (const selector of controls) {
     await page.$eval(selector, element => element.scrollIntoView({block: 'center', inline: 'nearest'}));
     const reachable = await page.$eval(selector, element => {
@@ -317,6 +326,12 @@ async function integratedFiltersAndMobile(sha, originalPixels) {
     assert(reachable.visible && reachable.inside && reachable.clickable, selector + ': ' + JSON.stringify(reachable));
   }
   frame = await languageInvert(); await waitSamples(invertedSamples, 'mobile main preview');
+  for (const selector of ['#studio-text', '#studio-generate', '#studio-random', '#studio-reset', '#lbstudiobtn']) {
+    await page.$eval(selector, element => element.scrollIntoView({block: 'nearest'}));
+    assert(await page.$eval(selector, element => { const r = element.getBoundingClientRect();
+      const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+      return r.top >= 0 && r.bottom <= innerHeight + 1 && (hit === element || element.contains(hit)); }), selector + ' not reachable in filter float');
+  }
   await assertGalleryRemainsVisible();
   await page.screenshot({path: '/tmp/fg-gallery-edit-mobile.png'});
   // Cancel a pending slider in the same event turn, before its debounce fires.
@@ -328,7 +343,7 @@ async function integratedFiltersAndMobile(sha, originalPixels) {
   await waitForImage(sha); assert.deepEqual(await signature(), originalPixels);
   assert.deepEqual(await page.evaluate(() => edVals()), {}, 'Cancel retained pending photo sliders');
   assert.equal(await page.$eval('#lbimg', image => image.style.filter), '');
-  pass('mobile photo and filter controls remain reachable in the same panel; Cancel restores the selected original');
+  pass('mobile inline photo controls and floating filter controls remain reachable; Cancel restores the selected original');
 }
 
 (async () => {
@@ -375,11 +390,12 @@ async function integratedFiltersAndMobile(sha, originalPixels) {
   await show(fresh);
   assert.equal(await page.evaluate(sha => edStates.has(sha), fresh), false, 'fresh image unexpectedly has an edit state');
   if (!await page.evaluate(() => $('lb').classList.contains('editing'))) await page.click('#edbtn');
-  await page.click('#lbstudiobtn'); await filterIdle();
+  await openFilterPanel(); await page.click('#lbstudiobtn'); await filterIdle();
   assert.equal(await page.evaluate(() => studioSession.source.sha1), fresh);
   await assertGalleryRemainsVisible();
   await page.click('#studio-close'); await page.waitForFunction(() => !studioSession);
   await waitForImage(fresh);
+  if (!await page.$eval('#edstudio', panel => panel.hidden)) await page.click('#filter-panel-close');
   assert.equal((await api('/api/edits/' + fresh)).edits.length, 0);
   pass('a fresh image with no prior edit state opens inline immediately and Cancel preserves the untouched photo');
   const originalPixels = await originalEditingControls(sha);
