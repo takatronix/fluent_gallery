@@ -9,6 +9,9 @@ assert(BASE, 'Set FG_URL to an isolated test server');
 const target = new URL(BASE);
 assert(['127.0.0.1', 'localhost'].includes(target.hostname) && target.port !== '8790');
 const nonce = crypto.randomBytes(8).toString('hex'), source = `crawl:_gallery_edit_${nonce}`;
+// Keep this fixture below the desktop/mobile CPU preview caps so preview and
+// export have identical pixel dimensions; the Studio suite covers large exports.
+const FIXTURE_WIDTH = 480, FIXTURE_HEIGHT = 360;
 const created = new Set(), originals = new Map(), browserErrors = [], networkErrors = [];
 let browser, page, checks = 0;
 const pass = label => { checks++; console.log(`PASS ${label}`); };
@@ -48,11 +51,16 @@ async function assertGalleryRemainsVisible() {
 async function signature(selector = '#lbimg') {
   return page.evaluate(async selector => {
     let element;
-    if (selector === 'draft') {
+    if (selector === 'draft' || selector === 'pending') {
       const state = studioSession;
+      const edits = structuredClone(state.photoEdits);
+      if (selector === 'pending') {
+        const params = edVals();
+        if (Object.keys(params).length) edits.push({op: 'adjust', params});
+      }
       const response = await fetch(`/api/studio/${state.source.sha1}/preview`, {method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({edits: state.photoEdits, source_edits_rev: state.source.edits_rev})});
+        body: JSON.stringify({edits, source_edits_rev: state.source.edits_rev})});
       if (!response.ok) throw new Error('Draft preview failed: ' + response.status);
       element = await response.blob();
     } else element = document.querySelector(selector);
@@ -136,6 +144,15 @@ async function filterIdle() {
   await page.waitForFunction(() => studioSession?.ready && !studioIsBusy() &&
     $('lbimg').complete && $('lbimg').naturalWidth > 0, {timeout: 120000});
 }
+async function pendingSlidersIdle() {
+  await filterIdle();
+  await page.waitForFunction(() => {
+    const state = studioSession;
+    return state && !state.adjustTask && !state.adjustTimer &&
+      state.previewInputKey === studioInputKey(state, studioPreviewEdits(state)) &&
+      state.paintedAdjustVersion === state.adjustVersion;
+  }, {timeout: 60000});
+}
 function nearSamples(actual, expected, tolerance = 3) {
   return actual.every((pixel, index) => pixel.slice(0, 3).every((value, channel) =>
     Math.abs(value - expected[index][channel]) <= tolerance));
@@ -210,15 +227,40 @@ async function integratedFiltersAndMobile(sha, originalPixels) {
   await frame.waitForFunction(() => __studio.nodes.every(node => node.type !== 'filter'));
   assert.deepEqual(await page.evaluate(() => studioSession.photoEdits), photoDraft, 'filter-only Reset discarded photo adjustments');
   await waitSamples(adjustedInput.samples, 'filter Reset did not reveal photo-adjusted pixels');
+  await page.$eval('#ed_exposure', input => { input.value = '20'; input.dispatchEvent(new Event('input', {bubbles: true})); });
+  const pendingResetInput = await signature('pending');
+  await waitSamples(pendingResetInput.samples, 'pending photo slider did not refresh the actual native preview');
+  await pendingSlidersIdle();
   await page.click('#edactions button[onclick="edClear()"]'); await filterIdle();
   assert.equal(await page.evaluate(() => studioSession.photoEdits.length), 0);
+  assert.deepEqual(await page.evaluate(() => edVals()), {}, 'original Reset retained pending photo sliders');
+  assert.equal(await page.$eval('#lbimg', image => image.style.filter), '');
   await waitSamples(originalPixels.samples, 'original Reset did not clear both photo and filter drafts');
   assert.equal((await api('/api/edits/' + sha)).edits.length, 0);
   pass('Auto works with filters as a draft; filter Reset preserves photo adjustments and original Reset clears both');
 
   frame = await languageInvert(); await waitSamples(invertedSamples, 'reapplied filter');
   await page.click('#edauto'); await filterIdle();
-  await page.$eval('#ed_exposure', input => { input.value = '20'; input.dispatchEvent(new Event('input', {bubbles: true})); });
+  const beforeSliders = await page.evaluate(() => ({photoEdits: structuredClone(studioSession.photoEdits),
+    history: structuredClone(studioSession.history)}));
+  const beforeSliderPixels = await signature();
+  // Several slider positions represent one pending adjustment, not several
+  // committed edits, and must run before the native invert in the real preview.
+  await page.$eval('#ed_exposure', input => {
+    for (const value of ['10', '30', '20']) {
+      input.value = value; input.dispatchEvent(new Event('input', {bubbles: true}));
+    }
+  });
+  const pendingInput = await signature('pending');
+  const pendingInverted = pendingInput.samples.map(pixel => pixel.map((value, index) => index < 3 ? 255 - value : value));
+  await waitSamples(pendingInverted, 'exposure must be rendered before native invert, without a CSS approximation');
+  await pendingSlidersIdle();
+  assert.equal(await page.$eval('#lbimg', image => image.style.filter), '', 'active native preview retained a CSS photo filter');
+  const visibleBeforeSave = await signature();
+  assert.deepEqual([visibleBeforeSave.width, visibleBeforeSave.height], [FIXTURE_WIDTH, FIXTURE_HEIGHT]);
+  assert.notEqual(visibleBeforeSave.hash, beforeSliderPixels.hash, 'pending exposure did not change actual main image pixels');
+  assert.deepEqual(await page.evaluate(() => ({photoEdits: structuredClone(studioSession.photoEdits),
+    history: structuredClone(studioSession.history)})), beforeSliders, 'pending slider previews committed duplicate edits or Undo snapshots');
   const savedResponse = page.waitForResponse(response => response.ok() && response.request().method() === 'POST' &&
     /^\/api\/studio\/[a-f0-9]+\/save$/.test(new URL(response.url()).pathname), {timeout: 120000});
   await page.click('#edapply');
@@ -226,15 +268,18 @@ async function integratedFiltersAndMobile(sha, originalPixels) {
   await page.waitForFunction(sha => !studioSession && items[lbIdx]?.sha1 === sha, {timeout: 60000}, saved.sha1);
   await waitForImage(saved.sha1);
   assert.notEqual(saved.sha1, sha); assert.equal(saved.meta.studio.source_sha, sha);
-  assert.deepEqual([saved.meta.w, saved.meta.h], [1280, 960]);
+  assert.deepEqual([saved.meta.w, saved.meta.h], [FIXTURE_WIDTH, FIXTURE_HEIGHT]);
   assert(!saved.meta.edits?.length);
   assert(saved.meta.studio.recipe.photo_edits.some(edit => edit.op === 'auto'));
-  assert(saved.meta.studio.recipe.photo_edits.some(edit => edit.op === 'adjust' && edit.params.exposure === .2));
+  const savedAdjustments = saved.meta.studio.recipe.photo_edits.filter(edit => edit.op === 'adjust');
+  assert.equal(savedAdjustments.length, 1, 'pending exposure was committed more than once');
+  assert.equal(savedAdjustments[0].params.exposure, .2);
   assert(saved.meta.studio.recipe.graph.n.some(node => node.t === 'filter' && node.f === 'invert'));
+  assert.deepEqual(await signature(), visibleBeforeSave, 'saved PNG pixels differ from the actual main preview shown before Apply');
   assert(!nearSamples((await signature()).samples, originalPixels.samples, 8));
   assert.equal((await api('/api/edits/' + sha)).edits.length, 0);
   await assertGalleryRemainsVisible();
-  pass('the original Apply button saves photo adjustments and native filters together at full resolution, preserving the source');
+  pass('pending photo sliders render before native filters with no duplicate edits; Apply saves exactly the visible full-resolution pixels');
   await page.screenshot({path: '/tmp/fg-gallery-edit-saved.png'});
 
   await show(sha); await page.setViewport({width: 390, height: 844});
@@ -255,8 +300,15 @@ async function integratedFiltersAndMobile(sha, originalPixels) {
   frame = await languageInvert(); await waitSamples(invertedSamples, 'mobile main preview');
   await assertGalleryRemainsVisible();
   await page.screenshot({path: '/tmp/fg-gallery-edit-mobile.png'});
-  await page.click('#studio-close'); await page.waitForFunction(() => !studioSession && !$('studio-frame'));
+  // Cancel a pending slider in the same event turn, before its debounce fires.
+  await page.evaluate(() => {
+    const input = $('ed_exposure'); input.value = '30'; input.dispatchEvent(new Event('input', {bubbles: true}));
+    $('studio-close').click();
+  });
+  await page.waitForFunction(() => !studioSession && !$('studio-frame'));
   await waitForImage(sha); assert.deepEqual(await signature(), originalPixels);
+  assert.deepEqual(await page.evaluate(() => edVals()), {}, 'Cancel retained pending photo sliders');
+  assert.equal(await page.$eval('#lbimg', image => image.style.filter), '');
   pass('mobile photo and filter controls remain reachable in the same panel; Cancel restores the selected original');
 }
 
@@ -279,8 +331,8 @@ async function integratedFiltersAndMobile(sha, originalPixels) {
   });
   await page.goto(BASE, {waitUntil: 'networkidle2', timeout: 60000});
   await page.waitForFunction(() => typeof edToggle === 'function');
-  const upload = await page.evaluate(async ({source, nonce}) => {
-    const canvas = document.createElement('canvas'); canvas.width = 1280; canvas.height = 960;
+  const upload = await page.evaluate(async ({source, nonce, width, height}) => {
+    const canvas = document.createElement('canvas'); canvas.width = width; canvas.height = height;
     const context = canvas.getContext('2d');
     for (let x = 0; x < canvas.width; x++) {
       context.fillStyle = `rgb(${25 + Math.round(x / 32)},75,140)`; context.fillRect(x, 0, 1, canvas.height);
@@ -293,7 +345,7 @@ async function integratedFiltersAndMobile(sha, originalPixels) {
     form.append('file', await new Promise(resolve => canvas.toBlob(resolve, 'image/png')), 'fresh-gallery-edit.png');
     const response = await fetch('/api/upload', {method: 'POST', body: form});
     return {ok: response.ok, result: await response.json()};
-  }, {source, nonce});
+  }, {source, nonce, width: FIXTURE_WIDTH, height: FIXTURE_HEIGHT});
   assert(upload.ok && upload.result.added === 2, JSON.stringify(upload));
   const listing = await api('/api/images?' + new URLSearchParams({source, limit: '10'}));
   assert.equal(listing.items.length, 2);

@@ -1736,6 +1736,7 @@ struct AlbumIn {
     #[serde(default)] engines: Option<Vec<String>>, // 検索元の選択(空=全部)
     #[serde(default)] kind: String, // ""|"crawl"=収集 / "gen"=AI生成(docs/gen-design.md)。空なら既存を引き継ぐ
     #[serde(default)] recipe: Value, // 生成レシピ {size, steps, ...}。object 以外なら既存を引き継ぐ
+    #[serde(default)] create: bool, // true=新規作成のつもり。同名が既にあれば作らずに 409 で断る
 }
 
 async fn api_album_make(State(app): S, Json(a): Json<AlbumIn>) -> impl IntoResponse {
@@ -1744,6 +1745,14 @@ async fn api_album_make(State(app): S, Json(a): Json<AlbumIn>) -> impl IntoRespo
     let dir = album_dir(&app.root);
     // 上書き保存なので、UI の部分更新(自動保存・スイッチ)が送ってこない項目は既存から引き継ぐ
     let prev = std::fs::read_to_string(dir.join(format!("{slug}.json"))).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok());
+    // 新規作成で同名があれば、黙って上書きせず断る。
+    // (「フォルダ+」から既存と同じ名前で作ると、新しいフォルダは増えないのに
+    //   既存の目標だけが書き換わり、作られなかったように見えて元の設定も失われていた)
+    if a.create && prev.is_some() {
+        return (StatusCode::CONFLICT,
+                Json(json!({"detail": format!("「{slug}」はもうあります。別の名前にするか、そのフォルダを開いて設定を変えてください")})))
+            .into_response();
+    }
     let kind = if !a.kind.is_empty() { a.kind.clone() } else { prev.as_ref().and_then(|p| p["kind"].as_str()).unwrap_or("").to_string() };
     let recipe = if a.recipe.is_object() { a.recipe.clone() } else { prev.as_ref().map(|p| p["recipe"].clone()).filter(|v| v.is_object()).unwrap_or(json!({})) };
     let prev_str = |k: &str| prev.as_ref().and_then(|p| p[k].as_str()).unwrap_or("").to_string();

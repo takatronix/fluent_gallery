@@ -576,10 +576,11 @@ const check = (name, ok, detail = '') => {
   // 前の検査(連続削除)がライトボックスを開いたままなので閉じる。
   // 開いていると全面オーバーレイがサイドバーを覆い、実マウスのクリックが届かない
   await p.evaluate(() => closeLb());
-  await new Promise(r => setTimeout(r, 500));
+  await p.waitForFunction(() => !document.getElementById('lb').classList.contains('show'), {timeout: 5000});
   // 操作アイコンはホバーで出て、その瞬間に行の間隔も詰まる(枚数が隠れる)。
   // だから「ホバーしてから座標を測って押す」順でないと、ズレた場所を押して何も起きない
   const penClick = async sel => {
+    await p.waitForSelector(sel, {visible: true, timeout: 5000});
     const home = await p.evaluate(s => {
       const row = document.querySelector(s);
       if (!row) return null;
@@ -589,24 +590,32 @@ const check = (name, ok, detail = '') => {
     }, sel);
     if (!home) return false;
     await p.mouse.move(home.x, home.y); // ホバー
-    await new Promise(r => setTimeout(r, 150));
-    const pt = await p.evaluate(s => {
+    // 固定時間では、閉じるアニメーションや再描画の後にアイコンがまだ隠れている場合がある。
+    // 実マウスの当たり先と座標が一フレーム安定したことを確認し、クリック自体は一度だけ行う。
+    const target = await p.waitForFunction(async s => {
       const d = [...document.querySelector(s).querySelectorAll('.del')].find(x => x.title.startsWith('名前を変える'));
       const r = d?.getBoundingClientRect();
-      return r && r.width ? {x: r.x + r.width / 2, y: r.y + r.height / 2} : null;
-    }, sel);
-    if (!pt) return false;
+      if (!r?.width || !r.height) return false;
+      const point = {x: r.x + r.width / 2, y: r.y + r.height / 2};
+      if (!d.contains(document.elementFromPoint(point.x, point.y))) return false;
+      await new Promise(resolve => requestAnimationFrame(resolve));
+      const next = d.getBoundingClientRect();
+      return d.isConnected && next.x === r.x && next.y === r.y && next.width === r.width && next.height === r.height &&
+        d.contains(document.elementFromPoint(point.x, point.y)) && point;
+    }, {polling: 'raf', timeout: 5000}, sel);
+    const pt = await target.jsonValue();
+    await target.dispose();
     await p.mouse.click(pt.x, pt.y); // 実マウスで押す(編集中の入力のblurとの順番を本番どおりに再現)
     return true;
   };
   await penClick('.nav[data-album="_uitest_b"]');
-  await new Promise(r => setTimeout(r, 300));
+  await p.waitForSelector('.nav[data-album="_uitest_b"] input.rn', {visible: true, timeout: 5000});
   const open1 = await p.evaluate(() => document.querySelector('input.rn')?.closest('.nav')?.dataset.album);
   await penClick('.nav[data-album="_uitest2"]'); // 開いたまま別の✎を押す
-  await new Promise(r => setTimeout(r, 400));
+  await p.waitForSelector('.nav[data-album="_uitest2"] input.rn', {visible: true, timeout: 5000});
   const open2 = await p.evaluate(() => document.querySelector('input.rn')?.closest('.nav')?.dataset.album);
   await p.keyboard.press('Escape');
-  await new Promise(r => setTimeout(r, 300));
+  await p.waitForFunction(() => !document.querySelector('input.rn') && !renaming, {timeout: 5000});
   const closed = await p.evaluate(() => !document.querySelector('input.rn') && !renaming);
   check('✎連打(開いたまま別の行も押せる)', open1 === '_uitest_b' && open2 === '_uitest2' && closed,
     `${open1} → ${open2}`);

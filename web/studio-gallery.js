@@ -20,8 +20,11 @@ function studioSetBusy(state) {
   if (studioSession !== state) return;
   const busy = studioIsBusy();
   for (const id of ['studio-generate', 'studio-random', 'studio-reset', 'lbstudiobtn']) $(id).disabled = busy;
-  state.frame?.style.setProperty('pointer-events', busy ? 'none' : 'auto');
+  // Photo sliders remain usable while their debounced input image is loading.
+  // Keep graph gestures out of a source replacement; commands wait for it below.
+  state.frame?.style.setProperty('pointer-events', busy || studioAdjustPending(state) ? 'none' : 'auto');
   edSyncStatus();
+  if (!busy) studioScheduleAdjust(state);
 }
 function studioSnapshot(state) {
   return {graph: state.graph ? structuredClone(state.graph) : null,
@@ -36,16 +39,107 @@ function studioHistory(state) {
   if (studioSession !== state) return;
   edHist(state.photoEdits);
 }
-async function studioImage(state) {
+async function studioImage(state, edits = state.photoEdits, signal = state.controller.signal) {
   const response = await fetch(`/api/studio/${state.source.sha1}/preview`, {
-    method: 'POST', signal: state.controller.signal,
+    method: 'POST', signal,
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({edits: state.photoEdits, source_edits_rev: state.source.edits_rev})});
+    body: JSON.stringify({edits, source_edits_rev: state.source.edits_rev})});
   if (!response.ok) {
     let detail; try { detail = (await response.json()).detail; } catch (_) {}
     throw new Error(detail || '写真の調整結果を読み込めませんでした');
   }
   return response.blob();
+}
+function studioPreviewEdits(state) {
+  const edits = structuredClone(state.photoEdits || []);
+  if (Object.keys(state.adjustValues || {}).length) edits.push({op: 'adjust', params: structuredClone(state.adjustValues)});
+  return edits;
+}
+function studioInputKey(state, edits) {
+  return JSON.stringify([state.source?.sha1, state.source?.edits_rev, edits]);
+}
+function studioAdjustPending(state) {
+  return !!state.ready && (state.adjustTask || state.adjustTimer ||
+    state.previewInputKey !== studioInputKey(state, studioPreviewEdits(state)));
+}
+function studioScheduleAdjust(state) {
+  if (studioSession !== state || !state.ready || studioIsBusy() || state.adjustTask || state.adjustTimer) return;
+  const key = studioInputKey(state, studioPreviewEdits(state));
+  if (key === state.previewInputKey) { state.previewAdjustVersion = state.adjustVersion; return; }
+  if (key === state.adjustFailedKey) return;
+  state.adjustTimer = setTimeout(() => {
+    state.adjustTimer = null;
+    if (studioSession !== state || studioIsBusy()) return;
+    studioFlushAdjust(state).catch(error => {
+      if (studioSession === state) studioStatus(state, error.message);
+    });
+  }, 180);
+}
+function studioPreviewAdjust(values) {
+  const state = studioSession;
+  if (!state || JSON.stringify(values) === JSON.stringify(state.adjustValues)) return;
+  state.adjustValues = structuredClone(values);
+  state.adjustVersion++;
+  state.adjustDue = Date.now() + 180;
+  state.adjustFailedKey = null;
+  clearTimeout(state.adjustTimer); state.adjustTimer = null;
+  state.adjustController?.abort();
+  if (state.ready) lbView.cancelPending();
+  studioSetBusy(state);
+}
+async function studioFlushAdjust(state) {
+  clearTimeout(state.adjustTimer); state.adjustTimer = null;
+  state.adjustDue = 0; state.adjustWake?.();
+  if (state.adjustTask) return state.adjustTask;
+  const task = Promise.resolve().then(async () => {
+    while (studioSession === state && state.ready && !state.cancelAdjust) {
+      const wait = (state.adjustDue || 0) - Date.now();
+      if (wait > 0) {
+        await new Promise(resolve => {
+          const timer = setTimeout(() => { state.adjustWake = null; resolve(); }, wait);
+          state.adjustWake = () => { clearTimeout(timer); state.adjustWake = null; resolve(); };
+        });
+        continue;
+      }
+      const edits = studioPreviewEdits(state), key = studioInputKey(state, edits);
+      if (key === state.previewInputKey) { state.previewAdjustVersion = state.adjustVersion; break; }
+      const version = state.adjustVersion, controller = new AbortController();
+      state.adjustController = controller;
+      const abort = () => controller.abort();
+      state.controller.signal.addEventListener('abort', abort, {once: true});
+      try {
+        await studioRefresh(state, {edits, inputKey: key, adjustVersion: version,
+          signal: controller.signal, draft: true, current: () => version === state.adjustVersion});
+        state.adjustFailedKey = null;
+      } catch (error) {
+        if (studioSession !== state) return;
+        if (controller.signal.aborted && version !== state.adjustVersion) continue;
+        state.adjustFailedKey = key;
+        throw error;
+      } finally {
+        state.controller.signal.removeEventListener('abort', abort);
+        if (state.adjustController === controller) state.adjustController = null;
+      }
+    }
+  });
+  state.adjustTask = task;
+  try { await task; }
+  finally {
+    if (state.adjustTask === task) state.adjustTask = null;
+    studioSetBusy(state);
+  }
+}
+async function studioCancelAdjust(state) {
+  clearTimeout(state.adjustTimer); state.adjustTimer = null;
+  state.adjustVersion++;
+  state.adjustController?.abort();
+  lbView.cancelPending();
+  // A frame already submitted to Studio must finish before a reset/undo can
+  // replace its input. Its old version cannot paint the main photograph.
+  state.cancelAdjust = true;
+  state.adjustWake?.();
+  try { await state.adjustTask; } catch (_) {}
+  finally { state.cancelAdjust = false; }
 }
 async function studioOpen() {
   if (studioSession) {
@@ -57,10 +151,12 @@ async function studioOpen() {
   if (!item) return null;
   const state = {session: studioId(), selectedSha: item.sha1, context: lbContext,
     controller: new AbortController(), ready: false, saving: false, updating: false, busy: 0,
-    frame: null, requests: new Map(), history: [], graph: null, time: 0, sourceRevision: '0', previewRevision: -1};
+    frame: null, requests: new Map(), history: [], graph: null, time: 0, sourceRevision: '0', previewRevision: -1,
+    adjustValues: structuredClone(edVals()), adjustVersion: 0, previewAdjustVersion: 0};
   state.initialized = new Promise((resolve, reject) => { state.resolveReady = resolve; state.rejectReady = reject; });
   state.initialized.catch(() => {});
   studioSession = state;
+  $('lbimg').style.filter = '';
   $('lb').classList.add('editing', 'scene-editing');
   $('studio-inline').hidden = false;
   $('studio-loading').hidden = false;
@@ -88,7 +184,9 @@ async function studioOpen() {
     state.source = meta;
     state.photoEdits ??= structuredClone(meta.edits || []);
     state.recipe = recipe;
-    state.image = await studioImage(state);
+    const initialEdits = studioPreviewEdits(state);
+    state.image = await studioImage(state, initialEdits);
+    state.previewInputKey = studioInputKey(state, initialEdits);
     const bitmap = await createImageBitmap(state.image);
     state.width = bitmap.width; state.height = bitmap.height; bitmap.close();
     if (studioSession !== state) return null;
@@ -128,12 +226,16 @@ function studioFinishRequest(state, message, error) {
   error ? request.reject(error) : request.resolve(message);
 }
 function studioPaint(state, blob) {
+  const adjustVersion = state.adjustVersion, sourceRevision = state.sourceRevision;
   const url = URL.createObjectURL(blob);
   state.previewUrls ??= new Set(); state.previewUrls.add(url);
   lbView.edited = true; lbView.comparing = false;
   return lbView.apply(lbView.cancelPending(), url, 'scene', undefined, undefined, true).then(applied => {
-    if (!applied || studioSession !== state) { URL.revokeObjectURL(url); state.previewUrls.delete(url); return false; }
+    if (!applied || studioSession !== state || adjustVersion !== state.adjustVersion || sourceRevision !== state.sourceRevision) {
+      URL.revokeObjectURL(url); state.previewUrls.delete(url); return false;
+    }
     for (const old of state.previewUrls) if (old !== url) { URL.revokeObjectURL(old); state.previewUrls.delete(old); }
+    state.paintedAdjustVersion = adjustVersion;
     edLive(); return true;
   }).catch(error => { studioStatus(state, error.message); return false; });
 }
@@ -178,6 +280,7 @@ window.addEventListener('message', event => {
     studioHistory(state);
   } else if (message.type === 'fg-studio-preview') {
     if (String(message.sourceRevision ?? '0') !== state.sourceRevision || state.updating ||
+        state.previewAdjustVersion !== state.adjustVersion ||
         state.context !== lbContext || items[lbIdx]?.sha1 !== state.selectedSha ||
         !(message.image instanceof Blob) || message.revision <= state.previewRevision) return;
     state.previewRevision = message.revision;
@@ -200,6 +303,8 @@ async function studioCommand(action, text) {
   studioRemember(state);
   state.restoring = true; state.busy++; studioSetBusy(state);
   try {
+    await studioFlushAdjust(state);
+    if (studioSession !== state) return false;
     await studioRequest(state, 'fg-studio-command', {action, text});
     return true;
   } catch (error) { studioStatus(state, error.message); return false; }
@@ -210,23 +315,24 @@ function studioGenerate() {
   if (!text) { $('studio-text').focus(); return; }
   return studioCommand('generate', text);
 }
-async function studioRefresh(state) {
-  const previousRevision = state.sourceRevision;
-  let sent = false;
-  state.updating = true; state.sourceRevision = String(+state.sourceRevision + 1);
+async function studioRefresh(state, options = {}) {
+  const edits = options.edits || structuredClone(state.photoEdits);
+  const current = () => studioSession === state && (!options.current || options.current());
+  if (!options.draft) state.updating = true;
   studioSetBusy(state);
   try {
-    const image = await studioImage(state);
-    if (studioSession !== state) return;
+    const image = await studioImage(state, edits, options.signal || state.controller.signal);
+    if (!current()) return;
     const bitmap = await createImageBitmap(image);
     state.width = bitmap.width; state.height = bitmap.height; bitmap.close();
+    if (!current()) return;
     // Allow only frames produced with this newly committed input revision.
+    state.sourceRevision = String(+state.sourceRevision + 1);
+    state.previewAdjustVersion = options.adjustVersion ?? state.adjustVersion;
+    if (!state.comparing) lbView.cancelPending();
     state.updating = false;
-    sent = true;
     await studioRequest(state, 'fg-studio-refresh', {image, sourceRevision: state.sourceRevision});
-  } catch (error) {
-    if (!sent) state.sourceRevision = previousRevision;
-    throw error;
+    state.previewInputKey = options.inputKey || studioInputKey(state, edits);
   } finally { state.updating = false; studioSetBusy(state); }
 }
 async function studioPhotoEdit(body) {
@@ -239,6 +345,8 @@ async function studioPhotoEdit(body) {
   const before = studioSnapshot(state);
   studioRemember(state); state.busy++; studioSetBusy(state);
   try {
+    await studioCancelAdjust(state);
+    if (studioSession !== state) return false;
     const edits = state.photoEdits;
     if (body.action === 'push') {
       const edit = structuredClone(body.edit);
@@ -261,6 +369,8 @@ async function studioPhotoEdit(body) {
 async function studioRestoreSnapshot(state, snapshot) {
   state.restoring = true;
   try {
+    await studioCancelAdjust(state);
+    if (studioSession !== state) return;
     state.source = snapshot.source || state.source;
     state.photoEdits = structuredClone(snapshot.photoEdits);
     edReset();
@@ -272,7 +382,20 @@ async function studioRestoreSnapshot(state, snapshot) {
 }
 async function studioUndo() {
   const state = studioSession;
-  if (!state?.ready || studioIsBusy() || !state.history.length) return false;
+  if (!state?.ready || studioIsBusy()) return false;
+  // Unapplied slider values are a draft, so undoing them needs no history entry.
+  if (Object.keys(state.adjustValues).length) {
+    state.busy++; studioSetBusy(state);
+    try {
+      await studioCancelAdjust(state);
+      if (studioSession !== state) return false;
+      edReset();
+      await studioRefresh(state);
+      return true;
+    } catch (error) { studioStatus(state, error.message); return false; }
+    finally { state.busy--; studioSetBusy(state); }
+  }
+  if (!state.history.length) return false;
   const snapshot = state.history.pop(); state.busy++; studioSetBusy(state);
   try { await studioRestoreSnapshot(state, snapshot); return true; }
   catch (error) { state.history.push(snapshot); studioStatus(state, error.message); return false; }
@@ -283,6 +406,8 @@ async function studioResetAll() {
   if (!state?.ready || studioIsBusy()) return false;
   studioRemember(state); state.busy++; state.restoring = true; studioSetBusy(state);
   try {
+    await studioCancelAdjust(state);
+    if (studioSession !== state) return false;
     if (state.source.studio || state.source.filter_source_sha) {
       state.source = (await edOriginal(state.source.sha1)).meta;
     }
@@ -297,12 +422,22 @@ async function studioResetAll() {
 async function studioSave() {
   const state = studioSession;
   if (!state?.ready || studioIsBusy()) return false;
-  const vals = edVals();
-  if (Object.keys(vals).length && !await studioPhotoEdit({action: 'push', edit: {op: 'adjust', params: vals}})) return false;
-  if (studioSession !== state) return false;
   state.saving = true; studioSetBusy(state);
   studioStatus(state, '写真調整とフィルターを原寸で保存しています…');
   try {
+    // The preview already ran these values before the native filter graph.
+    // Commit that same input once, without rendering or stacking it a second time.
+    studioPreviewAdjust(edVals());
+    await studioFlushAdjust(state);
+    if (studioSession !== state) return false;
+    const vals = structuredClone(state.adjustValues);
+    if (Object.keys(vals).length) {
+      studioRemember(state);
+      state.photoEdits.push({op: 'adjust', params: vals});
+      edReset();
+      state.previewAdjustVersion = state.adjustVersion;
+      studioHistory(state);
+    }
     const result = await studioRequest(state, 'fg-studio-export');
     if (studioSession !== state) return false;
     if (!(result.image instanceof Blob) || result.image.type !== 'image/png') throw new Error('画像を書き出せませんでした');
@@ -335,6 +470,9 @@ function studioClose(restore = true) {
   const state = studioSession;
   if (!state) return;
   studioSession = null;
+  clearTimeout(state.adjustTimer); state.adjustTimer = null;
+  state.adjustController?.abort();
+  state.adjustWake?.();
   clearTimeout(state.loadTimeout); state.controller.abort();
   state.rejectReady(new Error('フィルター編集を閉じました'));
   for (const request of state.requests.values()) { clearTimeout(request.timer); request.reject(new Error('フィルター編集を閉じました')); }

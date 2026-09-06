@@ -100,6 +100,16 @@ async function preview(sha, body, expected = 200) {
   const upload = await fetch(BASE + '/api/upload', {method: 'POST', body: form});
   assert(upload.ok); assert.equal((await upload.json()).added, 1);
   const sha = hash(original); created.add(sha);
+  for (let i = 0; i < 16; i++) {
+    const pushed = await api('/api/edits/' + sha, {action: 'push', edit: {op: 'adjust', params: {exposure: (i % 10) / 10}}}, 'PUT');
+    const persisted = await api('/api/meta/' + sha);
+    assert.equal(persisted.edits_rev, pushed.rev, 'PUT revision must match the immediately reloaded sidecar');
+    const rendition = await fetch(BASE + '/render/' + sha + '?' + new URLSearchParams({v: pushed.rev, w: '64'}));
+    assert(rendition.ok, 'the revision returned by PUT must render immediately: ' + rendition.status);
+    await rendition.arrayBuffer();
+    await api('/api/edits/' + sha, {action: 'pop'}, 'PUT');
+  }
+  passed('edit revisions remain stable across PUT, persisted metadata reloads and immediate rendering');
   const edit = await api('/api/edits/' + sha, {action: 'push', edit: {op: 'adjust', params: {exposure: .25}}}, 'PUT');
   const before = await api('/api/meta/' + sha);
   const basePreview = await preview(sha, {edits: [], source_edits_rev: edit.rev});

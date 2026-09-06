@@ -2231,7 +2231,7 @@ async function createFolder() {
   try {
     const r = await j('/api/albums', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({name, folder, goal, agent: isGen ? {auto: true, target, batch, min_quality} : {auto: false, target}, // 生成フォルダは作った時点で自動(30分ごとに目標まで補充)。手で作る時はトグル不要
-                            keywords, engines: isGen ? [] : engPick(), criteria, kind: isGen ? 'gen' : 'crawl', recipe})});
+                            keywords, engines: isGen ? [] : engPick(), criteria, kind: isGen ? 'gen' : 'crawl', recipe, create: true})});
     toast(isGen ? `生成フォルダ「${r.name}」誕生 — ▶で作り始めます` : goal ? `AIフォルダ「${r.name}」誕生 — ▶で集め始めます` : `フォルダ「${r.name}」作成`);
     await loadAlbums();
     openFolder(r.name);
@@ -4172,6 +4172,11 @@ function edVals() {
 function edLive() {
   ED_SLIDERS.forEach(k => $('edv_' + k).textContent = $('ed_' + k).value);
   const v = edVals();
+  if (typeof studioSession !== 'undefined' && studioSession) {
+    $('lbimg').style.filter = '';
+    studioPreviewAdjust(v);
+    return;
+  }
   let f = '';
   if (v.exposure) f += `brightness(${Math.pow(2, v.exposure * 2).toFixed(3)}) `;
   if (v.contrast) f += `contrast(${(1 + v.contrast).toFixed(3)}) `;
@@ -4183,6 +4188,7 @@ function edLive() {
 function edReset() {
   ED_SLIDERS.forEach(k => { $('ed_' + k).value = 0; $('edv_' + k).textContent = '0'; });
   $('lbimg').style.filter = '';
+  if (typeof studioSession !== 'undefined' && studioSession) studioPreviewAdjust({});
 }
 const ED_LABEL = {adjust: '調整', auto: '自動', filter: 'フィルタ', rotate: '回転', flip: '反転', crop: 'クロップ'};
 function edHist(list) {
