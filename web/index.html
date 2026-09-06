@@ -4960,6 +4960,10 @@ function hoverPv(el, why, big) {
   const size = big ? Math.min(720, innerWidth - 40, innerHeight - r.bottom - 40 > 360 ? innerHeight - r.bottom - 40 : innerHeight - 80) : 280;
   const im = $('hoverpv_img');
   im.style.maxWidth = size + 'px'; im.style.maxHeight = size + 'px';
+  // 途中経過(--preview proj)は潜在空間の投影で元が 128px 程度しかない → 自然寸法のままだと「大きく出ない」。
+  // big の時は箱の幅に引き伸ばす(縦横比は画像側で維持)
+  if (big) { im.style.width = size + 'px'; im.style.height = 'auto'; im.style.imageRendering = 'auto'; }
+  else { im.style.width = ''; im.style.height = ''; }
   im.src = el.src;
   hoverPv._el = el; // 途中経過(ah_prev/gn_prev)はポーリングで差し替わるので、出している間は追従させる(watchGenPart)
   $('hoverpv_cap').textContent = why || '';
@@ -4987,6 +4991,29 @@ function crawlRelevant(album) {
     (loc.type === 'source' && loc.key === 'crawl:' + album);
 }
 // 生成の実況(収集の crawlbar と対称)。新しい絵は「宙から降ってくる」drop を流用
+// 途中経過の画像を fetch で確かめてから <img> に入れる(404 をそのまま src にすると消えたりチラついたりする)。
+// 途中経過が無ければ fallback(直前に仕上がった 1 枚のサムネ)。ホバー拡大中はそちらも追従
+let _pvBlob = null, _pvBusy = false;
+async function updateGenPreview(pvUrl, fallback, withHeader) {
+  if (_pvBusy) return; _pvBusy = true;
+  const imgs = [document.getElementById('gn_prev'), withHeader ? document.getElementById('ah_prev') : null].filter(Boolean);
+  try {
+    const r = await fetch(pvUrl, {cache: 'no-store'});
+    let src = '', title = '';
+    if (r.ok) {
+      const b = await r.blob();
+      if (b.size > 100) { if (_pvBlob) URL.revokeObjectURL(_pvBlob); _pvBlob = URL.createObjectURL(b); src = _pvBlob; title = 'いま描いている1枚の途中経過(ステップごとに更新)。ホバーで大きく'; }
+    }
+    if (!src && fallback) { src = fallback; title = '直前に仕上がった1枚。次の途中経過が来たら切り替わります。ホバーで大きく'; }
+    for (const im of imgs) {
+      if (!src) { im.style.visibility = 'hidden'; continue; }
+      if (im.getAttribute('src') !== src) im.src = src;
+      im.dataset.kind = src === fallback ? 'done' : 'live';
+      im.title = title; im.style.visibility = 'visible';
+    }
+    if (src && hoverPv._el && imgs.includes(hoverPv._el)) { const h = $('hoverpv_img'); if (h.getAttribute('src') !== src) h.src = src; $('hoverpv_cap').textContent = title; }
+  } catch (e) {} finally { _pvBusy = false; }
+}
 function watchGenPart(s) {
   try {
     $('genbar').classList.toggle('show', !!s.alive);
@@ -4998,17 +5025,21 @@ function watchGenPart(s) {
       $('genbar').title = `計画${s.planned} → 生成${s.generated} → 収蔵${s.ingested} / 却下${s.rejected}\n「${s.prompt || ''}」\n${s.last || ''}` +
         (s.queue?.length ? `\n順番待ち: ${s.queue.join(', ')}` : '');
       if (s.queue?.length) $('gn_prog').innerHTML += ` <span style="color:var(--faint)" title="順番待ち: ${esc(s.queue.join(', '))}">⏳ 順番待ち ${s.queue.length}</span>`;
-      const pv = '/api/gen/preview?t=' + Date.now();
-      $('gn_prev').src = pv;
       // 開いているフォルダの実況欄には、そのフォルダが生成している時だけ出す。
       // 別フォルダの状態を書き込むと「タスクが混ざった」ように見える(実際は別々に走っている)
       const mine = loc.type === 'folder' && album_slug_js(loc.key) === album_slug_js(s.album);
       const ap = document.getElementById('ah_prev');
-      if (ap) { ap.src = mine ? pv : ''; ap.style.display = mine ? '' : 'none'; }
-      if (hoverPv._el && (hoverPv._el === ap || hoverPv._el.id === 'gn_prev')) $('hoverpv_img').src = pv; // 拡大表示中も追従
+      if (ap) ap.style.display = mine ? '' : 'none';
+      // 「いま」: 途中経過(sd-cli が各ステップで書く小さな投影)があればそれ。無い間(モデル読込・仕上げ・目利き)は
+      // 直前に仕上がった 1 枚を出す。以前は 404 をそのまま src にしていて「前の絵が居座る/何も出ない」に見えた
+      const done = (s.recent || []).filter(e => e.ok).slice(-1)[0];
+      updateGenPreview('/api/gen/preview?t=' + Date.now(), done ? '/thumb/' + done.r : '', mine);
+      const phase = s.steps > 0 && s.step >= s.steps ? '仕上げ中(VAE デコード・目利き) · '
+        : s.steps > 0 && s.step > 0 ? `${s.step}/${s.steps} ステップ · `
+        : s.prompt ? '準備中(モデル読込) · ' : '';
       const an = document.getElementById('ah_now');
       if (an) an.innerHTML = mine
-        ? `${s.steps > 0 ? `${s.step}/${s.steps} ステップ · ` : ''}${esc(s.prompt || s.last || '')}`
+        ? `${phase}${esc(s.prompt || s.last || '')}`
         : (s.queue || []).some(q => album_slug_js(q) === album_slug_js(loc.key))
           ? `<span style="color:var(--faint)">順番待ち — いまは「${esc(s.album)}」を生成中</span>`
           : `<span style="color:var(--faint)">待機中(いまは「${esc(s.album)}」を生成中)</span>`;

@@ -473,9 +473,24 @@ pub struct GenJob {
     pub w: u32,
     pub h: u32,
     pub steps: u32,
+    pub cfg: f32, // 通常はモデルの既定。Lightning 系(蒸留)LoRA が付くと 1.0
     pub seed: u64,
     pub lora: Vec<(String, f32)>, // (store/lora の stem, 強さ)
 }
+/// Lightning 系(蒸留)LoRA が付いていたら (steps, cfg, true)。名前の「Nsteps」をステップ数に(steps_fixed=フォルダ明示なら触らない)、
+/// cfg は 1.0(蒸留は guidance 無しが前提。モデル既定の 2.5 のままだと崩れる上に毎ステップ 2 回で 2 倍遅い)
+pub fn lora_overrides(lora: &[(String, f32)], steps: u32, cfg: f32, steps_fixed: bool) -> (u32, f32, bool) {
+    let lightning = lora.iter().any(|(f, _)| f.to_lowercase().contains("lightning"));
+    if !lightning { return (steps, cfg, false); }
+    let lora_steps = lora.iter().find_map(|(f, _)| {
+        let t = f.to_lowercase();
+        let i = t.find("steps")?;
+        let digits: String = t[..i].chars().rev().take_while(|c| c.is_ascii_digit()).collect::<Vec<_>>().into_iter().rev().collect();
+        digits.parse::<u32>().ok().filter(|n| (1..=50).contains(n))
+    });
+    (if steps_fixed { steps } else { lora_steps.unwrap_or(steps) }, 1.0, true)
+}
+
 /// sd-cli 用: プロンプト末尾に `<lora:stem:scale>` を付ける(--lora-model-dir が store/lora)
 fn prompt_with_lora(job: &GenJob) -> String {
     let tags: String = job.lora.iter().map(|(f, s)| format!(" <lora:{f}:{s}>")).collect();
@@ -486,6 +501,7 @@ fn parse_progress(s: &str) -> Option<(usize, usize)> {
     // sd-cli の進捗: "|=====>   | 2/4 - 2.79s/it"
     let mut out = None;
     for piece in s.split(|c| c == '\r' || c == '\n') {
+        if !(piece.contains("s/it") || piece.contains("it/s")) { continue; } // 読込進捗(MB/s)は除外
         if let Some(i) = piece.find(" - ") {
             let head = piece[..i].trim_end();
             let tok = head.rsplit(|c: char| c.is_whitespace() || c == '|').next().unwrap_or("");
@@ -532,16 +548,20 @@ async fn generate_cli_once(root: &Path, cli: &Path, s: &ModelSpec, job: &GenJob,
     if let Some(mm) = role_path(root, s, "mmproj") { c.arg("--llm_vision").arg(mm); }
     c.arg("--lora-model-dir").arg(lora_dir(root))
         .arg("-p").arg(prompt_with_lora(job)).arg("-W").arg(job.w.to_string()).arg("-H").arg(job.h.to_string())
-        .arg("--steps").arg(job.steps.to_string()).arg("--cfg-scale").arg(s.cfg.to_string())
+        .arg("--steps").arg(job.steps.to_string()).arg("--cfg-scale").arg(job.cfg.to_string())
         .arg("--sampling-method").arg("euler").arg("--diffusion-fa").arg("-s").arg(job.seed.to_string())
         .arg("-o").arg(&out);
     if s.flow_shift > 0.0 { c.arg("--flow-shift").arg(s.flow_shift.to_string()); }
     for f in plan.flags() { c.arg(f); }
     if preview_on() { c.arg("--preview").arg("proj").arg("--preview-path").arg(&prev).arg("--preview-interval").arg("1"); }
     for r in refs { c.arg("-r").arg(r); }
-    c.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
+    // 進捗バー("| 2/4 - 6.5s/it")は stdout に出る。以前は stdout を捨てていたので UI の N/M が 0 のままだった(2026-09-06)
+    c.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
     let mut child = c.spawn().map_err(|e| (format!("sd-cli 起動失敗: {e}"), false))?;
     let mut err = child.stderr.take().unwrap();
+    let mut out_r = child.stdout.take().unwrap();
+    let mut obuf = [0u8; 4096];
+    let mut out_done = false;
     let mut tail: Vec<u8> = Vec::new();
     let mut buf = [0u8; 4096];
     st.step.store(0, Relaxed);
@@ -558,6 +578,15 @@ async fn generate_cli_once(root: &Path, cli: &Path, s: &ModelSpec, job: &GenJob,
                         if tail.len() > 8000 { let cut = tail.len() - 8000; tail.drain(..cut); }
                     }
                     Err(_) => break,
+                }
+            }
+            n = out_r.read(&mut obuf), if !out_done => {
+                match n {
+                    Ok(0) | Err(_) => out_done = true,
+                    Ok(n) => {
+                        let s = String::from_utf8_lossy(&obuf[..n]);
+                        if let Some((a, b)) = parse_progress(&s) { st.step.store(a, Relaxed); st.steps.store(b, Relaxed); }
+                    }
                 }
             }
             _ = tokio::time::sleep(std::time::Duration::from_millis(300)) => {
@@ -579,7 +608,7 @@ async fn generate_cli_once(root: &Path, cli: &Path, s: &ModelSpec, job: &GenJob,
 }
 
 /// capabilities の既定 sample_params を土台に steps と txt_cfg だけ上書き(蒸留モデルは cfg 1.0)
-async fn sample_params(client: &reqwest::Client, base: &str, s: &ModelSpec, steps: u32) -> Value {
+async fn sample_params(client: &reqwest::Client, base: &str, s: &ModelSpec, steps: u32, cfg: f32) -> Value {
     static CACHE: Mutex<Option<(String, Value)>> = Mutex::new(None);
     let cached = CACHE.lock().unwrap().as_ref().filter(|(b, _)| b == base).map(|(_, v)| v.clone());
     let mut sp = match cached {
@@ -597,7 +626,8 @@ async fn sample_params(client: &reqwest::Client, base: &str, s: &ModelSpec, step
     sp["sample_steps"] = json!(steps);
     sp["sample_method"] = json!("euler");
     if !sp["guidance"].is_object() { sp["guidance"] = json!({}); }
-    sp["guidance"]["txt_cfg"] = json!(s.cfg);
+    let _ = s;
+    sp["guidance"]["txt_cfg"] = json!(cfg);
     if s.flow_shift > 0.0 { sp["flow_shift"] = json!(s.flow_shift); }
     sp
 }
@@ -608,7 +638,7 @@ pub async fn generate_server(client: &reqwest::Client, base: &str, s: &ModelSpec
     let t0 = std::time::Instant::now();
     let ref_b64: Vec<String> = refs.iter().filter_map(|p| std::fs::read(p).ok()).map(|b| base64::engine::general_purpose::STANDARD.encode(b)).collect();
     let mut body = json!({"prompt": job.prompt, "width": job.w, "height": job.h, "seed": job.seed,
-                          "sample_params": sample_params(client, base, s, job.steps).await});
+                          "sample_params": sample_params(client, base, s, job.steps, job.cfg).await});
     if !ref_b64.is_empty() { body["ref_images"] = json!(ref_b64); }
     // sd-server はプロンプト埋め込みの <lora:> を受けない(api.md)。lora 配列で渡す(path はサーバ側の --lora-model-dir 相対)
     if !job.lora.is_empty() { body["lora"] = json!(job.lora.iter().map(|(f, s)| json!({"path": format!("{f}.safetensors"), "multiplier": s})).collect::<Vec<_>>()); }
@@ -898,7 +928,10 @@ pub async fn run(
     let mut replan_note = String::new();
     let mut seed: u64 = now_secs() ^ 0x9E37_79B9_7F4A_7C15 ^ ((std::process::id() as u64) << 32);
     let per_plan = 8usize;
-    let steps = if limits.steps == 0 { s.steps } else { limits.steps };
+    // Lightning 系(蒸留)LoRA: 名前の「Nsteps」をステップ数に、cfg は 1.0(蒸留は guidance 無しが前提。2.5 のままだと崩れる上に 2 倍遅い)。
+    // フォルダで steps を明示していればそちらが勝つ
+    let (steps, cfg, lora_lightning) = lora_overrides(&lora, if limits.steps != 0 { limits.steps } else { s.steps }, s.cfg, limits.steps != 0);
+    if lora_lightning { set_last(format!("Lightning LoRA: {steps} steps・cfg 1.0 で描きます")); }
     'outer: loop {
         if st.stop.load(Relaxed) || started.elapsed().as_secs() > limits.max_secs || st.ingested.load(Relaxed) >= limits.max_n {
             break;
@@ -962,7 +995,7 @@ pub async fn run(
             let ref_paths: Vec<PathBuf> = ref_shas.iter().filter_map(|sha| ref_file(&root, sha)).collect();
             *st.prompt.lock().unwrap() = prompt.clone();
             set_last(format!("生成中: {}", prompt.chars().take(80).collect::<String>()));
-            let job = GenJob { prompt: prompt.clone(), w: limits.w, h: limits.h, steps, seed: xorshift(&mut seed) % 4_000_000_000, lora: lora.clone() };
+            let job = GenJob { prompt: prompt.clone(), w: limits.w, h: limits.h, steps, cfg, seed: xorshift(&mut seed) % 4_000_000_000, lora: lora.clone() };
             let r = match (&base, &cli) {
                 (Some(b), _) => generate_server(&client, b, s, &job, &ref_paths, &st.stop).await,
                 (None, Some(c)) => generate_cli(&root, c, s, &job, &ref_paths, &st.stop, &st).await,
@@ -1028,13 +1061,13 @@ pub async fn run(
                 }
             } else { ("none", 0) };
             let gen_info = json!({"provider": provider, "model": s.id, "file": role_path(&root, s, "diff").and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())),
-                        "prompt": prompt, "seed": job.seed, "steps": job.steps, "cfg": s.cfg, "w": job.w, "h": job.h,
+                        "prompt": prompt, "seed": job.seed, "steps": job.steps, "cfg": job.cfg, "w": job.w, "h": job.h,
                         "refs": ref_shas, "lora": lora.iter().map(|(f, s)| json!({"file": f, "scale": s})).collect::<Vec<_>>(),
                         "secs": (secs * 10.0).round() / 10.0, "gate": gate, "quality": quality, "album": album});
             // 来歴は画像ファイル自体にも埋める(iTXt "parameters"=A1111/ComfyUI 互換の1行, "fluent_gallery"=JSON)。
             // 書き出し・ダウンロード後も「どのモデルで何のプロンプトか」が残る。sha1 は埋めた後のバイト列で取る
             let params = format!("{}\nSteps: {}, Sampler: euler, CFG scale: {}, Seed: {}, Size: {}x{}, Model: {}, Software: Fluent Gallery",
-                prompt, job.steps, s.cfg, job.seed, job.w, job.h, s.id);
+                prompt, job.steps, job.cfg, job.seed, job.w, job.h, s.id);
             let png = store::png_with_text(&png, &[("parameters", &params), ("fluent_gallery", &json!({"origin": "synthetic", "gen": &gen_info}).to_string())]);
             let extra = json!({
                 "rights": format!("generated:{}", s.license),
@@ -1044,6 +1077,7 @@ pub async fn run(
             });
             match store::ingest_bytes(&root, &db, &png, "png", &format!("gen:{album}"), &extra) {
                 Ok(sha) => {
+                    let _ = std::fs::remove_file(preview_path(&root)); // この 1 枚は終わり。「いま」は次の途中経過が来るまで完成サムネに
                     phashes.push(ph);
                     consec_reject = 0;
                     st.ingested.fetch_add(1, Relaxed);

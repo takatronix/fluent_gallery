@@ -240,13 +240,16 @@ pub async fn import_url(root: &Path, client: &reqwest::Client, st: &LoraState, u
         if model_for_base(&res.base).is_none() {
             return Err(format!("親モデル「{}」は内蔵の生成モデルに載りません(対応: FLUX.2 klein 4B / Z-Image / Qwen-Image)", res.base));
         }
-        // 棚の名前は人が読める方(リポジトリ名 / Civitai のモデル名)。直リンクはファイル名
-        let mut stem = safe_stem(if res.name.trim().is_empty() { &res.file_name } else { &res.name });
+        // 棚の名前: ファイル名が固有(例 Qwen-Image-Edit-2509-Lightning-8steps-V1.0-bf16)ならそれ。「8steps」等の情報が
+        // 生成側の steps/cfg 自動設定(gen::lora_overrides)に効く。lora.safetensors のような汎用名のときだけリポジトリ/モデル名
+        let fstem = res.file_name.trim_end_matches(".safetensors").to_string();
+        let generic = ["", "lora", "pytorch_lora_weights", "adapter_model", "model", "weights", "diffusion_pytorch_model"].contains(&fstem.to_lowercase().as_str());
+        let mut stem = safe_stem(if !generic { &fstem } else if !res.name.trim().is_empty() { &res.name } else { &res.file_name });
         if file_path(root, &stem).exists() { stem = format!("{stem}_{}", now_secs() % 10000); }
         *st.name.lock().unwrap() = stem.clone();
         *st.last.lock().unwrap() = format!("取得中: {}", res.name);
         let bytes = download(client, &res.download_url, &file_path(root, &stem), st).await?;
-        let meta = json!({"name": res.name, "base": res.base, "triggers": res.triggers, "source": res.source, "license": res.license,
+        let meta = json!({"name": res.name, "file": res.file_name, "base": res.base, "triggers": res.triggers, "source": res.source, "license": res.license,
                           "description": res.description, "imported": now_secs(), "bytes": bytes});
         save_meta(root, &stem, &meta);
         if let Some(pu) = res.preview_url {

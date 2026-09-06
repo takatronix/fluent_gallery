@@ -3425,8 +3425,9 @@ async fn api_lora_probe(State(app): S, AxPath(name): AxPath<String>) -> impl Int
         for (i, p) in lora::probe_prompts(&triggers).iter().enumerate() {
             if app.gen.stop.load(Relaxed) { break; }
             *app.gen.prompt.lock().unwrap() = p.clone();
-            let job = gen::GenJob { prompt: p.clone(), w: 768, h: 768, steps: 0, seed: 7 + i as u64, lora: vec![(stem2.clone(), 1.0)] };
-            let job = gen::GenJob { steps: s.steps, ..job };
+            let lora1 = vec![(stem2.clone(), 1.0)];
+            let (steps, cfg, _) = gen::lora_overrides(&lora1, s.steps, s.cfg, false); // Lightning なら 4/8 steps・cfg 1.0 で試し描き
+            let job = gen::GenJob { prompt: p.clone(), w: 768, h: 768, steps, cfg, seed: 7 + i as u64, lora: lora1 };
             match gen::generate_one(&app.root, &app.http, &app.gen, s, &job, &[]).await {
                 Ok(png) => lora::save_preview(&app.root, &stem2, i, &png),
                 Err(e) => { *app.gen.last.lock().unwrap() = format!("試し描き失敗: {e}"); break; }
