@@ -15,12 +15,14 @@ const check = (name, ok, detail = '') => {
 (async () => {
   // テストデータ収蔵
   // 前回が途中で落ちていると掃除が走っていないので、まず残骸を消す(次の実行を巻き添えにしない)
-  for (const al of ['_uitest', '_uitest2', '_uitest_b', '_uitest_g']) await fetch(BASE + '/api/albums/' + al, {method: 'DELETE'});
-  for (const src of ['crawl:_uitest', 'crawl:_uitest2', 'crawl:_uitest_b', 'gen:_uitest_g']) { // 前回の画像が残っていると枚数の検算が狂う
+  for (const al of ['_uitest', '_uitest2', '_uitest_b', '_uitest_c', '_uitest_g']) await fetch(BASE + '/api/albums/' + al, {method: 'DELETE'});
+  for (const src of ['crawl:_uitest', 'crawl:_uitest2', 'crawl:_uitest_b', 'crawl:_uitest_c', 'gen:_uitest_g']) { // 前回の画像が残っていると枚数の検算が狂う
     await fetch(BASE + '/api/source/trash', {method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({source: src})});
   }
   for (const ds of ['_uitest_ds', '_uitest_ds2', '_uitest_ds_b']) await fetch(BASE + '/api/datasets/' + ds, {method: 'DELETE'});
+  // 空のグループが残る仕様になったので、テストが作るグループも消す(残すとサイドバーにゴミが見え続ける)
+  for (const g of ['_uitest棚', '_uitest棚2', '_uitest棚d']) await fetch(BASE + '/api/groups/' + encodeURIComponent(g), {method: 'DELETE'});
   const fx = path.join(__dirname, 'fixtures');
   await fetch(BASE + '/api/ingest', {method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({path: fx, source: 'crawl:_uitest', move: false})});
@@ -144,6 +146,14 @@ const check = (name, ok, detail = '') => {
       const t0 = Date.now();
       while (Date.now() - t0 < ms) { if (fn()) return true; await new Promise(r => setTimeout(r, 50)); }
       return false;
+    };
+    // 行の中央は合流/移動、上下の縁は並び替え。省略時の clientY=0 は
+    // 意図しない縁ドロップになるので、実際の行を表示して中央を指定する。
+    window.fireNavDrag = (element, type, dataTransfer) => {
+      element.scrollIntoView({block: 'nearest'});
+      const rect = element.getBoundingClientRect();
+      return element.dispatchEvent(new DragEvent(type, {bubbles: true, cancelable: true, dataTransfer,
+        clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2}));
     };
   });
 
@@ -625,11 +635,11 @@ const check = (name, ok, detail = '') => {
     const drag = (fromSel, toSel) => {
       const dt = new DataTransfer();
       const a = document.querySelector(fromSel), b = document.querySelector(toSel);
-      a.dispatchEvent(new DragEvent('dragstart', {bubbles: true, dataTransfer: dt}));
-      b.dispatchEvent(new DragEvent('dragover', {bubbles: true, dataTransfer: dt}));
+      fireNavDrag(a, 'dragstart', dt);
+      fireNavDrag(b, 'dragover', dt);
       const lit = b.classList.contains('dropon') || b.classList.contains('mergeon');
-      b.dispatchEvent(new DragEvent('drop', {bubbles: true, dataTransfer: dt}));
-      a.dispatchEvent(new DragEvent('dragend', {bubbles: true, dataTransfer: dt}));
+      fireNavDrag(b, 'drop', dt);
+      fireNavDrag(a, 'dragend', dt);
       return lit;
     };
     const lit = drag('.nav[data-album="_uitest2"]', '.nav[data-grp="_uitest棚"]');
@@ -653,11 +663,11 @@ const check = (name, ok, detail = '') => {
       const dt = new DataTransfer();
       const a = document.querySelector('.nav[data-album="_uitest2"]');
       const b = document.querySelector('.nav[data-album="_uitest_b"]');
-      a.dispatchEvent(new DragEvent('dragstart', {bubbles: true, dataTransfer: dt}));
-      b.dispatchEvent(new DragEvent('dragover', {bubbles: true, dataTransfer: dt}));
+      fireNavDrag(a, 'dragstart', dt);
+      fireNavDrag(b, 'dragover', dt);
       const warn = b.classList.contains('mergeon');
-      b.dispatchEvent(new DragEvent('drop', {bubbles: true, dataTransfer: dt}));
-      a.dispatchEvent(new DragEvent('dragend', {bubbles: true, dataTransfer: dt}));
+      fireNavDrag(b, 'drop', dt);
+      fireNavDrag(a, 'dragend', dt);
       return warn;
     };
     const warn = dropAlbum();
@@ -687,6 +697,34 @@ const check = (name, ok, detail = '') => {
   check('合流(画像は消えず移る)', mg.gone && mg.before > 0 && mg.after === mg.before && mg.leftover === 0,
     `${mg.before}枚→${mg.after}枚 置き去り${mg.leftover}`);
 
+  // 13b) 空グループが台帳で残る + 行の縁に落とすと並び替え(orderがサーバに永続)
+  const ro = await p.evaluate(async () => {
+    await fetch('/api/groups', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name: '_uitest棚'})}); // 空の入れ物。中身ゼロでも消えないこと
+    await fetch('/api/albums', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name: '_uitest_c', folder: '_uitest棚2', goal: '', criteria: {source: 'crawl:_uitest_c'},
+        agent: {}, keywords: [], engines: []})});
+    await loadAlbums();
+    const emptyRow = !!document.querySelector('.nav[data-grp="_uitest棚"]');
+    const emptyHint = [...document.querySelectorAll('#nav_folders .nav')].some(x => x.textContent.includes('空のグループ'));
+    // _uitest_c を _uitest_b の下の縁に落とす=合流ではなく並び替え
+    const a = document.querySelector('.nav[data-album="_uitest_c"]');
+    const b = document.querySelector('.nav[data-album="_uitest_b"]');
+    const r = b.getBoundingClientRect();
+    const dt = new DataTransfer();
+    a.dispatchEvent(new DragEvent('dragstart', {bubbles: true, dataTransfer: dt}));
+    b.dispatchEvent(new DragEvent('dragover', {bubbles: true, dataTransfer: dt, clientY: r.top + r.height * 0.9}));
+    const lit = b.classList.contains('ins-bot');
+    b.dispatchEvent(new DragEvent('drop', {bubbles: true, dataTransfer: dt, clientY: r.top + r.height * 0.9}));
+    a.dispatchEvent(new DragEvent('dragend', {bubbles: true, dataTransfer: dt}));
+    await until(() => albumsCache.find(x => x.name === '_uitest_c')?.order != null, 8000);
+    const ob = albumsCache.find(x => x.name === '_uitest_b')?.order;
+    const oc = albumsCache.find(x => x.name === '_uitest_c')?.order;
+    return {emptyRow, emptyHint, lit, ob, oc, ordered: ob != null && oc != null && ob < oc};
+  });
+  check('空グループが消えずに残る', ro.emptyRow && ro.emptyHint);
+  check('縁ドロップで並び替え(orderが永続)', ro.lit && ro.ordered, `b=${ro.ob} c=${ro.oc}`);
+
   // 14) 出荷(データセット)の棚も同じように整理できる+木をまたぐD&Dは無効
   const dsT = await p.evaluate(async () => {
     const imgs = (await (await fetch('/api/images?limit=2')).json()).items.map(i => i.sha1);
@@ -705,11 +743,11 @@ const check = (name, ok, detail = '') => {
     // 棚へD&D
     const drag = (from, to) => {
       const dt = new DataTransfer();
-      from.dispatchEvent(new DragEvent('dragstart', {bubbles: true, dataTransfer: dt}));
-      to?.dispatchEvent(new DragEvent('dragover', {bubbles: true, dataTransfer: dt}));
+      fireNavDrag(from, 'dragstart', dt);
+      if (to) fireNavDrag(to, 'dragover', dt);
       const lit = !!to?.classList.contains('dropon');
-      if (lit) to.dispatchEvent(new DragEvent('drop', {bubbles: true, dataTransfer: dt}));
-      from.dispatchEvent(new DragEvent('dragend', {bubbles: true, dataTransfer: dt}));
+      if (lit) fireNavDrag(to, 'drop', dt);
+      fireNavDrag(from, 'dragend', dt);
       return lit;
     };
     const lit = drag(document.querySelector('.nav[data-ds="_uitest_ds2"]'),
@@ -917,15 +955,18 @@ const check = (name, ok, detail = '') => {
   await b.close();
 
   // 掃除(テストソースごとゴミ箱へ)
-  for (const src of ['crawl:_uitest', 'crawl:_uitest2', 'crawl:_uitest_b']) {
+  for (const src of ['crawl:_uitest', 'crawl:_uitest2', 'crawl:_uitest_b', 'crawl:_uitest_c']) {
     await fetch(BASE + '/api/source/trash', {method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({source: src})});
   }
-  for (const al of ['_uitest', '_uitest2', '_uitest_b']) {
+  for (const al of ['_uitest', '_uitest2', '_uitest_b', '_uitest_c']) {
     await fetch(BASE + '/api/albums/' + al, {method: 'DELETE'});
   }
   for (const ds of ['_uitest_ds', '_uitest_ds2', '_uitest_ds_b']) {
     await fetch(BASE + '/api/datasets/' + ds, {method: 'DELETE'});
+  }
+  for (const g of ['_uitest棚', '_uitest棚2', '_uitest棚d']) {
+    await fetch(BASE + '/api/groups/' + encodeURIComponent(g), {method: 'DELETE'});
   }
 
   const ng = results.filter(r => !r.ok);

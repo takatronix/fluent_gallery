@@ -150,8 +150,8 @@
   .kchip.on { color:#fff; background:#2f6bff; border-color:#2f6bff; box-shadow:0 0 0 3px rgba(47,107,255,.22); }
   .kchip.gen.on { background:#7c5cff; border-color:#7c5cff; box-shadow:0 0 0 3px rgba(124,92,255,.25); }
   /* ブーストの怪しいアイコン(2026-09-03指示「金と薬」): OFF=モノクロ、ON=フルカラー+金色の怪しい光 */
-  .boost-glyph { font-size:12px; line-height:1; filter:grayscale(1); opacity:.55; letter-spacing:-2px; }
-  .switch.on .boost-glyph { filter:none; opacity:1; text-shadow:0 0 9px #e5c07baa; }
+  .boost-glyph { line-height:1; opacity:.55; display:inline-flex; }
+  .switch.on .boost-glyph { opacity:1; color:#e5c07b; filter:drop-shadow(0 0 5px #e5c07baa); }
   .engchip .eng-glyph { font-size:12px; line-height:1; filter:grayscale(1); opacity:.5; }
   .engchip.on .eng-glyph { filter:none; opacity:1; }
   .engchip:hover { color:var(--dim); border-color:var(--line); }
@@ -498,6 +498,8 @@
   }
   /* D&D: 落とせる場所のハイライト */
   .nav.dropon { outline:1px dashed #7aa2f7; background:#7aa2f722; }
+  .nav.ins-top { box-shadow:inset 0 2px 0 var(--acc); } /* 縁ドロップ=並び替えの挿入線 */
+  .nav.ins-bot { box-shadow:inset 0 -2px 0 var(--acc); }
   /* 合流(フォルダ→フォルダ)は移動と別色。落とすと確認ポップアップが出る */
   .nav.mergeon { outline:1px solid #e5c07b; background:#e5c07b22; }
   .sec.dropon { outline:1px dashed #7aa2f7; background:#7aa2f722; border-radius:6px; }
@@ -535,7 +537,7 @@
   <div id="nav_lib"></div>
   <div class="sec" id="folders_head" style="cursor:pointer" onclick="toggleFold('/folders')"
        title="ここへ落とすと一番上の階層へ移動します"
-       ondragover="navOver(event, 'root', '')" ondragleave="navLeave(event)" ondrop="navDrop(event, 'root', '')">フォルダ <span id="fold_folders_ic"></span><span class="add" id="addfolder" title="新規フォルダ(空で生まれます)"></span></div>
+       ondragover="navOver(event, 'root', '')" ondragleave="navLeave(event)" ondrop="navDrop(event, 'root', '')">フォルダ <span id="fold_folders_ic"></span><span class="add" id="addfolder" title="新規作成 — グループ(入れ物) / 集める / 作る"></span></div>
   <div id="nav_folders"></div>
   <div id="nav_sources_sec"></div>
   <div class="sec" title="ここへ落とすと一番上の階層へ移動します"
@@ -813,7 +815,7 @@ let items = [], total = 0, sel = new Set(), lastCk = -1;
 let resultFirst = 0, resultLast = 0, resultPageSize = 1; // viewport範囲と現在サイズでの1画面分
 let chipFilters = {tag: '', scene: '', subject: '', style: '', gender: '', framing: '', age_group: '', people_count: '', animal: ''};
 let fchips = {origin: '', q8: false, safe: false, clean: false};
-let albumsCache = [], facetsCache = null, datasetsCache = [];
+let albumsCache = [], groupsCache = [], facetsCache = null, datasetsCache = [];
 
 const LIB = [
   {key: 'all', icon: 'img', label: 'すべて', criteria: {}},
@@ -932,19 +934,25 @@ function toggleFold(k) {
   localStorage.setItem('fg_fold', JSON.stringify([...folded]));
   renderSide();
 }
-function buildTree(list) {
+// groups = /api/groups の台帳(空の入れ物もここに載る)。渡された木だけ台帳の順序で並ぶ
+function buildTree(list, groups) {
   const root = {f: {}, items: []};
-  for (const it of list) {
+  const walk = (path) => {
     let n = root;
-    for (const part of (it.folder || '').split('/').filter(Boolean)) n = n.f[part] ??= {f: {}, items: []};
-    n.items.push(it);
-  }
+    for (const part of path.split('/').filter(Boolean)) n = n.f[part] ??= {f: {}, items: []};
+    return n;
+  };
+  for (const g of groups || []) walk(g.path).ord = g.order; // 空グループもノードとして生む
+  for (const it of list) walk(it.folder || '').items.push(it);
   return root;
 }
 // kind='folder' のグループ行だけ、掴んで動かせる/名前を変えられる(データセットの棚は読み取り専用)
 function treeHtml(node, item, depth = 0, key = '', kind = '') {
   let h = '';
-  for (const name of Object.keys(node.f).sort()) {
+  // グループは台帳の order 順(無ければ名前順)。フォルダは order 無し=新着(作成順)が先、並び替え済み=order 順が後
+  const names = Object.keys(node.f).sort((a, b) =>
+    ((node.f[a].ord ?? Infinity) - (node.f[b].ord ?? Infinity)) || a.localeCompare(b));
+  for (const name of names) {
     const k = key + '/' + name, open = !folded.has(k), path = k.slice(1);
     const gk = kind === 'folder' ? 'group' : kind === 'dataset' ? 'dsgroup' : '';
     const dnd = gk
@@ -952,25 +960,56 @@ function treeHtml(node, item, depth = 0, key = '', kind = '') {
          ondragend="dragEnd(event)" ondragover="navOver(event, '${gk}', this.dataset.grp)"
          ondragleave="navLeave(event)" ondrop="navDrop(event, '${gk}', this.dataset.grp)"
          oncontextmenu="ctxMenu(event, '${gk}', this.dataset.grp)"` : '';
-    h += `<div class="nav"${dnd} style="padding-left:${10 + depth * 13}px" onclick="toggleFold('${k.replace(/'/g, "\\'")}')">
+    h += `<div class="nav"${dnd} style="padding-left:${10 + depth * 13}px" onclick="toggleFold('${k.replace(/'/g, "\\'")}')"
+      title="${kind === 'folder' ? 'グループ(入れ物)。掴んで=移動 / 行の上下の縁=並び替え' : ''}">
       ${ic(open ? 'chevD' : 'chevR', 13)}<span class="nm" style="color:var(--faint)"${
         gk ? ` ondblclick="startRename(event, '${gk}', this.closest('.nav').dataset.grp)"` : ''}>${esc(name)}</span>` +
-      (gk ? `<span class="del" title="棚の名前を変える(ダブルクリックでも)"
+      (gk ? `<span class="del" title="${kind === 'folder' ? 'グループ' : '棚'}の名前を変える(ダブルクリックでも)"
         onclick="startRename(event, '${gk}', this.closest('.nav').dataset.grp)">${ic('pen', 12)}</span>` : '') +
-      (kind === 'folder' ? `<span class="del" title="この中に新規フォルダを作る" onclick="event.stopPropagation(); newInFolder('${k.slice(1).replace(/'/g, "\\'")}')">${ic('plus', 12)}</span>` : '') +
+      (kind === 'folder' ? `<span class="del" title="この中に作る(グループ / フォルダ)" onclick="event.stopPropagation(); plusMenu(event, '${k.slice(1).replace(/'/g, "\\'")}')">${ic('plus', 12)}</span>` : '') +
       `</div>`;
-    if (open) h += treeHtml(node.f[name], item, depth + 1, k, kind);
+    if (open) {
+      const inner = treeHtml(node.f[name], item, depth + 1, k, kind);
+      h += inner || (kind === 'folder'
+        ? `<div class="nav" style="pointer-events:none; padding-left:${10 + (depth + 1) * 13}px"><span class="nm sub">(空のグループ — ＋で中に作成 / フォルダをドラッグ)</span></div>`
+        : '');
+    }
   }
-  return h + node.items.map(it => item(it, depth)).join('');
+  const noOrd = node.items.filter(it => it.order == null);
+  const withOrd = node.items.filter(it => it.order != null).sort((a, b) => a.order - b.order);
+  return h + noOrd.concat(withOrd).map(it => item(it, depth)).join('');
 }
 function splitPath(s) {
   const parts = s.split('/').map(x => x.trim()).filter(Boolean);
   const name = parts.pop() || '';
   return {folder: parts.join('/'), name};
 }
+// サーバの album_slug の鏡写し(Unicode英数字と _- 以外は _、48文字まで)。名前=識別子の変換を作成前に正直に見せる
+function albumSlug(s) {
+  const t = [...String(s || '')].map(c => /[\p{L}\p{N}_-]/u.test(c) ? c : '_').slice(0, 48).join('');
+  return t || 'album';
+}
+// 新規フォルダの名前欄の下に、保存名の変換/同名の衝突/親子記法をその場で知らせる(助言のみ。最終ガードはサーバの409)
+function nameHint() {
+  const el = $('ah_namehint');
+  if (!el) return;
+  const raw = ($('ah_name')?.value || '').trim();
+  const {name} = splitPath(raw);
+  const slug = albumSlug(name);
+  if (name && albumsCache.some(x => x.name === slug)) {
+    el.innerHTML = `<span style="color:#e06c75">「${esc(slug)}」はもうあります — 別の名前にするか、そのフォルダを開いて設定を変えてください</span>`;
+  } else if (name && slug !== name) {
+    el.innerHTML = `<span style="color:#e5c07b">保存名は「${esc(slug)}」になります(英数字・日本語以外の記号は _ に、48文字まで)。記号違いの名前は同じ保存名になります</span>`;
+  } else if (!newParent) {
+    el.innerHTML = `<span style="color:var(--faint)">ヒント: 「親/子」と書くと「親」グループの中に作れます</span>`;
+  } else {
+    el.innerHTML = '';
+  }
+}
 
 function renderSide() {
   if (renaming) return; // 名前を書いている最中に描き替えると入力が消える
+  if (dragNav_) return; // ドラッグ中の描き替えは掴んでいる行ごとDOMを壊す(2秒ポーリング対策)
   $('nav_lib').innerHTML = LIB.map(l =>
     `<div class="nav" data-loc="lib:${l.key}" onclick="go({type:'lib', key:'${l.key}', criteria:${esc(JSON.stringify(l.criteria))}})">
       ${ic(l.icon)}<span class="nm">${l.label}</span><span class="n" id="n_${l.key}"></span></div>`).join('') +
@@ -979,9 +1018,9 @@ function renderSide() {
   const foldersOpen = !folded.has('/folders');
   $('fold_folders_ic').innerHTML = ic(foldersOpen ? 'chevD' : 'chevR', 11);
   $('nav_folders').style.display = foldersOpen ? '' : 'none';
-  $('nav_folders').innerHTML = treeHtml(buildTree(albumsCache), (a, d) =>
+  $('nav_folders').innerHTML = treeHtml(buildTree(albumsCache, groupsCache), (a, d) =>
     `<div class="nav${a.running ? ' running' : ''}" data-loc="folder:${esc(a.name)}" data-album="${esc(a.name)}" style="padding-left:${10 + d * 13}px"
-       title="${a.kind === 'gen' ? '生成: ' : a.goal ? '収集: ' : ''}${esc(a.goal || 'スマートフォルダ(条件)')}${a.running ? '\n● ' + (a.running_kind === 'gen' ? '生成中' : '収集中') : ''}\n掴んでグループへ=移動 / 他のフォルダへ=合流"
+       title="${a.kind === 'gen' ? '生成: ' : a.goal ? '収集: ' : ''}${esc(a.goal || 'スマートフォルダ(条件)')}${a.running ? '\n● ' + (a.running_kind === 'gen' ? '生成中' : '収集中') : ''}\n掴んでグループへ=移動 / 他のフォルダの中央へ=合流 / 行の上下の縁=並び替え"
        data-dsrc="${esc(a.criteria?.source || (a.goal ? 'crawl:' + a.name : ''))}"
        draggable="true" ondragstart="dragNav(event, 'album', this.dataset.album)" ondragend="dragEnd(event)"
        ondragover="navOver(event, 'album', this.dataset.album)"
@@ -990,8 +1029,9 @@ function renderSide() {
        onclick="openFolder(this.dataset.album)">
       <span class="kic ${a.kind === 'gen' ? 'gen' : a.goal ? 'crawl' : ''}">${ic(a.kind === 'gen' ? 'wand' : a.goal ? 'globe' : 'smart')}</span><span class="nm"
         ondblclick="startRename(event, 'album', this.closest('.nav').dataset.album)">${esc(a.name)}</span>
+      ${a.agent?.boost ? `<span class="st" style="color:#e5c07b" title="ブースト中(有料AIが目利き。上限 $${a.agent?.budget_usd ?? 3})">${ic('coin', 11)}</span>` : ''}
       ${a.running ? `<span class="st live" title="${a.running_kind === 'gen' ? '生成中' : '収集中'}">${ic('play', 11)}</span>`
-        : a.queued ? `<span class="st" title="順番待ち ${a.queued}番目(${a.queued_kind === 'gen' ? '生成' : '収集'}が空き次第始まります)">⏳</span>`
+        : a.queued ? `<span class="st" title="順番待ち ${a.queued}番目(${a.queued_kind === 'gen' ? '生成' : '収集'}が空き次第始まります)">${ic('clock', 11)}</span>`
         : !a.agent?.auto ? ''
         : (a.count ?? 0) >= (a.agent?.target || 200)
           ? `<span class="st" style="opacity:.45" title="自動: 目標 ${a.agent?.target || 200} 枚に達したので休止中(『まで』を上げるか +200 で再開)">${ic('check', 11)}</span>`
@@ -1002,12 +1042,11 @@ function renderSide() {
         : `${a.count ?? 0}${a.goal ? '<span style="opacity:.55">/' + (a.agent?.target || 200) + '</span>' : ''}`}${
         a.last_run?.ingested > 0 && a.last_run.ts > (seenMap[seenKey(a)] || 0)
           ? ` <b style="color:var(--ok)" title="前回見てから増えた分">+${a.last_run.ingested}</b>` : ''}</span>
-      <span class="del" title="この中に新規フォルダを作る" onclick="event.stopPropagation(); newInFolder('${esc((a.folder ? a.folder + '/' : '') + a.name)}')">${ic('plus', 12)}</span>
       <span class="del" title="名前を変える(ダブルクリックでも)"
         onclick="startRename(event, 'album', this.closest('.nav').dataset.album)">${ic('pen', 12)}</span>
       <span class="del" title="レシピごと複製(目標を書き換えて増殖)" onclick="event.stopPropagation(); copyAlbum('${esc(a.name)}')">${ic('copy', 12)}</span>
       <span class="del" onclick="event.stopPropagation(); delAlbum('${esc(a.name)}')">${ic('x', 12)}</span></div>`, 0, '', 'folder')
-    || '<div class="nav" style="pointer-events:none"><span class="nm sub">＋で新規フォルダ</span></div>';
+    || '<div class="nav" style="pointer-events:none"><span class="nm sub">＋で作成(グループ / 集める / 作る)</span></div>';
   // 💰フォルダ合計(各フォルダの累計使用額の総和)を一覧の下に常時表示
   const spentSum = albumsCache.reduce((t, a) => t + (a.agent?.spent_usd || 0), 0);
   if (spentSum > 0) {
@@ -1040,7 +1079,7 @@ function renderSide() {
 }
 document.body.classList.toggle('dense', (+localStorage.getItem('fg_cell') || 168) <= 110);
 $('addfolder').innerHTML = ic('plus', 14);
-$('addfolder').onclick = (e) => { e.stopPropagation(); openFolderNew(); };
+$('addfolder').onclick = (e) => plusMenu(e, '');
 
 // ================= サイドバー幅リサイズ(ドラッグ・localStorage永続) =================
 {
@@ -1110,7 +1149,7 @@ function dragNav(ev, kind, key) {
 function dragEnd(ev) {
   dragNav_ = null;
   ev.currentTarget.classList.remove('dragging');
-  document.querySelectorAll('.dropon, .mergeon').forEach(e => e.classList.remove('dropon', 'mergeon'));
+  document.querySelectorAll('.dropon, .mergeon, .ins-top, .ins-bot').forEach(e => e.classList.remove('dropon', 'mergeon', 'ins-top', 'ins-bot'));
 }
 function albumFolder(name) { return albumsCache.find(x => x.name === name)?.folder || ''; }
 function dsFolder(name) { return datasetsCache.find(x => x.name === name)?.folder || ''; }
@@ -1137,8 +1176,28 @@ function dropKind(target, key) {
   if (parentOf(d.key) === to) return null;                         // すでにそこにいる
   return 'move';
 }
+// 並び替えできる組か(フォルダの木だけ)。行の上下の縁に落とす=その行の前/後ろへ挿す
+function reorderKind(target, key) {
+  const d = dragNav_;
+  if (!d) return false;
+  if (d.kind === 'album' && target === 'album') return d.key !== key;
+  if (d.kind === 'group' && target === 'group') return d.key !== key && !key.startsWith(d.key + '/');
+  return false;
+}
 function navOver(ev, target, key) {
   if (dragNav_) {
+    ev.currentTarget.classList.remove('ins-top', 'ins-bot');
+    if (reorderKind(target, key)) {
+      const r = ev.currentTarget.getBoundingClientRect();
+      const t = (ev.clientY - r.top) / r.height;
+      // 上下30%は挿入、中央40%は従来の合流/移動。行の外の座標(合成イベント等)は縁扱いしない
+      if ((t >= 0 && t < 0.3) || (t > 0.7 && t <= 1)) {
+        ev.preventDefault();
+        ev.currentTarget.classList.remove('dropon', 'mergeon');
+        ev.currentTarget.classList.add(t < 0.3 ? 'ins-top' : 'ins-bot');
+        return;
+      }
+    }
     const k = dropKind(target, key);
     if (!k) return;
     ev.preventDefault();
@@ -1149,12 +1208,18 @@ function navOver(ev, target, key) {
   ev.preventDefault();
   ev.currentTarget.classList.add('dropon');
 }
-function navLeave(ev) { ev.currentTarget.classList.remove('dropon', 'mergeon'); }
+function navLeave(ev) { ev.currentTarget.classList.remove('dropon', 'mergeon', 'ins-top', 'ins-bot'); }
 function navDrop(ev, target, key) {
   ev.preventDefault(); ev.stopPropagation();
-  ev.currentTarget.classList.remove('dropon', 'mergeon');
+  const row = ev.currentTarget;
+  const ins = row.classList.contains('ins-top') ? 'top' : row.classList.contains('ins-bot') ? 'bot' : '';
+  row.classList.remove('dropon', 'mergeon', 'ins-top', 'ins-bot');
   const d = dragNav_;
-  if (!d) return dropShas(ev, ev.currentTarget.dataset.dsrc); // 画像の移動(従来)
+  if (!d) return dropShas(ev, row.dataset.dsrc); // 画像の移動(従来)
+  if (ins && reorderKind(target, key)) {
+    dragNav_ = null;
+    return reorderDrop(d, target, key, ins === 'top');
+  }
   const k = dropKind(target, key);
   dragNav_ = null;
   if (!k) return;
@@ -1163,6 +1228,53 @@ function navDrop(ev, target, key) {
   if (d.kind === 'album') return moveAlbum(d.key, to);
   if (d.kind === 'dataset') return moveDataset(d.key, to);
   return moveGroup(d.key, to, d.kind === 'dsgroup' ? 'dataset' : '');
+}
+// 表示と同じ順で兄弟フォルダを並べる(order無し=新着が先、並び替え済み=order昇順が後)
+function siblingAlbums(folder) {
+  const list = albumsCache.filter(a => (a.folder || '') === folder);
+  return list.filter(a => a.order == null).concat(list.filter(a => a.order != null).sort((x, y) => x.order - y.order));
+}
+// 縁ドロップの実行: 落とした先の兄弟全員を10刻みで採番し直して一括保存(1ドロップ=1リクエスト)
+async function reorderDrop(d, target, key, before) {
+  try {
+    if (d.kind === 'album') {
+      const destFolder = albumFolder(key);
+      const dragged = albumsCache.find(a => a.name === d.key);
+      if (!dragged) return;
+      const sib = siblingAlbums(destFolder).filter(a => a.name !== d.key);
+      const idx = sib.findIndex(a => a.name === key);
+      if (idx < 0) return;
+      sib.splice(before ? idx : idx + 1, 0, dragged);
+      const moved = (dragged.folder || '') !== destFolder;
+      if (moved) {
+        await j('/api/albums/' + encodeURIComponent(d.key) + '/move', {method: 'POST',
+          headers: {'Content-Type': 'application/json'}, body: JSON.stringify({folder: destFolder})});
+      }
+      await j('/api/order', {method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({albums: sib.map((a, i) => ({name: a.name, order: (i + 1) * 10}))})});
+      toast(`「${d.key}」を並び替えました${moved ? `(「${destFolder || '一番上'}」へ移動)` : ''}`);
+    } else {
+      const leaf = d.key.split('/').pop(), destParent = parentOf(key);
+      let dragPath = d.key;
+      if (parentOf(d.key) !== destParent) { // 別の親の並びへ落とした=移動してから挿す
+        const to = (destParent ? destParent + '/' : '') + leaf;
+        const r = await j('/api/folders/rename', {method: 'POST',
+          headers: {'Content-Type': 'application/json'}, body: JSON.stringify({from: d.key, to, kind: ''})});
+        refoldPrefix(d.key, r.to || to);
+        dragPath = r.to || to;
+      }
+      const sib = groupsCache
+        .filter(g => parentOf(g.path) === destParent && g.path !== d.key && g.path !== dragPath)
+        .sort((a, b) => ((a.order ?? Infinity) - (b.order ?? Infinity)) || a.path.localeCompare(b.path));
+      const idx = sib.findIndex(g => g.path === key);
+      if (idx < 0) return;
+      sib.splice(before ? idx : idx + 1, 0, {path: dragPath});
+      await j('/api/order', {method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({groups: sib.map((g, i) => ({path: g.path, order: (i + 1) * 10}))})});
+      toast(`グループ「${leaf}」を並び替えました`);
+    }
+    await loadAlbums();
+  } catch (e) { toast('❌ ' + e.message); }
 }
 async function moveDataset(name, folder) {
   try {
@@ -1285,7 +1397,6 @@ function ctxItems(row, kind, key) {
   if (kind === 'album') return [
     {icon: 'folder', label: '開く', run: () => openFolder(key)},
     rename,
-    {icon: 'plus', label: 'この中に新規フォルダ', run: () => newInFolder((a?.folder ? a.folder + '/' : '') + key)},
     {icon: 'copy', label: 'レシピごと複製', run: () => copyAlbum(key)},
     {icon: 'box', label: 'zipで書き出し', run: () => exportCriteria({...(a?.display_criteria || a?.criteria || {})}, key)},
     ...(inGroup ? [toTop] : []),
@@ -1301,8 +1412,13 @@ function ctxItems(row, kind, key) {
   ];
   if (kind === 'group' || kind === 'dsgroup') return [
     rename,
-    ...(kind === 'group' ? [{icon: 'plus', label: 'この中に新規フォルダ', run: () => newInFolder(key)}] : []),
+    ...(kind === 'group' ? [
+      {icon: 'folder', label: 'この中にグループ', run: () => newGroupInline(key)},
+      {icon: 'globe', label: 'この中に集めるフォルダ', run: () => openFolderNew(key, 'crawl')},
+      {icon: 'wand', label: 'この中に作るフォルダ(AI生成)', run: () => openFolderNew(key, 'gen')},
+    ] : []),
     ...(inGroup ? [toTop] : []),
+    ...(kind === 'group' ? [{icon: 'x', label: 'グループを削除(中身は外へ出す)', danger: true, run: () => delGroup(key)}] : []),
   ];
   if (kind === 'image') { // サムネ/拡大画像の右クリック(ブラウザの「画像を保存」の代わり+よく使う操作)
     const it = items.find(x => x.sha1 === key) || {sha1: key};
@@ -1339,11 +1455,9 @@ function ctxItems(row, kind, key) {
   ];
   return [];
 }
-function ctxMenu(ev, kind, key) {
-  ev.preventDefault(); ev.stopPropagation();
+// 汎用ポップアップメニュー(右クリックも＋ボタンも同じ見た目・同じ閉じ方)
+function popMenu(x, y, items) {
   ctxClose();
-  const row = ev.currentTarget.closest('.nav');
-  const items = ctxItems(row, kind, key);
   if (!items.length) return;
   const m = document.createElement('div');
   m.id = 'ctxm';
@@ -1352,8 +1466,8 @@ function ctxMenu(ev, kind, key) {
     : `<div class="it${it.danger ? ' danger' : ''}" data-i="${i}">${ic(it.icon, 13)}${esc(it.label)}</div>`).join('');
   document.body.appendChild(m);
   const r = m.getBoundingClientRect(); // 画面からはみ出さない
-  m.style.left = Math.max(4, Math.min(ev.clientX, innerWidth - r.width - 8)) + 'px';
-  m.style.top = Math.max(4, Math.min(ev.clientY, innerHeight - r.height - 8)) + 'px';
+  m.style.left = Math.max(4, Math.min(x, innerWidth - r.width - 8)) + 'px';
+  m.style.top = Math.max(4, Math.min(y, innerHeight - r.height - 8)) + 'px';
   m.onclick = e => {
     const el = e.target.closest('.it');
     if (!el) return;
@@ -1364,6 +1478,93 @@ function ctxMenu(ev, kind, key) {
   document.addEventListener('keydown', ctxKey, true);
   window.addEventListener('resize', ctxClose);
   $('side')?.addEventListener('scroll', ctxClose);
+}
+function ctxMenu(ev, kind, key) {
+  ev.preventDefault(); ev.stopPropagation();
+  popMenu(ev.clientX, ev.clientY, ctxItems(ev.currentTarget.closest('.nav'), kind, key));
+}
+// ＋の3択: 入れ物(グループ)とタスク(フォルダ)は別物なので、作る前にどちらか選ぶ
+function plusMenu(ev, parent = '') {
+  ev.stopPropagation?.(); ev.preventDefault?.();
+  const r = ev.currentTarget?.getBoundingClientRect?.();
+  popMenu(r ? r.left : ev.clientX, r ? r.bottom + 4 : ev.clientY, [
+    {icon: 'folder', label: 'グループ — 空の入れ物', run: () => newGroupInline(parent)},
+    {icon: 'globe', label: '集める — Webから収集するフォルダ', run: () => openFolderNew(parent, 'crawl')},
+    {icon: 'wand', label: '作る — AI生成するフォルダ', run: () => openFolderNew(parent, 'gen')},
+  ]);
+}
+// グループをその場で作る(入力行をサイドバーに挿す。ネイティブprompt禁止=憲法5条)
+function newGroupInline(parent = '') {
+  if (renaming) document.querySelector('input.rn')?.blur();
+  if (renaming) return;
+  folded.delete('/folders');
+  if (parent) { // 入力行が見えるように親を全部開く
+    let p = '';
+    for (const part of parent.split('/')) { p += '/' + part; folded.delete(p); }
+    localStorage.setItem('fg_fold', JSON.stringify([...folded]));
+  }
+  renderSide();
+  const host = $('nav_folders');
+  const depth = parent ? parent.split('/').length : 0;
+  const row = document.createElement('div');
+  row.className = 'nav';
+  row.style.paddingLeft = (10 + depth * 13) + 'px';
+  row.innerHTML = `${ic('chevR', 13)}<span class="nm" style="color:var(--faint)"></span>`;
+  const anchor = parent ? [...host.querySelectorAll('[data-grp]')].find(r => r.dataset.grp === parent) : null;
+  anchor ? anchor.after(row) : host.prepend(row);
+  const inp = document.createElement('input');
+  inp.className = 'rn';
+  inp.placeholder = '新しいグループ名';
+  inp.spellcheck = false;
+  row.querySelector('.nm').appendChild(inp);
+  renaming = {kind: 'newgroup', key: parent};
+  let busy = false;
+  const stop = e => e.stopPropagation();
+  inp.onclick = stop; inp.onmousedown = stop;
+  const finish = () => { renaming = null; row.remove(); renderSide(); };
+  const submit = async () => {
+    if (busy) return;
+    const v = inp.value.trim();
+    if (!v) return finish();
+    busy = true;
+    try {
+      await j('/api/groups', {method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name: (parent ? parent + '/' : '') + v})});
+      renaming = null; row.remove();
+      toast(`グループ「${v}」を作りました — 空のままでも残ります`);
+      await loadAlbums();
+    } catch (e) {
+      busy = false;
+      toast('❌ ' + e.message); // 409(同名)などは入力を残してやり直せる
+      inp.focus();
+    }
+  };
+  inp.onkeydown = e => {
+    e.stopPropagation();
+    if (e.key === 'Enter') { e.preventDefault(); submit(); }
+    else if (e.key === 'Escape') { e.preventDefault(); finish(); }
+  };
+  inp.onblur = () => { if (!busy && renaming?.kind === 'newgroup') (inp.value.trim() ? submit() : finish()); };
+  inp.focus();
+}
+// グループを消す(入れ物だけ。中のフォルダは親へ出す=フォルダも画像も消えない)
+async function delGroup(path) {
+  const members = albumsCache.filter(a => a.folder === path || a.folder?.startsWith(path + '/')).length;
+  const parent = parentOf(path);
+  if (members > 0) {
+    const ok = await confirmBox({
+      title: 'グループを削除しますか?',
+      body: `<b>${esc(path)}</b> を消します。中の <b>${members}個</b>のフォルダは${parent ? `「${esc(parent)}」` : '一番上'}へ出ます。<br><br>
+        <span class="sub">フォルダも画像も消えません(入れ物が無くなるだけ)。</span>`,
+      ok: '削除する', danger: true, icon: 'x'});
+    if (!ok) return;
+  }
+  try {
+    const r = await j('/api/groups/' + encodeURIComponent(path), {method: 'DELETE'});
+    refoldPrefix(path, parent);
+    toast(`グループ「${path.split('/').pop()}」を消しました${r.moved ? `(${r.moved}個のフォルダを外へ)` : ''}`);
+    await loadAlbums();
+  } catch (e) { toast('❌ ' + e.message); }
 }
 
 // ---- 確認ポップアップ(ネイティブconfirm禁止=憲法5条。戻すのが大変な操作にだけ出す) ----
@@ -1852,6 +2053,7 @@ function setNewKind(k) {
   newKind = k; renderViewhead(); if (loc.type === 'new') $('grid').innerHTML = newEmptyHtml();
   if ($('ah_name')) $('ah_name').value = nm || '';
   if ($('ah_goal') && goal) $('ah_goal').value = goal;
+  nameHint();
   setTimeout(() => $('ah_name')?.focus(), 30);
 }
 // 生成フォルダのルールパネル(docs/gen-design.md §3.1)。収集と同じ骨: 作る物 / まで N 枚 / 1回 / AI配役 / ♻
@@ -1873,7 +2075,7 @@ function genHeadHtml(a, isNew) {
       <span class="kic gen">${ic('wand', 17)}</span>
       ${isNew
         ? `${newParent ? `<span class="lbl" style="width:auto; color:var(--tx)">${esc(newParent)} /</span>` : ''}
-           <input type="text" id="ah_name" value="" placeholder="${newParent ? '名前だけ入力' : 'フォルダ名 (例: 雨の日の柴犬)'}" style="width:220px">`
+           <input type="text" id="ah_name" value="" placeholder="${newParent ? '名前だけ入力' : 'フォルダ名 (例: 雨の日の柴犬)'}" style="width:220px" oninput="nameHint()">`
         : `<span class="ttl">${esc(a.name)}</span>${a.folder ? `<span class="lbl">${esc(a.folder)}/</span>` : ''}`}
       <span class="sp"></span>
       ${isNew ? `<button class="pri" onclick="createFolder()">${ic('check', 13)} 作成</button>` : `
@@ -1881,7 +2083,7 @@ function genHeadHtml(a, isNew) {
         ? `<button class="pri" onclick="stopGenHead()" title="この生成を止める(描き上がった分は残ります)">${ic('stop', 12)} 生成を止める</button>`
         : `<button class="pri" onclick="runGenNow()" ${!(a.goal || refs.length) ? 'disabled style="opacity:.5"' : ''}
         title="その場で1回だけ作る(1回の枚数ぶん)。別のフォルダを生成中なら順番待ちに入り、終わり次第自動で始まります。内蔵エンジンは無料、1024²で約30秒/枚">${ic('play', 12)} 今すぐ1回作る <span style="opacity:.75; font-weight:400">${genTimeEst(a)}</span></button>`}
-      ${a.queued && !a.running ? `<span class="engchip on" style="cursor:default" title="いまの生成が終わり次第、自動で始まります">⏳ 順番待ち ${a.queued}番目
+      ${a.queued && !a.running ? `<span class="engchip on" style="cursor:default" title="いまの生成が終わり次第、自動で始まります">${ic('clock', 12)} 順番待ち ${a.queued}番目
         <span onclick="cancelGenQueue('${esc(a.name)}')" style="cursor:pointer; margin-left:4px; opacity:.8" title="順番待ちから外す">✕</span></span>` : ''}
       <span class="switch ${a.agent?.auto ? 'on' : ''}" onclick="toggleAutoHead()"
         title="ONの間は30分ごとに見回り、目標枚数に足りなければ1回ぶん作ります(夜間の量産向き)。OFFでも「今すぐ1回作る」はいつでも押せます">
@@ -1891,6 +2093,7 @@ function genHeadHtml(a, isNew) {
       <button class="ghost" onclick="$('viewhead').classList.toggle('open')" title="設定(作る物/枚数/サイズ/参照)を開閉">${ic('chevD', 14)}</button>`}
       <button class="ghost" onclick="go({type:'lib', key:'all', criteria:{}})">${ic('x', 13)}</button>
     </div>
+    ${isNew ? '<div id="ah_namehint" class="lbl" style="width:auto; white-space:normal; font-size:11px; line-height:1.6; margin:4px 0 0 2px"></div>' : ''}
     ${!isNew && a.running ? `<div class="frow" style="margin-top:8px; align-items:flex-start">
       <span class="lbl">いま</span>
       <img id="ah_prev" alt="" onerror="this.style.visibility='hidden'" onload="this.style.visibility='visible'" title="途中経過(各ステップ)。ホバーで大きく"
@@ -2058,7 +2261,7 @@ function folderHeadHtml(a, isNew) {
       <span class="kic ${isNew || a.goal ? 'crawl' : ''}">${ic(isNew || a.goal ? 'globe' : 'smart', 17)}</span>
       ${isNew
         ? `${newParent ? `<span class="lbl" style="width:auto; color:var(--tx)">${esc(newParent)} /</span>` : ''}
-           <input type="text" id="ah_name" value="" placeholder="${newParent ? '名前だけ入力' : 'フォルダ名 (例: かわいい猫)'}" style="width:220px">`
+           <input type="text" id="ah_name" value="" placeholder="${newParent ? '名前だけ入力' : 'フォルダ名 (例: かわいい猫)'}" style="width:220px" oninput="nameHint()">`
         : `<span class="ttl">${esc(a.name)}</span>${a.folder ? `<span class="lbl">${esc(a.folder)}/</span>` : ''}`}
       <span class="sp"></span>
       ${isNew ? `<button class="pri" onclick="createFolder()">${ic('check', 13)} 作成</button>` : `
@@ -2072,7 +2275,7 @@ function folderHeadHtml(a, isNew) {
 ・OFF(無料/内蔵7B): 「その種類ならなんでもいい」収集に十分 — 猫・犬・風景など。弱点=特定人物の本人同定が甘い(そっくりさんを通す)・判定が直列で遅い
 ・ON: 判定精度と速度が上がる。特定の人物/グループだけ欲しい時はAI配役でClaudeを選択
 どちらも蒸留ゲート(採用実績16枚以上で自動)がゴミを無料で門前払いするので、判定コストは増えるほど下がります">
-        <span class="track"></span><span class="boost-glyph">💰💊</span>ブースト</span>
+        <span class="track"></span><span class="boost-glyph">${ic('coin', 12)}</span>ブースト</span>
       ${a.agent?.boost && !isNew ? `<select onchange="setJudgeModel(this.value)" title="目利きAIの切り替え(このフォルダに保存・▶にも♻自動にも効く)"
         style="max-width:150px">
         ${JUDGE_MODELS.map(([id, label]) => `<option value="${id}" ${(a.agent?.judge_model || '') === id ? 'selected' : ''}>${label}</option>`).join('')}
@@ -2091,6 +2294,7 @@ function folderHeadHtml(a, isNew) {
       <button class="ghost" onclick="$('viewhead').classList.toggle('open')" title="設定(目標/キーワード/検索元)を開閉">${ic('chevD', 14)}</button>`}
       <button class="ghost" onclick="go({type:'lib', key:'all', criteria:{}})">${ic('x', 13)}</button>
     </div>
+    ${isNew ? '<div id="ah_namehint" class="lbl" style="width:auto; white-space:normal; font-size:11px; line-height:1.6; margin:4px 0 0 2px"></div>' : ''}
     <div class="details">
     <div class="frow" style="margin-top:6px">
       <span class="lbl"></span>
@@ -2215,7 +2419,7 @@ let newKind = 'crawl'; // 新規フォルダの種別: crawl=集める(Web) / ge
 function openFolderNew(parent = '', kind = 'crawl') {
   newParent = parent; newKind = kind;
   go({type: 'new', key: '', criteria: {}});
-  setTimeout(() => $('ah_name')?.focus(), 50);
+  setTimeout(() => { nameHint(); $('ah_name')?.focus(); }, 50);
 }
 
 async function createFolder() {
@@ -2301,11 +2505,6 @@ function headAutoSave() {
       toast('保存しました');
     } catch (e) { toast('❌ ' + e.message); }
   }, 800);
-}
-// 「この中に作る」: 親を覚えて新規パネルを開く。名前欄には名前だけ書けばいい
-function newInFolder(prefix) {
-  openFolderNew(prefix);
-  toast(`「${prefix}」の中に作ります — 名前だけ入力してください`);
 }
 function copyAlbum(name) {
   const src = albumsCache.find(x => x.name === name); if (!src) return;
@@ -2428,7 +2627,11 @@ async function delAlbum(n) {
   loadAlbums();
 }
 async function loadAlbums() {
-  try { albumsCache = await j('/api/albums'); renderSide(); } catch (e) {}
+  try {
+    const [al, gr] = await Promise.all([j('/api/albums'), j('/api/groups')]);
+    albumsCache = al; groupsCache = gr;
+    renderSide();
+  } catch (e) {}
 }
 
 // フォルダの言語フィルタ。完成した画像集合に切り替えるだけなので閲覧中の計算はゼロ。
@@ -5024,7 +5227,7 @@ function watchGenPart(s) {
         ` <span style="color:var(--faint)" title="いま動いているAI">${s.provider === 'sdcpp' ? '外部 sd-server' : '内蔵'} ${esc((lastAI?.gen?.models || []).find(m => m.id === s.model)?.label?.split('(')[0] || s.model || '')}</span>`;
       $('genbar').title = `計画${s.planned} → 生成${s.generated} → 収蔵${s.ingested} / 却下${s.rejected}\n「${s.prompt || ''}」\n${s.last || ''}` +
         (s.queue?.length ? `\n順番待ち: ${s.queue.join(', ')}` : '');
-      if (s.queue?.length) $('gn_prog').innerHTML += ` <span style="color:var(--faint)" title="順番待ち: ${esc(s.queue.join(', '))}">⏳ 順番待ち ${s.queue.length}</span>`;
+      if (s.queue?.length) $('gn_prog').innerHTML += ` <span style="color:var(--faint)" title="順番待ち: ${esc(s.queue.join(', '))}">${ic('clock', 11)} 順番待ち ${s.queue.length}</span>`;
       // 開いているフォルダの実況欄には、そのフォルダが生成している時だけ出す。
       // 別フォルダの状態を書き込むと「タスクが混ざった」ように見える(実際は別々に走っている)
       const mine = loc.type === 'folder' && album_slug_js(loc.key) === album_slug_js(s.album);

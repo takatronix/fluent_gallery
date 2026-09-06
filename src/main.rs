@@ -1734,20 +1734,84 @@ fn album_slug(name: &str) -> String {
     if s.is_empty() { "album".into() } else { s }
 }
 
-/// 入れ物としてのフォルダ(グループ)。中身が空でも存在できるように名前だけを覚えておく。
+/// 入れ物としてのグループ。中身が空でも存在できるよう台帳(_groups.json)が正本。
 /// グループは元々「タスクの folder 欄に名前が書かれていれば画面に現れる」だけの存在で、
-/// 空のグループが作れなかった(「フォルダ +」を押しても収集タスクしか生まれない)
-fn groups_path(root: &std::path::Path) -> std::path::PathBuf { album_dir(root).join("_groups.json") }
-fn load_groups(root: &std::path::Path) -> Vec<String> {
-    std::fs::read_to_string(groups_path(root)).ok()
-        .and_then(|t| serde_json::from_str::<Vec<String>>(&t).ok()).unwrap_or_default()
+/// 空のグループが作れなかった(「フォルダ +」を押しても収集タスクしか生まれない)。
+/// order は兄弟(同じ親を持つグループ)内での並び順。
+#[derive(Serialize, Deserialize, Clone)]
+struct GroupRec {
+    path: String,
+    #[serde(default)] order: Option<f64>,
 }
-fn save_groups(root: &std::path::Path, g: &[String]) -> std::io::Result<()> {
+
+fn groups_path(root: &std::path::Path) -> std::path::PathBuf { album_dir(root).join("_groups.json") }
+fn load_groups(root: &std::path::Path) -> Vec<GroupRec> {
+    let Some(t) = std::fs::read_to_string(groups_path(root)).ok() else { return vec![] };
+    if let Ok(g) = serde_json::from_str::<Vec<GroupRec>>(&t) {
+        return g;
+    }
+    // 旧形(パスの配列)も読める
+    serde_json::from_str::<Vec<String>>(&t).map(|v| v.into_iter().map(|path| GroupRec { path, order: None }).collect()).unwrap_or_default()
+}
+fn save_groups(root: &std::path::Path, g: &[GroupRec]) -> std::io::Result<()> {
     let _ = std::fs::create_dir_all(album_dir(root));
     std::fs::write(groups_path(root), serde_json::to_string_pretty(g)?)
 }
-/// 画面に出す入れ物 = 明示的に作られた物 + タスクが属している物(従来どおり)
-async fn api_groups(State(app): S) -> Json<Value> { Json(json!(load_groups(&app.root))) }
+fn parent_path(p: &str) -> String {
+    p.rsplit_once('/').map(|(a, _)| a.to_string()).unwrap_or_default()
+}
+/// 兄弟内の次の order(最大+10)。10刻みなのは間に挿すとき再採番を一括で送り直すだけで済むように
+fn next_order(all: &[GroupRec], parent: &str) -> f64 {
+    all.iter()
+        .filter(|g| parent_path(&g.path) == parent)
+        .filter_map(|g| g.order)
+        .fold(0.0_f64, f64::max)
+        + 10.0
+}
+/// 台帳と実態(アルバムの folder 欄)を揃える: タスクが属しているパスとその祖先を自動登録し、
+/// order の無い登録にも採番する。初回は名前昇順で採番するので今日までの見た目が保たれる
+fn sync_groups(root: &std::path::Path, albums: &[Value]) -> Vec<GroupRec> {
+    let mut all = load_groups(root);
+    let mut want: Vec<String> = vec![];
+    for a in albums {
+        let f = a["folder"].as_str().unwrap_or("");
+        let mut path = String::new();
+        for part in f.split('/').filter(|s| !s.is_empty()) {
+            if !path.is_empty() { path.push('/'); }
+            path.push_str(part);
+            if !want.contains(&path) { want.push(path.clone()); }
+        }
+    }
+    want.sort(); // 名前昇順で採番(従来の表示順)
+    let mut changed = false;
+    for path in want {
+        if !all.iter().any(|g| g.path == path) {
+            let order = next_order(&all, &parent_path(&path));
+            all.push(GroupRec { path, order: Some(order) });
+            changed = true;
+        }
+    }
+    // 旧形から来た order 無しにも採番(名前昇順)
+    let mut orderless: Vec<String> = all.iter().filter(|g| g.order.is_none()).map(|g| g.path.clone()).collect();
+    orderless.sort();
+    for path in orderless {
+        let order = next_order(&all, &parent_path(&path));
+        if let Some(g) = all.iter_mut().find(|g| g.path == path) {
+            g.order = Some(order);
+            changed = true;
+        }
+    }
+    if changed {
+        let _ = save_groups(root, &all);
+    }
+    all
+}
+
+/// 画面に出す入れ物 = 明示的に作られた物 + タスクが属している物(sync_groupsが合流済み)
+async fn api_groups(State(app): S) -> Json<Value> {
+    let albums = load_albums(&app.root);
+    Json(json!(sync_groups(&app.root, &albums)))
+}
 
 #[derive(Deserialize)]
 struct GroupIn { name: String }
@@ -1757,34 +1821,92 @@ async fn api_group_make(State(app): S, Json(g): Json<GroupIn>) -> impl IntoRespo
     if name.is_empty() {
         return err_json(StatusCode::BAD_REQUEST, "名前をください");
     }
-    let mut all = load_groups(&app.root);
-    if all.iter().any(|x| x == &name) {
-        return err_json(StatusCode::CONFLICT, &format!("入れ物「{name}」はもうあります"));
+    let albums = load_albums(&app.root);
+    let mut all = sync_groups(&app.root, &albums);
+    if all.iter().any(|x| x.path == name) {
+        return err_json(StatusCode::CONFLICT, &format!("グループ「{name}」はもうあります"));
     }
-    all.push(name.clone());
-    all.sort();
+    // 親グループも無ければ一緒に登録(「親/子」と書いて作れる)
+    let mut path = String::new();
+    let mut order = 0.0;
+    for part in name.split('/') {
+        if !path.is_empty() { path.push('/'); }
+        path.push_str(part);
+        if !all.iter().any(|g| g.path == path) {
+            order = next_order(&all, &parent_path(&path));
+            all.push(GroupRec { path: path.clone(), order: Some(order) });
+        }
+    }
     if save_groups(&app.root, &all).is_err() {
         return err_json(StatusCode::INTERNAL_SERVER_ERROR, "保存できませんでした");
     }
-    Json(json!({"ok": true, "name": name})).into_response()
+    Json(json!({"ok": true, "name": name, "order": order})).into_response()
 }
 
-/// 中身があっても消せる(入れ物を消すだけで、中のフォルダは一番上へ出る)
+/// グループを消す: 中のフォルダは親(親が無ければ一番上)へ出してから台帳から除く。
+/// 先に退避しないと、タスクの folder 欄から同じグループが即座に再生成されて消えないように見える
 async fn api_group_del(State(app): S, AxPath(name): AxPath<String>) -> impl IntoResponse {
+    let _owner = app.folder_filter_owner.lock().unwrap();
     let name = folder_norm(&name);
+    if name.is_empty() {
+        return err_json(StatusCode::BAD_REQUEST, "名前をください");
+    }
+    let moved = refolder_albums(&app.root, &name, &parent_path(&name));
     let mut all = load_groups(&app.root);
-    all.retain(|x| x != &name && !x.starts_with(&format!("{name}/")));
+    all.retain(|x| x.path != name && !x.path.starts_with(&format!("{name}/")));
     let _ = save_groups(&app.root, &all);
-    Json(json!({"ok": true})).into_response()
+    Json(json!({"ok": true, "moved": moved})).into_response()
+}
+
+#[derive(Deserialize)]
+struct OrderItemIn { name: String, order: f64 }
+#[derive(Deserialize)]
+struct GroupOrderIn { path: String, order: f64 }
+#[derive(Deserialize)]
+struct OrderIn {
+    #[serde(default)] albums: Vec<OrderItemIn>,
+    #[serde(default)] groups: Vec<GroupOrderIn>,
+}
+
+/// 手動並び替えの一括反映。ドロップ1回で兄弟全員を10刻みに採番し直して送ってくる
+async fn api_order(State(app): S, Json(p): Json<OrderIn>) -> impl IntoResponse {
+    let _owner = app.folder_filter_owner.lock().unwrap();
+    let mut changed = 0usize;
+    for it in &p.albums {
+        if let Some(mut rec) = load_album(&app.root, &it.name) {
+            rec["order"] = json!(it.order);
+            if save_album(&app.root, &rec) { changed += 1; }
+        }
+    }
+    if !p.groups.is_empty() {
+        let mut all = load_groups(&app.root);
+        for it in &p.groups {
+            let path = folder_norm(&it.path);
+            if path.is_empty() { continue; }
+            match all.iter_mut().find(|g| g.path == path) {
+                Some(g) => g.order = Some(it.order),
+                None => all.push(GroupRec { path, order: Some(it.order) }),
+            }
+            changed += 1;
+        }
+        let _ = save_groups(&app.root, &all);
+    }
+    Json(json!({"ok": true, "changed": changed})).into_response()
 }
 
 fn load_albums(root: &std::path::Path) -> Vec<Value> {
     let mut out = vec![];
     if let Ok(rd) = std::fs::read_dir(album_dir(root)) {
         for e in rd.flatten() {
+            if e.file_name() == "_groups.json" {
+                continue; // グループ台帳はアルバムではない
+            }
             if let Ok(t) = std::fs::read_to_string(e.path()) {
                 if let Ok(a) = serde_json::from_str::<Value>(&t) {
-                    out.push(a);
+                    // name を持つ object だけがアルバム(台帳などの同居ファイルを誤読しない)
+                    if a["name"].is_string() {
+                        out.push(a);
+                    }
                 }
             }
         }
@@ -1820,6 +1942,7 @@ struct AlbumIn {
     #[serde(default)] kind: String, // ""|"crawl"=収集 / "gen"=AI生成(docs/gen-design.md)。空なら既存を引き継ぐ
     #[serde(default)] recipe: Value, // 生成レシピ {size, steps, ...}。object 以外なら既存を引き継ぐ
     #[serde(default)] create: bool, // true=新規作成のつもり。同名が既にあれば作らずに 409 で断る
+    #[serde(default)] order: Option<f64>, // 兄弟内の並び順(手動並び替え)。無ければ既存を引き継ぐ
 }
 
 async fn api_album_make(State(app): S, Json(a): Json<AlbumIn>) -> impl IntoResponse {
@@ -1852,8 +1975,11 @@ async fn api_album_make(State(app): S, Json(a): Json<AlbumIn>) -> impl IntoRespo
     if let Some(lr) = prev.as_ref().map(|p| p["last_run"].clone()).filter(|v| v.is_object()) {
         rec["last_run"] = lr; // 直近の成績も消さない
     }
-    for key in ["filter", "filter_job", "filter_error", "filter_epoch", "display_criteria"] {
+    for key in ["filter", "filter_job", "filter_error", "filter_epoch", "display_criteria", "order"] {
         if let Some(v) = prev.as_ref().and_then(|p| p.get(key)) { rec[key] = v.clone(); }
+    }
+    if let Some(o) = a.order {
+        rec["order"] = json!(o);
     }
     if prev.as_ref().is_some_and(|p| p["criteria"]["exclude_filtered"] == true) {
         rec["criteria"]["exclude_filtered"] = json!(true);
@@ -1866,6 +1992,11 @@ async fn api_album_make(State(app): S, Json(a): Json<AlbumIn>) -> impl IntoRespo
 }
 
 async fn api_albums(State(app): S) -> Json<Value> {
+    // ホットパスで台帳を実態に追従させる(タスクの folder に現れたグループを自動登録)
+    {
+        let albums = load_albums(&app.root);
+        let _ = sync_groups(&app.root, &albums);
+    }
     let mut out = vec![];
     let running = app.crawl.alive.load(Relaxed);
     let running_album = app.crawl.album.lock().unwrap().clone();
@@ -2153,7 +2284,7 @@ async fn api_album_rename(State(app): S, AxPath(name): AxPath<String>, Json(p): 
 }
 
 #[derive(Deserialize)]
-struct AlbumMoveIn { #[serde(default)] folder: String }
+struct AlbumMoveIn { #[serde(default)] folder: String, #[serde(default)] order: Option<f64> }
 
 /// D&D: フォルダをグループへ入れる/外へ出す(folderは表示上の棚だけ。中身は動かない)
 async fn api_album_move(State(app): S, AxPath(name): AxPath<String>, Json(p): Json<AlbumMoveIn>) -> impl IntoResponse {
@@ -2165,10 +2296,50 @@ async fn api_album_move(State(app): S, AxPath(name): AxPath<String>, Json(p): Js
     };
     let folder = folder_norm(&p.folder);
     rec["folder"] = json!(folder);
+    if let Some(o) = p.order {
+        rec["order"] = json!(o);
+    }
     if !save_album(&app.root, &rec) {
         return err_json(StatusCode::INTERNAL_SERVER_ERROR, "保存に失敗しました");
     }
     Json(json!({"ok": true, "name": slug, "folder": folder})).into_response()
+}
+
+/// from グループ(とその子孫)に属すフォルダの folder パスを to へ付け替える。to が空なら一番上へ
+fn refolder_albums(root: &std::path::Path, from: &str, to: &str) -> usize {
+    let prefix = format!("{from}/");
+    let mut changed = 0usize;
+    for a in load_albums(root) {
+        let cur = a["folder"].as_str().unwrap_or("").to_string();
+        let next = if cur == from {
+            to.to_string()
+        } else if let Some(rest) = cur.strip_prefix(&prefix) {
+            if to.is_empty() { rest.to_string() } else { format!("{to}/{rest}") }
+        } else {
+            continue;
+        };
+        let mut rec = a.clone();
+        rec["folder"] = json!(folder_norm(&next));
+        if save_album(root, &rec) { changed += 1; }
+    }
+    changed
+}
+
+/// グループ台帳の path にも同じ前方一致置換を掛ける(order は維持、重複は畳む)
+fn regroup_registry(root: &std::path::Path, from: &str, to: &str) {
+    let prefix = format!("{from}/");
+    let mut all = load_groups(root);
+    for g in all.iter_mut() {
+        if g.path == from {
+            g.path = to.to_string();
+        } else if let Some(rest) = g.path.strip_prefix(&prefix) {
+            g.path = if to.is_empty() { rest.to_string() } else { format!("{to}/{rest}") };
+        }
+    }
+    all.retain(|g| !g.path.is_empty());
+    let mut seen: Vec<String> = vec![];
+    all.retain(|g| if seen.contains(&g.path) { false } else { seen.push(g.path.clone()); true });
+    let _ = save_groups(root, &all);
 }
 
 #[derive(Deserialize)]
@@ -2210,19 +2381,8 @@ async fn api_folder_rename(State(app): S, Json(p): Json<FolderRenameIn>) -> impl
         }
         return Json(json!({"ok": true, "changed": changed, "to": to})).into_response();
     }
-    for a in load_albums(&app.root) {
-        let cur = a["folder"].as_str().unwrap_or("").to_string();
-        let next = if cur == from {
-            to.clone()
-        } else if let Some(rest) = cur.strip_prefix(&prefix) {
-            if to.is_empty() { rest.to_string() } else { format!("{to}/{rest}") }
-        } else {
-            continue;
-        };
-        let mut rec = a.clone();
-        rec["folder"] = json!(folder_norm(&next));
-        if save_album(&app.root, &rec) { changed += 1; }
-    }
+    changed += refolder_albums(&app.root, &from, &to);
+    regroup_registry(&app.root, &from, &to); // 台帳も追従(置き去りにすると空グループが旧名で残る)
     Json(json!({"ok": true, "changed": changed, "to": to})).into_response()
 }
 
@@ -4416,6 +4576,7 @@ async fn main() {
         .route("/api/albums", post(api_album_make).get(api_albums))
         .route("/api/groups", get(api_groups).post(api_group_make))
         .route("/api/groups/{name}", delete(api_group_del))
+        .route("/api/order", post(api_order))
         .route("/api/albums/{name}", delete(api_album_del))
         .route("/api/albums/{name}/rename", post(api_album_rename))
         .route("/api/albums/{name}/move", post(api_album_move))
