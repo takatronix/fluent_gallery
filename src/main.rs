@@ -12,6 +12,7 @@ mod llm;
 mod media;
 #[cfg(feature = "faceid")]
 mod faceid;
+mod dino;
 mod sam;
 mod samples;
 mod urlimport;
@@ -2312,6 +2313,88 @@ async fn api_seg_refine(State(app): S, Json(s): Json<SegRefineIn>) -> impl IntoR
     Json(m).into_response()
 }
 
+#[derive(Deserialize)]
+struct SegAutoIn {
+    #[serde(default)] album: String,
+    #[serde(default)] shas: Vec<String>,
+    #[serde(default)] prompt: String,  // 「dog. person.」形式。空ならフォルダの目標から
+    #[serde(default)] limit: usize,
+}
+
+/// 言葉→箱(内蔵GroundingDINO)→輪郭(内蔵SAM2)。人手のクリック無しでマスクを付ける
+async fn api_seg_auto(State(app): S, Json(q): Json<SegAutoIn>) -> impl IntoResponse {
+    if !dino::present(&app.root) || !sam::present(&app.root) {
+        return (StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"detail": "モデル未取得(設定のAIタブから「言葉で探す」と「マスク」を取得してください)"}))).into_response();
+    }
+    let mut labels = dino::parse_labels(&q.prompt);
+    let shas: Vec<String> = if !q.shas.is_empty() {
+        q.shas.clone()
+    } else if !q.album.is_empty() {
+        let rec = load_albums(&app.root).into_iter().find(|a| a["name"].as_str() == Some(&q.album));
+        let Some(rec) = rec else {
+            return (StatusCode::NOT_FOUND, Json(json!({"detail": "フォルダが見つかりません"}))).into_response();
+        };
+        if labels.is_empty() {
+            // 目標の言葉をそのまま対象語にする(「柴犬の写真」→ 内蔵LLMは通さず素直に使う)
+            labels = dino::parse_labels(rec["goal"].as_str().unwrap_or(""));
+        }
+        let src = rec["criteria"]["source"].as_str().unwrap_or("").to_string();
+        let db = app.db.lock().unwrap();
+        let mut st = match db.prepare("SELECT sha1 FROM images WHERE source=?1 AND (seg IS NULL OR seg=0) LIMIT ?2") {
+            Ok(s) => s, Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()}))).into_response(),
+        };
+        let n = if q.limit == 0 { 200 } else { q.limit.min(2000) };
+        st.query_map(rusqlite::params![src, n as i64], |r| r.get::<_, String>(0))
+            .map(|it| it.filter_map(|x| x.ok()).collect()).unwrap_or_default()
+    } else { vec![] };
+    if shas.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"detail": "対象がありません"}))).into_response();
+    }
+    if labels.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"detail": "探す対象の言葉がありません(prompt を入れてください)"}))).into_response();
+    }
+    let root = app.root.clone();
+    let total = shas.len();
+    let used = labels.join(". "); // 応答用にここで写す(labels はこの後クロージャへ移る)
+    let done = tokio::task::spawn_blocking(move || {
+        let mut ok = 0usize;
+        for sha in shas {
+            let Some(mut m) = store::load_meta(&root, &sha) else { continue };
+            let ext = m["ext"].as_str().unwrap_or("jpg").to_string();
+            let Ok(img) = image::open(store::image_path(&root, &sha, &ext)) else { continue };
+            let Some(dets) = dino::detect(&root, &img, &labels, dino::BOX_THR) else { continue };
+            if dets.is_empty() { continue; }
+            let Some(f) = sam::encode(&root, &sha, &img) else { continue };
+            let mut shapes: Vec<Value> = vec![];
+            for d in &dets {
+                if let Some((mask, iou)) = sam::segment(&root, &f, &[], Some(d.xyxy)) {
+                    shapes.extend(sam::mask_to_shapes(&mask, &d.cls, d.conf.min(iou)));
+                }
+            }
+            sam::forget(&sha); // 次の画像のために埋め込みを抱え込まない
+            if shapes.is_empty() { continue; }
+            m["seg"] = json!({"prompt": labels.join(". "), "model": "grounding-dino+sam2", "shapes": shapes,
+                "ts": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64()});
+            if store::save_meta(&root, &m).is_ok() {
+                store::index_meta(&app.db.lock().unwrap(), &m);
+            }
+            edits::clear_renders(&root, &sha);
+            ok += 1;
+        }
+        ok
+    }).await.unwrap_or(0);
+    Json(json!({"ok": true, "masked": done, "total": total, "prompt": used})).into_response()
+}
+
+/// 「言葉で探す」の重み(204MB)を取りに行く
+async fn api_dino_pull(State(app): S) -> Json<Value> {
+    tokio::spawn(async move {
+        if let Err(e) = dino::ensure_model(&app.root, &app.http).await { println!("⚠ 検出モデル取得失敗: {e}"); }
+    });
+    Json(json!({"ok": true}))
+}
+
 /// SAM2 の重み(155MB)を取りに行く
 async fn api_sam_pull(State(app): S) -> Json<Value> {
     tokio::spawn(async move {
@@ -2486,6 +2569,7 @@ async fn ai_status(app: &'static App) -> Value {
         "vlm": {"backend": if local_vlm { "llama-server" } else { "ollama" }, "model": if local_vlm { vlm::MODEL_FILE } else { enrich::BUILTIN_MODEL },
                 "reachable": vlm_reachable, "present": vlm_present || vlm::models_present(&app.root), "local": vlm::status(&app.root, &app.vlm)},
         "sam": sam::status(&app.root),
+        "dino": dino::status(&app.root),
         "gen": gen::engine_status(&app.root, &app.gen),
         "faceid": faceid_status(),
         "store": cfg!(feature = "store"),
@@ -3824,6 +3908,8 @@ async fn main() {
         .route("/api/meta/patch", post(api_meta_patch))
         .route("/api/seg/refine", post(api_seg_refine))
         .route("/api/sam/pull", post(api_sam_pull))
+        .route("/api/seg/auto", post(api_seg_auto))
+        .route("/api/dino/pull", post(api_dino_pull))
         .route("/micro/{sha1}", get(micro))
         .route("/atlas/{key}", get(atlas))
         .route("/cutout/{sha1}", get(cutout))
