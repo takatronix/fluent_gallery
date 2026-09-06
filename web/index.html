@@ -39,8 +39,8 @@
   #sidefoot { position:sticky; bottom:-16px; margin:0 -10px -16px; padding:0 10px 16px;
               background:var(--side); border-top:1px solid var(--hair); }
   #sidefoot .sec:first-child { padding-top:8px; }
-  #ai_activity.busyonly > div[data-idle="1"] { display:none; }
-  #ai_activity.hidden { display:none; }
+  #ai_activity.busyonly > div[data-idle="1"] { display:none !important; }
+  #ai_activity.hidden { display:none !important; }
   .brand { font-size:13.5px; font-weight:700; padding:2px 10px 10px; }
   .brand small { color:var(--faint); font-weight:400; margin-left:6px; }
   .sec { font-size:10px; font-weight:600; letter-spacing:.09em; color:var(--faint);
@@ -366,7 +366,7 @@
     aside::-webkit-scrollbar, .top::-webkit-scrollbar, #viewhead .row1::-webkit-scrollbar,
     #lbbar::-webkit-scrollbar, #selbar::-webkit-scrollbar { display:none; }
     #sidefoot { display:contents; }
-    .brand, aside .sec, #ai_activity, #storagebox, #side_spacer { display:none; }
+    .brand, aside .sec, #ai_activity, #ai_meters, #libline, #side_spacer { display:none; }
     #nav_lib, #nav_folders, #nav_sources_sec, #nav_datasets {
       display:flex; flex:none; gap:4px; align-items:center; min-width:max-content; }
     #folders_head, #ai_head, #nav_sources_sec > .sec { display:flex; flex:none; height:40px; padding:7px 10px; }
@@ -541,17 +541,19 @@
     <span class="kic" id="lora_ic"></span><span class="nm">LoRA</span><span class="n" id="n_lora"></span></div>
   <div id="side_spacer" style="flex:1"></div>
   <div id="sidefoot">
-    <div class="sec" id="ai_head" style="display:flex; align-items:center; cursor:pointer"
-         onclick="cycleAiView()" title="クリックで 全部 → 動いてるのだけ → 閉じる の順に切り替わります">AI稼働状況
-      <span id="ai_view_mark" style="margin-left:6px; font-weight:400; letter-spacing:0; text-transform:none; opacity:.6"></span>
+    <div id="libline" style="padding:8px 10px 4px" title="このライブラリの枚数・容量と、これまでに使ったAPI代"></div>
+    <div class="sec" id="ai_head" style="display:flex; align-items:center; gap:4px; cursor:pointer"
+         onclick="cycleAiView()" title="仕事の行の見せ方: 全部 → 稼働中のみ → 閉じる(枚数・料金・メーターは常に出ます)">
+      <span id="ai_tri" style="display:flex; flex:none"></span><span style="white-space:nowrap">AI稼働状況</span>
+      <span id="ai_view_mark" style="margin-left:4px; font-weight:400; letter-spacing:0; text-transform:none; opacity:.6; white-space:nowrap"></span>
       <span id="facesbtn" style="margin-left:auto; cursor:pointer; opacity:.7; display:flex; align-items:center; gap:3px"
         onclick="event.stopPropagation(); facesOpen()" title="顔ID台帳 — 登録済みの人物と参照顔の一覧/管理"></span></div>
     <div id="ai_activity" style="padding:0 10px 6px; font-size:11px; color:var(--faint); cursor:pointer"
          onclick="openPlacement()" title="クリックで、どのモデルがどこで動いているかを見る"></div>
+    <div id="ai_meters" style="padding:0 10px 4px; font-size:11px; color:var(--faint); cursor:pointer"
+         onclick="openPlacement()" title="クリックで、どのモデルがどこで動いているかを見る"></div>
     <div class="nav" data-loc="settings:" onclick="go({type:'settings', key:'', criteria:{}})" title="AIの役・接続先・APIキー・モデル・自動運転・保存先(行ごとに自動保存)">
       <span class="kic" id="settings_ic"></span><span class="nm">設定</span></div>
-    <div class="sec">ストレージ</div>
-    <div id="storagebox" style="padding:0 10px 4px; font-size:11px; color:var(--faint)"></div>
   </div>
 </aside>
 
@@ -1699,8 +1701,10 @@ function applyAiView() {
   const el = document.getElementById('ai_activity'); if (!el) return;
   el.classList.toggle('busyonly', aiView === 'busy');
   el.classList.toggle('hidden', aiView === 'off');
+  const t = document.getElementById('ai_tri');
+  if (t) t.innerHTML = ic(aiView === 'off' ? 'chevR' : 'chevD', 11); // 閉じている時だけ右向き
   const m = document.getElementById('ai_view_mark');
-  if (m) m.textContent = {all: '', busy: '動いてるのだけ', off: '閉じています'}[aiView];
+  if (m) m.textContent = {all: '', busy: '稼働中のみ', off: ''}[aiView];
 }
 function cycleAiView() {
   aiView = AI_VIEWS[(AI_VIEWS.indexOf(aiView) + 1) % AI_VIEWS.length];
@@ -4873,21 +4877,27 @@ async function watchActivity() {
         : wrow('spark', 'CLIP', 'clip')) +       // 似た画像の索引(裏方)。モデルが無ければその旨
       apRow() + // ♻自動収集の巡回(周期と次回)
       wrow('bot', 'お手入れ', 'groom') +    // 属性の穴埋め巡回
-      cpu + gpu + ram;
-    // ストレージ: ライブラリの量と、ディスクの余白
-    if (s.disk && facetsCache) {
-      const usedPct = 100 * s.disk.used_gb / (s.disk.total_gb || 1);
-      $('storagebox').innerHTML = `
-        <div style="display:flex; gap:6px; align-items:baseline">
-          <b style="color:var(--tx); font-size:13px">${facetsCache.total.toLocaleString()}</b>枚
-          <span>· ${(facetsCache.bytes / 1073741824).toFixed(1)}GB</span>
-          ${facetsCache.cost_usd > 0 ? `<span style="margin-left:auto">$${facetsCache.cost_usd.toFixed(2)}</span>` : ''}
-        </div>
-        <div style="display:flex; gap:6px; align-items:center; margin-top:4px" title="ディスク ${s.disk.used_gb.toFixed(0)}/${s.disk.total_gb.toFixed(0)}GB使用">
-          ${bar(usedPct, usedPct > 85)}
-          <span style="flex:none; font-variant-numeric:tabular-nums">空き${s.disk.free_gb.toFixed(0)}GB</span>
-        </div>`;
-    }
+      '';
+    // 機械の頑張り具合は畳まない。「いまどれくらい働いているか」は常に見たい物なので。
+    // ディスクも同じメーターの一つ(別枠にする理由が無い)。最後にライブラリの量を1行だけ添える
+    const disk = s.disk ? (() => {
+      const pct = 100 * s.disk.used_gb / (s.disk.total_gb || 1);
+      return `<div style="display:flex; gap:6px; align-items:center; padding:2px 0" title="ディスク ${s.disk.used_gb.toFixed(0)}/${s.disk.total_gb.toFixed(0)}GB使用">
+        <span style="flex:none">ディスク</span>${bar(pct, pct > 85)}
+        <span style="flex:none; font-variant-numeric:tabular-nums">空き${s.disk.free_gb.toFixed(0)}G</span></div>`;
+    })() : '';
+    $('ai_meters').innerHTML = disk + cpu + gpu + ram;
+    // 枚数・容量・料金が一番見たい物。小さく添えるのではなく、下部の頭に大きく置く
+    if (facetsCache) $('libline').innerHTML = `
+      <div style="display:flex; gap:5px; align-items:baseline; color:var(--tx)">
+        <b style="font-size:17px; font-variant-numeric:tabular-nums">${facetsCache.total.toLocaleString()}</b>
+        <span style="font-size:11px; color:var(--faint)">枚</span>
+        <span style="font-size:11.5px; color:var(--dim)">${(facetsCache.bytes / 1073741824).toFixed(1)}GB</span>
+        ${facetsCache.cost_usd > 0
+          ? `<b style="margin-left:auto; font-size:14px; color:#e0a83c; font-variant-numeric:tabular-nums">$${facetsCache.cost_usd.toFixed(2)}</b>`
+          : `<span style="margin-left:auto; font-size:11px; color:var(--ok)">API代 0円</span>`}
+      </div>`;
+
   } catch (err) {}
 }
 
