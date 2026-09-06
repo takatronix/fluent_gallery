@@ -13,6 +13,7 @@ mod media;
 #[cfg(feature = "faceid")]
 mod faceid;
 mod dino;
+mod ep;
 mod sam;
 mod samples;
 mod urlimport;
@@ -3916,6 +3917,7 @@ async fn main() {
         .ok()
         .and_then(|p| p.ancestors().find(|a| a.join("store").exists()).map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("."));
+    ep::adopt_gpu_libs(&root); // engine/cuda/lib があれば、そこを通して起動し直す(ONNXをGPUで走らせるため)
     config::init(&root); // 設定の正本(store/config.json)を読む。以後 config::get_* で参照
     let db = Connection::open(root.join("store/index.sqlite")).expect("index.sqlite");
     store::ensure_schema(&db);

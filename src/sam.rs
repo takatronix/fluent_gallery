@@ -87,11 +87,8 @@ fn session(cell: &'static OnceLock<Option<Mutex<ort::session::Session>>>, p: Pat
     let what = what.to_string();
     cell.get_or_init(move || {
         // CLIP と同じくスレッドは絞る(既定=全コアだと収集中に UI まで重くなる)
-        let built = (|| -> Result<ort::session::Session, String> {
-            let b = ort::session::Session::builder().map_err(|e| e.to_string())?;
-            let mut b = b.with_intra_threads(4).map_err(|e| e.to_string())?;
-            b.commit_from_file(&p).map_err(|e| e.to_string())
-        })();
+        // SAM2 は GPU の効きが桁違い(4090実測 1.568秒 → 0.028秒)。既定で載せにいく
+        let built = crate::ep::build(&p, 4, crate::ep::gpu_available(), &what);
         match built {
             Ok(s) => { println!("✂ {what} 読込OK"); Some(Mutex::new(s)) }
             Err(e) => { println!("⚠ {what} 読込失敗({e}) — マスクは無効"); None }
