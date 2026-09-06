@@ -52,12 +52,19 @@ make_dmg() {
   [ -f "$ROOT/mac/README-install.txt" ] && cp "$ROOT/mac/README-install.txt" "$stage/はじめに読んでください.txt"
   rm -f "$dmg"; hdiutil create -quiet -volname "Fluent Gallery" -srcfolder "$stage" -ov -format UDZO "$dmg"; rm -rf "$stage"
 }
-# 公証: dmg を提出 → app と dmg にチケットを貼る
-notarize_dmg() {
-  local app="$1" dmg="$2" id="$3" profile="$4"
+# 公証: まず .app を zip で提出して staple(dmg の中の app 自体にチケットが付く=オフラインの初回起動でも通る)、
+# そのあと dmg を作り直して署名・提出・staple。dmg を先に作ると中の app が staple 前の物になる
+notarize_app_and_dmg() {
+  local app="$1" dmg="$2" id="$3" profile="$4" zip
+  zip=$(mktemp -d)/FluentGallery.zip
+  ditto -c -k --keepParent "$app" "$zip"
+  xcrun notarytool submit "$zip" --keychain-profile "$profile" --wait || { echo "app の公証に失敗: xcrun notarytool log <id> --keychain-profile $profile"; return 1; }
+  xcrun stapler staple "$app" || return 1
+  rm -f "$zip"
+  make_dmg "$app" "$dmg"
   codesign --force --timestamp --sign "$id" "$dmg"
-  xcrun notarytool submit "$dmg" --keychain-profile "$profile" --wait || return 1
-  xcrun stapler staple "$app" && xcrun stapler staple "$dmg" && spctl -a -vv -t exec "$app" 2>&1 | tail -n 2
+  xcrun notarytool submit "$dmg" --keychain-profile "$profile" --wait || { echo "dmg の公証に失敗"; return 1; }
+  xcrun stapler staple "$dmg" && spctl -a -vv -t exec "$app" 2>&1 | tail -n 2
 }
 
 step "依存チェック"
@@ -128,7 +135,7 @@ if [ "$PLAIN" = 0 ]; then
   fi
   step "DMG $DMG"; make_dmg "$APP" "$DMG"
   if [ -n "${SIGN:-}" ] && [ "$SIGN" != "-" ] && [ -n "${NOTARY_PROFILE:-}" ]; then
-    step "notarize ($NOTARY_PROFILE)"; notarize_dmg "$APP" "$DMG" "$SIGN" "$NOTARY_PROFILE" || { echo "公証失敗(xcrun notarytool log <id> --keychain-profile $NOTARY_PROFILE で理由を見る)"; exit 1; }
+    step "notarize ($NOTARY_PROFILE)"; notarize_app_and_dmg "$APP" "$DMG" "$SIGN" "$NOTARY_PROFILE" || { echo "公証失敗(xcrun notarytool log <id> --keychain-profile $NOTARY_PROFILE で理由を見る)"; exit 1; }
   elif [ -n "${SIGN:-}" ]; then
     echo "(NOTARY_PROFILE 未指定: 公証なし。xcrun notarytool store-credentials fluent --apple-id … --team-id … --password <app用パスワード> で登録して NOTARY_PROFILE=fluent)"
   fi
@@ -164,7 +171,7 @@ fi
 step "DMG $DMG"; make_dmg "$APP" "$DMG"
 
 if [ -n "${SIGN:-}" ] && [ "$SIGN" != "-" ] && [ -n "${NOTARY_PROFILE:-}" ]; then
-  step "notarize ($NOTARY_PROFILE)"; notarize_dmg "$APP" "$DMG" "$SIGN" "$NOTARY_PROFILE" || { echo "公証失敗"; exit 1; }
+  step "notarize ($NOTARY_PROFILE)"; notarize_app_and_dmg "$APP" "$DMG" "$SIGN" "$NOTARY_PROFILE" || { echo "公証失敗"; exit 1; }
 fi
 
 step "完了"
