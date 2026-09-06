@@ -35,6 +35,12 @@
   #sideresize { position:fixed; top:0; bottom:0; width:7px; cursor:col-resize; z-index:50;
                 left:calc(var(--sidew, 218px) - 3px); }
   #sideresize:hover, #sideresize.on { background:#7aa2f744; }
+  /* サイドバー下部(AI稼働状況・設定・ストレージ)は定位置。フォルダが増えても流れて消えない */
+  #sidefoot { position:sticky; bottom:-16px; margin:0 -10px -16px; padding:0 10px 16px;
+              background:var(--side); border-top:1px solid var(--hair); }
+  #sidefoot .sec:first-child { padding-top:8px; }
+  #ai_activity.busyonly > div[data-idle="1"] { display:none; }
+  #ai_activity.hidden { display:none; }
   .brand { font-size:13.5px; font-weight:700; padding:2px 10px 10px; }
   .brand small { color:var(--faint); font-weight:400; margin-left:6px; }
   .sec { font-size:10px; font-weight:600; letter-spacing:.09em; color:var(--faint);
@@ -95,6 +101,10 @@
   .chip:hover { color:var(--tx); border-color:#3a3d4a; }
   .chip.on { color:var(--tx); border-color:var(--acc); background:var(--acc-soft); }
   .chip small { opacity:.6; margin-left:3px; }
+  #plov { position:fixed; inset:0; background:#0009; z-index:60; display:flex; align-items:center; justify-content:center; }
+  .plbox { background:var(--side); border:1px solid var(--hair); border-radius:12px; padding:14px 16px 16px;
+           width:min(720px, 92vw); max-height:80vh; overflow:auto; box-shadow:0 18px 60px #000a; }
+  .plhead { display:flex; align-items:center; gap:7px; font-size:13px; font-weight:600; margin-bottom:10px; }
   .pbar { display:flex; height:12px; border-radius:6px; overflow:hidden; background:#2a2d38; margin:2px 0 8px; }
   .pbar > div { transition:width .3s; }
   .settabs { display:flex; gap:6px; flex-wrap:wrap; margin:2px 0 14px; }
@@ -355,7 +365,8 @@
             align-items:center; scrollbar-width:none; }
     aside::-webkit-scrollbar, .top::-webkit-scrollbar, #viewhead .row1::-webkit-scrollbar,
     #lbbar::-webkit-scrollbar, #selbar::-webkit-scrollbar { display:none; }
-    .brand, aside > .sec, #ai_activity, #storagebox, #side_spacer { display:none; }
+    #sidefoot { display:contents; }
+    .brand, aside .sec, #ai_activity, #storagebox, #side_spacer { display:none; }
     #nav_lib, #nav_folders, #nav_sources_sec, #nav_datasets {
       display:flex; flex:none; gap:4px; align-items:center; min-width:max-content; }
     #folders_head, #ai_head, #nav_sources_sec > .sec { display:flex; flex:none; height:40px; padding:7px 10px; }
@@ -528,15 +539,20 @@
   <div class="sec" title="生成が使う資産の棚(LoRA)。取り込み・試し描き・フォルダへの装着">棚</div>
   <div class="nav" data-loc="lora:" onclick="go({type:'lora', key:'', criteria:{}})" title="LoRA 棚: Hugging Face / Civitai の URL や .safetensors を取り込んで、生成フォルダに着せる">
     <span class="kic" id="lora_ic"></span><span class="nm">LoRA</span><span class="n" id="n_lora"></span></div>
-  <div class="sec" id="ai_head" style="display:flex; align-items:center">AI稼働状況
-    <span id="facesbtn" style="margin-left:auto; cursor:pointer; opacity:.7; display:flex; align-items:center; gap:3px"
-      onclick="facesOpen()" title="顔ID台帳 — 登録済みの人物と参照顔の一覧/管理"></span></div>
-  <div id="ai_activity" style="padding:0 10px 6px; font-size:11px; color:var(--faint)"></div>
   <div id="side_spacer" style="flex:1"></div>
-  <div class="nav" data-loc="settings:" onclick="go({type:'settings', key:'', criteria:{}})" title="AIの役・接続先・APIキー・モデル・自動運転・保存先(行ごとに自動保存)">
-    <span class="kic" id="settings_ic"></span><span class="nm">設定</span></div>
-  <div class="sec">ストレージ</div>
-  <div id="storagebox" style="padding:0 10px 4px; font-size:11px; color:var(--faint)"></div>
+  <div id="sidefoot">
+    <div class="sec" id="ai_head" style="display:flex; align-items:center; cursor:pointer"
+         onclick="cycleAiView()" title="クリックで 全部 → 動いてるのだけ → 閉じる の順に切り替わります">AI稼働状況
+      <span id="ai_view_mark" style="margin-left:6px; font-weight:400; letter-spacing:0; text-transform:none; opacity:.6"></span>
+      <span id="facesbtn" style="margin-left:auto; cursor:pointer; opacity:.7; display:flex; align-items:center; gap:3px"
+        onclick="event.stopPropagation(); facesOpen()" title="顔ID台帳 — 登録済みの人物と参照顔の一覧/管理"></span></div>
+    <div id="ai_activity" style="padding:0 10px 6px; font-size:11px; color:var(--faint); cursor:pointer"
+         onclick="openPlacement()" title="クリックで、どのモデルがどこで動いているかを見る"></div>
+    <div class="nav" data-loc="settings:" onclick="go({type:'settings', key:'', criteria:{}})" title="AIの役・接続先・APIキー・モデル・自動運転・保存先(行ごとに自動保存)">
+      <span class="kic" id="settings_ic"></span><span class="nm">設定</span></div>
+    <div class="sec">ストレージ</div>
+    <div id="storagebox" style="padding:0 10px 4px; font-size:11px; color:var(--faint)"></div>
+  </div>
 </aside>
 
 <main>
@@ -1630,10 +1646,6 @@ async function renderSettings() {
       ${keyRow('civitai', 'Civitai (LoRA取り込み)', 'civitai')}
     </div>
 
-    <div class="setsec" data-tab="ai"><h3>置き場(どのモデルがどこで動いているか)</h3>
-      <div id="placement"><div class="hint">読み込み中…</div></div>
-    </div>
-
     <div class="setsec" data-tab="ai"><h3>モデル(内蔵AI)</h3>
       <div class="hint">置き場: ${esc(S.root)}/engine/models · 取得は初回だけ。生成は 3 ファイルで 7.1GB。</div>
       ${model('LLM(計画・自然言語検索)', A.llm, 'llm', '2.4GB')}
@@ -1678,8 +1690,38 @@ async function renderSettings() {
     </div>
   </div>`;
   pickSetTab(setTab); // 開いていたタブだけ見せる(回帰テストが数える .setsec は消さずに隠す)
+}
+// AI稼働状況の見せ方 3段階: 全部 / 動いてるのだけ / 閉じる。
+// フォルダが増えるとここまでスクロールしないと見えなかったので、下部は定位置に貼ってある
+const AI_VIEWS = ['all', 'busy', 'off'];
+let aiView = localStorage.getItem('fg_aiview') || 'all';
+function applyAiView() {
+  const el = document.getElementById('ai_activity'); if (!el) return;
+  el.classList.toggle('busyonly', aiView === 'busy');
+  el.classList.toggle('hidden', aiView === 'off');
+  const m = document.getElementById('ai_view_mark');
+  if (m) m.textContent = {all: '', busy: '動いてるのだけ', off: '閉じています'}[aiView];
+}
+function cycleAiView() {
+  aiView = AI_VIEWS[(AI_VIEWS.indexOf(aiView) + 1) % AI_VIEWS.length];
+  localStorage.setItem('fg_aiview', aiView);
+  applyAiView();
+}
+
+// 「どのモデルがどこで動いているか」を稼働状況から開く(設定ではないので設定画面には置かない)
+async function openPlacement() {
+  let ov = document.getElementById('plov');
+  if (ov) { ov.remove(); return; }
+  ov = document.createElement('div');
+  ov.id = 'plov';
+  ov.onclick = e => { if (e.target === ov) ov.remove(); };
+  ov.innerHTML = `<div class="plbox"><div class="plhead">${ic('cpu', 13)} どのモデルがどこで動いているか
+      <span style="margin-left:auto; cursor:pointer; opacity:.7" onclick="document.getElementById('plov').remove()">✕</span></div>
+    <div id="placement"><div class="hint">読み込み中…</div></div></div>`;
+  document.body.appendChild(ov);
   renderPlacement();
 }
+
 // 置き場: いま何がどこで動いていて、あと何を置けるか。
 // 「余白」の意味だけが OS で割れる(CUDA=VRAMに固い上限 / Mac=統合メモリで上限は無いが遅くなる)
 async function renderPlacement() {
@@ -4776,7 +4818,7 @@ async function watchActivity() {
       }
       watchActivity._ingWas = g.alive;
     }
-    const row = (icon, name, on, detail, extra = '') => `<div style="display:flex; gap:6px; align-items:center; padding:2px 0">
+    const row = (icon, name, on, detail, extra = '') => `<div data-idle="${on ? 0 : 1}" style="display:flex; gap:6px; align-items:center; padding:2px 0">
       <span style="flex:none; width:7px; height:7px; border-radius:99px; background:${on ? 'var(--ok)' : '#2a2d38'};${on ? 'box-shadow:0 0 8px #6ee7a077' : ''}"></span>
       <span style="flex:none; display:flex; gap:5px; align-items:center">${ic(icon, 12)} ${name}</span>
       <span style="margin-left:auto; opacity:.85; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:150px" title="${esc(detail)}">${esc(detail)}</span>${extra}</div>`;
@@ -4810,6 +4852,7 @@ async function watchActivity() {
       const x = w[key];
       return x ? row(icon, name, !!x.on, x.detail || '') : '';
     };
+    applyAiView();
     $('ai_activity').innerHTML =
       row('globe', '収集', c.alive, (c.alive ? `${c.album} +${c.ingested}枚` : '待機') + (qn ? ` | 待ち${qn}` : '')) +
       (c.alive && c.next_query ? row('search', '先読み', true, `次「${c.next_query}」検索中`) : '') +
