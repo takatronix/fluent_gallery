@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#232a52"/>
+      <stop offset="0.55" stop-color="#0f1330"/>
+      <stop offset="1" stop-color="#06070f"/>
+    </linearGradient>
+    <linearGradient id="ribbon" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#22d3ee"/>
+      <stop offset="0.5" stop-color="#7c5cff"/>
+      <stop offset="1" stop-color="#ff4ecd"/>
+    </linearGradient>
+    <linearGradient id="photo" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffb35c"/>
+      <stop offset="0.55" stop-color="#ff6a6a"/>
+      <stop offset="1" stop-color="#7c5cff"/>
+    </linearGradient>
+    <linearGradient id="glass" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0.06"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.14"/>
+      <stop offset="0.35" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="22"/>
+      <feOffset dy="20" result="s"/>
+      <feComponentTransfer><feFuncA type="linear" slope="0.5"/></feComponentTransfer>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="26"/>
+    </filter>
+    <filter id="glow2" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="8"/>
+    </filter>
+    <filter id="cardShadow" x="-30%" y="-30%" width="160%" height="170%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="14"/>
+      <feOffset dy="12" result="s"/>
+      <feComponentTransfer><feFuncA type="linear" slope="0.55"/></feComponentTransfer>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <clipPath id="tileClip"><rect x="100" y="100" width="824" height="824" rx="185"/></clipPath>
+  </defs>
+
+  <!-- tile -->
+  <g filter="url(#shadow)">
+    <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#tile)"/>
+  </g>
+  <g clip-path="url(#tileClip)">
+    <!-- faint grid = ギャラリーのサムネ格子 -->
+    <g stroke="#ffffff" stroke-opacity="0.04" stroke-width="2">
+      <path d="M100 306H924M100 512H924M100 718H924M306 100V924M512 100V924M718 100V924"/>
+    </g>
+    <!-- flowing light (glow layer) -->
+    <path d="M150 740 C 330 800, 430 420, 600 460 S 830 470, 900 250" fill="none" stroke="url(#ribbon)" stroke-width="150" stroke-linecap="round" opacity="0.55" filter="url(#glow)"/>
+    <!-- cards: 三枚のフォトカードが扇に -->
+    <g filter="url(#cardShadow)">
+      <g transform="rotate(-16 512 560)">
+        <rect x="367" y="350" width="290" height="380" rx="34" fill="url(#glass)" stroke="#ffffff" stroke-opacity="0.28" stroke-width="3"/>
+      </g>
+      <g transform="rotate(16 512 560)">
+        <rect x="367" y="350" width="290" height="380" rx="34" fill="url(#glass)" stroke="#ffffff" stroke-opacity="0.28" stroke-width="3"/>
+      </g>
+    </g>
+    <!-- ribbon crisp layer passes between back and front card -->
+    <path d="M150 740 C 330 800, 430 420, 600 460 S 830 470, 900 250" fill="none" stroke="url(#ribbon)" stroke-width="46" stroke-linecap="round" opacity="0.95"/>
+    <path d="M150 740 C 330 800, 430 420, 600 460 S 830 470, 900 250" fill="none" stroke="#ffffff" stroke-width="8" stroke-linecap="round" opacity="0.55" filter="url(#glow2)"/>
+    <!-- front card with a photo -->
+    <g filter="url(#cardShadow)">
+      <rect x="360" y="330" width="304" height="400" rx="36" fill="#0d1022" stroke="#ffffff" stroke-opacity="0.5" stroke-width="3"/>
+      <rect x="382" y="352" width="260" height="300" rx="22" fill="url(#photo)"/>
+      <circle cx="560" cy="430" r="34" fill="#fff3c4" opacity="0.95"/>
+      <path d="M382 652 L382 600 Q450 520 510 590 Q545 560 582 600 L642 560 L642 652 Z" fill="#1a1230" opacity="0.55"/>
+      <rect x="382" y="352" width="260" height="300" rx="22" fill="url(#sheen)"/>
+      <!-- caption bars = AI が付ける属性 -->
+      <rect x="392" y="676" width="130" height="14" rx="7" fill="#ffffff" opacity="0.7"/>
+      <rect x="532" y="676" width="60" height="14" rx="7" fill="#22d3ee" opacity="0.9"/>
+    </g>
+    <!-- spark at the ribbon tip -->
+    <g transform="translate(900 250)">
+      <circle r="34" fill="#ffffff" opacity="0.35" filter="url(#glow2)"/>
+      <path d="M0 -46 C 6 -14, 14 -6, 46 0 C 14 6, 6 14, 0 46 C -6 14, -14 6, -46 0 C -14 -6, -6 -14, 0 -46 Z" fill="#ffffff"/>
+    </g>
+    <!-- top sheen on tile -->
+    <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#sheen)"/>
+    <rect x="101.5" y="101.5" width="821" height="821" rx="184" fill="none" stroke="#ffffff" stroke-opacity="0.12" stroke-width="3"/>
+  </g>
+</svg>

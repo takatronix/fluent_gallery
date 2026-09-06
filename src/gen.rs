@@ -353,7 +353,7 @@ pub async fn ensure_models(root: &Path, client: &reqwest::Client, st: &GenState,
 }
 
 /// sd-server を起動して /v1/models が通るまで待つ(sd-cli が無い環境の保険)。親が死んだら道連れ
-pub async fn start_server(root: &Path, client: &reqwest::Client, st: &GenState, s: &ModelSpec) -> Result<String, String> {
+pub async fn start_server(root: &Path, client: &reqwest::Client, st: &GenState, s: &ModelSpec, plan_override: Option<MemPlan>) -> Result<String, String> {
     let base = base_url();
     if health(client, &base).await && *st.server_model.lock().unwrap() == s.id { return Ok(base); }
     stop_engine(st); // 別モデルが載っていたら入れ替える
@@ -369,7 +369,8 @@ pub async fn start_server(root: &Path, client: &reqwest::Client, st: &GenState, 
         if let Some(mm) = role_path(root, s, "mmproj") { args += &format!(" --llm_vision \"{}\"", mm.display()); }
         if s.flow_shift > 0.0 { args += &format!(" --flow-shift {}", s.flow_shift); }
         let (dw, dh) = default_wh(); // 常駐サーバは設定サイズを前提に省メモリ計画を決める
-        let plan = mem_plan(s, dw, dh);
+        // OOM 再試行では最大構成を渡す。通常は解像度から mem_plan で決める
+        let plan = plan_override.unwrap_or_else(|| mem_plan(s, dw, dh));
         for f in plan.flags() { args += " "; args += f; }
         if !plan.note.is_empty() { println!("🧠 sd-server 省メモリ: {}", plan.note); }
         let sh = format!(
@@ -436,6 +437,26 @@ fn ref_file(root: &Path, sha: &str) -> Option<PathBuf> {
 pub fn ref_caption(root: &Path, sha: &str) -> String {
     store::load_meta(root, sha).and_then(|m| m["vlm"]["caption"].as_str().or(m["caption"].as_str()).map(String::from)).unwrap_or_default()
 }
+/// 参照メモの解決: main.rs はキャプション未取得の固定参照を "__REF__<sha>" で渡す。ここで
+/// サイドカーのキャプション → 無ければ内蔵VLMでその場で説明(約2秒/枚) → それも無理なら定型文、に置き換える。
+/// これが無いと「犬の写真を参照に色々なポーズで」が、犬の一言も無いまま計画LLMに渡って別物が出る(2026-09-06 実害)
+pub async fn resolve_ref_notes(root: &Path, client: &reqwest::Client, notes: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(notes.len());
+    for n in notes {
+        let Some(sha) = n.strip_prefix("__REF__") else { out.push(n.clone()); continue };
+        let mut c = ref_caption(root, sha);
+        if c.is_empty() && enrich::local_vlm_base().is_some() {
+            let ext = store::load_meta(root, sha).and_then(|m| m["ext"].as_str().map(String::from)).unwrap_or_else(|| "jpg".into());
+            let path = store::image_path(root, sha, &ext);
+            match enrich::describe(client, &path, "builtin").await {
+                Ok(v) => { c = v["caption"].as_str().unwrap_or("").to_string(); if !c.is_empty() { println!("🪄 参照を内蔵VLMで説明: {c}"); } }
+                Err(e) => println!("🪄 参照の説明取得に失敗({e}) — 定型文で続行"),
+            }
+        }
+        out.push(if c.is_empty() { "a reference image (keep its subject)".into() } else { c });
+    }
+    out
+}
 
 // ---------- 生成 ----------
 pub struct GenJob {
@@ -467,8 +488,27 @@ fn parse_progress(s: &str) -> Option<(usize, usize)> {
     out
 }
 
-/// ローカル: sd-cli を 1 枚ごとに起動(途中経過 `--preview proj` → engine/gen_preview.png、進捗 N/M)
+/// ローカル: sd-cli を 1 枚ごとに起動(途中経過 `--preview proj` → engine/gen_preview.png、進捗 N/M)。
+/// 省メモリ計画は解像度から mem_plan で決め、VRAM 不足(OOM)で落ちたら最大構成(MemPlan::max)で 1 回だけ描き直す。
 async fn generate_cli(root: &Path, cli: &Path, s: &ModelSpec, job: &GenJob, refs: &[PathBuf], stop: &AtomicBool, st: &GenState) -> Result<(Vec<u8>, f64), String> {
+    let plan = mem_plan(s, job.w, job.h); // 1枚ごとの解像度で省メモリ計画(常駐サーバ側と同じ mem_plan)
+    if !plan.note.is_empty() { println!("🧠 sd-cli 省メモリ: {}", plan.note); }
+    match generate_cli_once(root, cli, s, job, refs, stop, st, &plan).await {
+        Ok(v) => Ok(v),
+        // OOM で落ち、かつまだ最大構成でない → offload+tiling の最大構成で 1 回だけ再試行
+        Err((_, true)) if !(plan.offload && plan.vae_tiling) => {
+            let max = MemPlan::max();
+            println!("🧠 sd-cli VRAM不足(OOM) → {}", max.note);
+            *st.last.lock().unwrap() = "VRAM不足(OOM) → 省メモリ最大構成で描き直し".to_string();
+            generate_cli_once(root, cli, s, job, refs, stop, st, &max).await.map_err(|(m, _)| m)
+        }
+        Err((m, _)) => Err(m),
+    }
+}
+
+/// sd-cli を 1 回だけ起動して 1 枚描く。失敗は (メッセージ, OOM だったか)。plan は呼び出し側が決める(再試行で差し替える)
+#[allow(clippy::too_many_arguments)]
+async fn generate_cli_once(root: &Path, cli: &Path, s: &ModelSpec, job: &GenJob, refs: &[PathBuf], stop: &AtomicBool, st: &GenState, plan: &MemPlan) -> Result<(Vec<u8>, f64), (String, bool)> {
     use tokio::io::AsyncReadExt;
     let t0 = std::time::Instant::now();
     let out = root.join("engine/gen_out.png");
@@ -487,15 +527,11 @@ async fn generate_cli(root: &Path, cli: &Path, s: &ModelSpec, job: &GenJob, refs
         .arg("--sampling-method").arg("euler").arg("--diffusion-fa").arg("-s").arg(job.seed.to_string())
         .arg("-o").arg(&out);
     if s.flow_shift > 0.0 { c.arg("--flow-shift").arg(s.flow_shift.to_string()); }
-    { // 1枚ごとの解像度で省メモリ計画(常駐サーバ側と同じ mem_plan。旧 offload_for は mem_plan に統合)
-        let plan = mem_plan(s, job.w, job.h);
-        for f in plan.flags() { c.arg(f); }
-        if !plan.note.is_empty() { println!("🧠 sd-cli 省メモリ: {}", plan.note); }
-    }
+    for f in plan.flags() { c.arg(f); }
     if preview_on() { c.arg("--preview").arg("proj").arg("--preview-path").arg(&prev).arg("--preview-interval").arg("1"); }
     for r in refs { c.arg("-r").arg(r); }
     c.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
-    let mut child = c.spawn().map_err(|e| format!("sd-cli 起動失敗: {e}"))?;
+    let mut child = c.spawn().map_err(|e| (format!("sd-cli 起動失敗: {e}"), false))?;
     let mut err = child.stderr.take().unwrap();
     let mut tail: Vec<u8> = Vec::new();
     let mut buf = [0u8; 4096];
@@ -516,19 +552,20 @@ async fn generate_cli(root: &Path, cli: &Path, s: &ModelSpec, job: &GenJob, refs
                 }
             }
             _ = tokio::time::sleep(std::time::Duration::from_millis(300)) => {
-                if stop.load(Relaxed) { let _ = child.kill().await; return Err("stopped".into()); }
+                if stop.load(Relaxed) { let _ = child.kill().await; return Err(("stopped".into(), false)); }
             }
         }
     }
-    let status = child.wait().await.map_err(|e| e.to_string())?;
+    let status = child.wait().await.map_err(|e| (e.to_string(), false))?;
     let _ = std::fs::write(root.join("engine/sd-cli.log"), &tail); // 直近 1 枚の stderr 末尾(失敗時の原因と進捗書式の確認用)
-    if stop.load(Relaxed) { return Err("stopped".into()); }
+    if stop.load(Relaxed) { return Err(("stopped".into(), false)); }
     if !status.success() {
         let t = String::from_utf8_lossy(&tail);
+        let oom = is_oom(&t); // 拡散本体 or VAE 計算バッファの cudaMalloc 失敗
         let last = t.lines().rev().find(|l| l.contains("error") || l.contains("Error") || l.contains("failed")).unwrap_or("").chars().take(160).collect::<String>();
-        return Err(format!("sd-cli 失敗({}): {last}", status.code().unwrap_or(-1)));
+        return Err((format!("sd-cli 失敗({}): {last}", status.code().unwrap_or(-1)), oom));
     }
-    let png = std::fs::read(&out).map_err(|_| "sd-cli が出力を書きませんでした")?;
+    let png = std::fs::read(&out).map_err(|_| ("sd-cli が出力を書きませんでした".to_string(), false))?;
     Ok((png, t0.elapsed().as_secs_f64()))
 }
 
@@ -604,7 +641,7 @@ pub async fn generate_one(root: &Path, client: &reqwest::Client, st: &GenState, 
     if let Some(cli) = cli_bin(root) {
         return generate_cli(root, &cli, s, job, refs, &st.stop, st).await.map(|(p, _)| p);
     }
-    let b = start_server(root, client, st, s).await?;
+    let b = start_server(root, client, st, s, None).await?;
     generate_server(client, &b, s, job, refs, &st.stop).await.map(|(p, _)| p)
 }
 
@@ -617,14 +654,21 @@ fn parse_prompts(text: &str) -> Vec<String> {
 }
 
 /// 内蔵 LLM が多様なプロンプトを設計(atelier genraw の 24 本方式)。参照があれば「編集指示」の形で。失敗時は決定的テンプレ
-pub async fn plan(root: &Path, client: &reqwest::Client, llm_st: &llm::LlmState, goal: &str, used: &[String], n: usize, ref_notes: &[String], triggers: &[String]) -> Vec<String> {
+pub async fn plan(root: &Path, client: &reqwest::Client, llm_st: &llm::LlmState, goal: &str, used: &[String], n: usize, ref_notes: &[String], refs_attached: bool, triggers: &[String]) -> Vec<String> {
     let avoid: Vec<&String> = used.iter().rev().take(12).collect();
     let trig = triggers.iter().take(4).cloned().collect::<Vec<_>>().join(", ");
     let lora_block = if trig.is_empty() { String::new() } else {
         format!("A LoRA (style/subject adapter) is attached. Its trigger words are: \"{trig}\". Start EVERY prompt with these trigger words verbatim, \
                  and let the LoRA decide the style: do not add 'photorealistic photograph' or other style words that fight it unless the goal asks.\n")
     };
-    let ref_block = if ref_notes.is_empty() { String::new() } else {
+    let ref_block = if ref_notes.is_empty() { String::new() } else if !refs_attached {
+        // 参照非対応モデル(Z-Image Turbo 等): 画像は渡らないので、主語を言葉で毎回書かせる
+        format!("REFERENCE SUBJECT (text only — the image model will NOT see the reference images, so you must describe the subject in words):\n{}\n\
+                 Every prompt MUST explicitly describe this same subject (species/breed or object type, colors, markings, distinctive features) \
+                 and then vary what the goal asks (pose, scene, lighting, composition, season). Never replace the subject with something else \
+                 (e.g. if the reference is a dog, every prompt is about that dog, not a person).\n",
+                ref_notes.iter().enumerate().map(|(i, c)| format!("- [REF{}] {}", i + 1, c)).collect::<Vec<_>>().join("\n"))
+    } else {
         format!("REFERENCE IMAGES will be attached to the image model for every generation:\n{}\n\
                  Therefore write EDIT INSTRUCTIONS, not scene descriptions: each prompt must keep the main subject of the reference \
                  (same identity, breed, face, clothing, colors, materials) and change what the goal asks (scene, pose, lighting, \
@@ -665,6 +709,8 @@ pub async fn plan(root: &Path, client: &reqwest::Client, llm_st: &llm::LlmState,
                 format!("{trig}, {subj}, {v}")
             } else if ref_notes.is_empty() {
                 format!("photorealistic photograph of {subj}, {v}, sharp focus, natural colors")
+            } else if !refs_attached {
+                format!("photorealistic photograph of {}, {subj}, {v}, sharp focus, natural colors", ref_notes[0])
             } else {
                 format!("Keep the same subject from the reference image and show it {v}, {subj}, photorealistic, sharp focus")
             }).collect();
@@ -774,7 +820,7 @@ pub async fn run(
             None
         }
         (None, None) => {
-            match async { ensure_models(&root, &client, &st, s).await?; start_server(&root, &client, &st, s).await }.await {
+            match async { ensure_models(&root, &client, &st, s).await?; start_server(&root, &client, &st, s, None).await }.await {
                 Ok(b) => Some(b),
                 Err(e) => { set_last(format!("中止: 生成エンジン不可({e})")); finish(&root, &st, &album); return; }
             }
@@ -798,7 +844,10 @@ pub async fn run(
     if !vlm_on {
         set_last("目利き無し(内蔵VLM 未稼働): 近重複だけ弾いて収蔵します".into());
     }
-    let ref_notes = if s.refs { refs.notes.clone() } else { vec![] };
+    // 参照の説明は、モデルが画像参照に対応していなくても計画LLMに渡す(言葉で主語を固定する)。
+    // 対応モデルなら「参照を保って編集せよ」、非対応なら「主語を毎回明示せよ」と指示が変わる(plan の refs_attached)
+    let ref_notes = resolve_ref_notes(&root, &client, &refs.notes).await;
+    let refs_attached = s.refs && !refs.is_empty();
     // LoRA のトリガー語(棚の json)。計画 LLM に「必ず先頭に置け」と渡す
     let triggers: Vec<String> = lora.iter().flat_map(|(f, _)| {
         crate::lora::load_meta(&root, f)["triggers"].as_array().map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect::<Vec<_>>()).unwrap_or_default()
@@ -818,7 +867,7 @@ pub async fn run(
         }
         if pool.is_empty() {
             set_last("プロンプトを設計中…(内蔵LLM)".into());
-            pool = plan(&root, &client, &llm_st, &goal, &used, per_plan, &ref_notes, &triggers).await;
+            pool = plan(&root, &client, &llm_st, &goal, &used, per_plan, &ref_notes, refs_attached, &triggers).await;
             st.planned.fetch_add(pool.len(), Relaxed);
             for p in &pool {
                 ledger["prompts"].as_array_mut().unwrap().push(json!({"text": p, "ok": 0, "ng": 0, "ts": now_secs()}));
@@ -862,6 +911,19 @@ pub async fn run(
                 (Some(b), _) => generate_server(&client, b, s, &job, &ref_paths, &st.stop).await,
                 (None, Some(c)) => generate_cli(&root, c, s, &job, &ref_paths, &st.stop, &st).await,
                 (None, None) => Err("生成手段なし".into()),
+            };
+            // 同梱 sd-server が VRAM 不足(OOM)で落ちたら、省メモリ最大構成でエンジンを入れ替えて 1 回だけ再試行。
+            // 外部サーバ(別マシン)は我々が管理せずログも手元に無いので触らない。sd-cli 経路は generate_cli 内で再試行済み。
+            let r = match r {
+                Err(ref e) if e != "stopped" && external.is_none() && cli.is_none() && is_oom_from_log(&root) => {
+                    set_last("VRAM不足(OOM)検出 → 省メモリ最大構成でエンジンを入れ替えて再試行".into());
+                    stop_engine(&st);
+                    match start_server(&root, &client, &st, s, Some(MemPlan::max())).await {
+                        Ok(b2) => generate_server(&client, &b2, s, &job, &ref_paths, &st.stop).await,
+                        Err(e2) => Err(e2),
+                    }
+                }
+                other => other,
             };
             let (png, secs) = match r {
                 Ok(v) => v,

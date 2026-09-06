@@ -123,8 +123,33 @@ pub async fn ensure_models(root: &Path, client: &reqwest::Client, st: &VlmState)
 }
 
 /// 子プロセスを起動して /health が通るまで待つ。親が死んだら道連れにする(sh の見張りで PPID を監視)
+/// 同じポートで生きている llama-server が自分の子でない場合(前のアプリ実体や検証用の残り)、それを使い続けると
+/// 見張り sh に数秒後に殺されて VLM が消える。コマンド行が llama-server + 同じモデル名なら「このアプリ用」とみなして止め、作り直す
+fn reap_stale_server() -> bool {
+    let out = std::process::Command::new("/usr/sbin/lsof").args(["-nP", "-ti", &format!("tcp:{}", port()), "-sTCP:LISTEN"]).output().ok();
+    let Some(out) = out else { return false };
+    let mut killed = false;
+    for pid in String::from_utf8_lossy(&out.stdout).split_whitespace().filter_map(|p| p.parse::<i32>().ok()) {
+        let cmd = std::process::Command::new("/bin/ps").args(["-o", "command=", "-p", &pid.to_string()]).output().ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+        if cmd.contains("llama-server") && cmd.contains(MODEL_FILE) {
+            let _ = std::process::Command::new("/bin/kill").arg(pid.to_string()).status();
+            println!("👁 前の内蔵VLM(pid {pid})を止めて作り直します");
+            killed = true;
+        }
+    }
+    killed
+}
+
 pub async fn start(root: &Path, client: &reqwest::Client, st: &VlmState) -> Result<String, String> {
-    if health(client).await { return Ok(base_url()); }
+    if health(client).await {
+        let own = st.child.lock().unwrap().as_mut().map(|c| c.try_wait().ok().flatten().is_none()).unwrap_or(false);
+        if own || !reap_stale_server() { return Ok(base_url()); }
+        for _ in 0..40 { // 止まるのを待ってから同じポートで起動
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            if !health(client).await { break; }
+        }
+    }
     let bin = server_bin(root).ok_or_else(|| "llama-server が見つかりません(Mac: brew install llama.cpp か、.app 同梱の Resources/llama、または FG_LLAMA_SERVER=パス)".to_string())?;
     if !models_present(root) { return Err("内蔵VLMのモデル未取得(AI配役の「取得」で 3.3GB をDL)".into()); }
     if st.starting.swap(true, Relaxed) { return Err("内蔵VLM起動中です".into()); }
@@ -160,7 +185,8 @@ pub async fn ensure(root: &Path, client: &reqwest::Client, st: &VlmState) -> Res
     if let Some(b) = crate::config::env_or("FG_VLM_BASE", "vlm.base") {
         return Ok(b.trim_end_matches('/').to_string());
     }
-    if health(client).await { return Ok(base_url()); }
+    let own = st.child.lock().unwrap().as_mut().map(|c| c.try_wait().ok().flatten().is_none()).unwrap_or(false);
+    if own && health(client).await { return Ok(base_url()); }
     server_bin(root).ok_or_else(|| "llama-server 無し".to_string())?;
     ensure_models(root, client, st).await?;
     start(root, client, st).await

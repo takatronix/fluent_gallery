@@ -2714,32 +2714,9 @@ struct GenIn {
 fn d_gen_n() -> usize { 30 }
 fn d_gen_min() -> u64 { 180 }
 
-fn start_gen(app: &'static App, album: &str, n: usize, minutes: u64) -> Result<String, (StatusCode, String)> {
-    if app.gen.alive.load(Relaxed) {
-        return Err((StatusCode::CONFLICT, "生成は既に実行中です(同時に1本)".into()));
-    }
-    let slug = album_slug(album);
-    let rec = load_albums(&app.root).into_iter().find(|a| a["name"] == json!(slug.clone()));
-    let Some(rec) = rec else {
-        return Err((StatusCode::NOT_FOUND, format!("フォルダ{slug}が見つかりません")));
-    };
-    let goal = rec["goal"].as_str().unwrap_or("").to_string();
-    if goal.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "作りたい物(目標)が空です".into()));
-    }
-    let recipe = &rec["recipe"];
-    let size_s = recipe["size"].as_str().map(String::from).or_else(|| config::get_str("gen.size")).unwrap_or_else(|| "1024x1024".into());
-    let (w, h) = size_s.split_once('x')
-        .and_then(|(a, b)| Some((a.trim().parse::<u32>().ok()?, b.trim().parse::<u32>().ok()?)))
-        .unwrap_or((1024, 1024));
-    let snap = |v: u32| (v.clamp(512, 1536) / 64) * 64; // 潜在空間の都合で 64 の倍数
-    let min_quality = rec["agent"]["min_quality"].as_i64().unwrap_or(5).clamp(1, 10);
-    let model = recipe["model"].as_str().filter(|m| gen::MODELS.iter().any(|s| s.id == *m)).map(String::from).unwrap_or_else(gen::default_model_id);
-    // ステップ数の正解はモデルごとに違う。フォルダの指定 → モデルごとの設定 → 出荷時の既定 の順
-    // (共通の1個で全モデルを上書きすると、蒸留モデル向けの少ない値で非蒸留モデルが崩れる)
-    let steps = recipe["steps"].as_u64().filter(|v| *v > 0)
-        .unwrap_or_else(|| config::get_u64(&format!("gen.model_steps.{model}"), 0)).clamp(0, 50) as u32; // 0=モデルの既定
-    // 参照(G2): recipe.refs = [{kind:"image", sha} | {kind:"folder", album, k} | {kind:"dataset", name, k}]
+/// 参照(G2): recipe.refs = [{kind:"image", sha} | {kind:"folder", album, k} | {kind:"dataset", name, k}] を RefPool に。
+/// 固定参照でキャプション未取得の物は "__REF__<sha>" の印にして、gen::resolve_ref_notes が内蔵VLMで説明を付ける
+fn build_ref_pool(app: &'static App, recipe: &Value) -> gen::RefPool {
     let mut refs = gen::RefPool::default();
     if let Some(arr) = recipe["refs"].as_array() {
         let albums = load_albums(&app.root);
@@ -2750,7 +2727,7 @@ fn start_gen(app: &'static App, album: &str, n: usize, minutes: u64) -> Result<S
                     if let Some(sha) = r["sha"].as_str() {
                         refs.fixed.push(sha.to_string());
                         let c = gen::ref_caption(&app.root, sha);
-                        refs.notes.push(if c.is_empty() { "a reference image (keep its subject)".into() } else { c });
+                        refs.notes.push(if c.is_empty() { format!("__REF__{sha}") } else { c });
                     }
                     continue;
                 }
@@ -2783,6 +2760,35 @@ fn start_gen(app: &'static App, album: &str, n: usize, minutes: u64) -> Result<S
         }
         refs.fixed.truncate(4);
     }
+    refs
+}
+
+fn start_gen(app: &'static App, album: &str, n: usize, minutes: u64) -> Result<String, (StatusCode, String)> {
+    if app.gen.alive.load(Relaxed) {
+        return Err((StatusCode::CONFLICT, "生成は既に実行中です(同時に1本)".into()));
+    }
+    let slug = album_slug(album);
+    let rec = load_albums(&app.root).into_iter().find(|a| a["name"] == json!(slug.clone()));
+    let Some(rec) = rec else {
+        return Err((StatusCode::NOT_FOUND, format!("フォルダ{slug}が見つかりません")));
+    };
+    let goal = rec["goal"].as_str().unwrap_or("").to_string();
+    if goal.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "作りたい物(目標)が空です".into()));
+    }
+    let recipe = &rec["recipe"];
+    let size_s = recipe["size"].as_str().map(String::from).or_else(|| config::get_str("gen.size")).unwrap_or_else(|| "1024x1024".into());
+    let (w, h) = size_s.split_once('x')
+        .and_then(|(a, b)| Some((a.trim().parse::<u32>().ok()?, b.trim().parse::<u32>().ok()?)))
+        .unwrap_or((1024, 1024));
+    let snap = |v: u32| (v.clamp(512, 1536) / 64) * 64; // 潜在空間の都合で 64 の倍数
+    let min_quality = rec["agent"]["min_quality"].as_i64().unwrap_or(5).clamp(1, 10);
+    let model = recipe["model"].as_str().filter(|m| gen::MODELS.iter().any(|s| s.id == *m)).map(String::from).unwrap_or_else(gen::default_model_id);
+    // ステップ数の正解はモデルごとに違う。フォルダの指定 → モデルごとの設定 → 出荷時の既定 の順
+    // (共通の1個で全モデルを上書きすると、蒸留モデル向けの少ない値で非蒸留モデルが崩れる)
+    let steps = recipe["steps"].as_u64().filter(|v| *v > 0)
+        .unwrap_or_else(|| config::get_u64(&format!("gen.model_steps.{model}"), 0)).clamp(0, 50) as u32; // 0=モデルの既定
+    let refs = build_ref_pool(app, &recipe);
     // LoRA(G4): recipe.lora = [{file(stem), scale}]。棚に実在し、親モデルが選んだモデルに合う物だけ(klein 用を Qwen に着せない)
     let mut dropped_lora: Vec<String> = vec![];
     let lora_list: Vec<(String, f32)> = recipe["lora"].as_array().map(|a| a.iter().filter_map(|x| {
@@ -2836,7 +2842,7 @@ async fn api_gen_pull(State(app): S, body: Option<Json<GenPullIn>>) -> Json<Valu
         if let Err(e) = gen::ensure_models(&app.root, &app.http, &app.gen, s).await {
             println!("🪄 生成モデル取得失敗({}): {e}", s.id);
         } else if gen::cli_bin(&app.root).is_none() && gen::external_base().is_none() {
-            if let Err(e) = gen::start_server(&app.root, &app.http, &app.gen, s).await { println!("🪄 生成エンジン起動失敗: {e}"); }
+            if let Err(e) = gen::start_server(&app.root, &app.http, &app.gen, s, None).await { println!("🪄 生成エンジン起動失敗: {e}"); }
         }
     });
     Json(json!({"ok": true, "model": id, "note": "進捗は GET /api/gen/engine"}))
@@ -2872,8 +2878,21 @@ async fn api_gen_plan(State(app): S, Json(g): Json<GenPlanIn>) -> impl IntoRespo
     if goal.trim().is_empty() {
         return (StatusCode::BAD_REQUEST, Json(json!({"detail": "作りたい物(目標)をください"}))).into_response();
     }
-    let prompts = gen::plan(&app.root, &app.http, &app.llm, &goal, &used, g.n.clamp(1, 24), &[], &[]).await;
-    Json(json!({"goal": goal, "prompts": prompts})).into_response()
+    // 参照とモデルもフォルダから拾って、本番と同じ条件で下見する(以前は参照抜きだったので「犬の参照なのに人が出る」下見になっていた)
+    let (mut ref_notes, mut refs_attached) = (vec![], false);
+    if !g.album.is_empty() {
+        let slug = album_slug(&g.album);
+        if let Some(rec) = load_albums(&app.root).into_iter().find(|a| a["name"] == json!(slug.clone())) {
+            let recipe = rec["recipe"].clone();
+            let model = recipe["model"].as_str().filter(|m| gen::MODELS.iter().any(|s| s.id == *m)).map(String::from).unwrap_or_else(gen::default_model_id);
+            let pool = build_ref_pool(app, &recipe);
+            if !pool.is_empty() { vlm_wake(app).await; }
+            ref_notes = gen::resolve_ref_notes(&app.root, &app.http, &pool.notes).await;
+            refs_attached = gen::spec(&model).refs && !pool.is_empty();
+        }
+    }
+    let prompts = gen::plan(&app.root, &app.http, &app.llm, &goal, &used, g.n.clamp(1, 24), &ref_notes, refs_attached, &[]).await;
+    Json(json!({"goal": goal, "prompts": prompts, "refs": ref_notes, "refs_attached": refs_attached})).into_response()
 }
 
 // ---------- LoRA 棚(G4, docs/gen-design.md §5) ----------
@@ -3573,7 +3592,7 @@ async fn api_enrich(State(app): S, Json(e): Json<EnrichIn>) -> impl IntoResponse
             match enrich::describe(&client, &path, &backend).await {
                 Ok(v) => {
                     m["vlm"] = json!({
-                        "model": if backend == "builtin" { format!("builtin/{}", enrich::BUILTIN_MODEL) } else { backend.clone() },
+                        "model": if backend == "builtin" { enrich::builtin_label() } else { backend.clone() },
                         "ts": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64(),
                         "caption": v["caption"], "tags": v["tags"], "attrs": v["attrs"],
                     });
@@ -3623,7 +3642,7 @@ async fn api_enrich_one(State(app): S, Json(e): Json<EnrichOneIn>) -> impl IntoR
     match enrich::describe(&app.http, &path, &backend).await {
         Ok(v) => {
             m["vlm"] = json!({
-                "model": if backend == "builtin" { format!("builtin/{}", enrich::BUILTIN_MODEL) } else { backend },
+                "model": if backend == "builtin" { enrich::builtin_label() } else { backend },
                 "ts": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64(),
                 "caption": v["caption"], "tags": v["tags"], "attrs": v["attrs"],
             });
@@ -4094,6 +4113,10 @@ async fn main() {
                 continue;
             }
             if app.crawl.alive.load(Relaxed) || app.enrich.alive.load(Relaxed) {
+                continue;
+            }
+            if app.gen.alive.load(Relaxed) { // 生成中は内蔵VLMを譲る(api_enrich が 409 を返すので、開始ログも出さない)
+                app.set_worker("groom", false, "生成中は待機".into());
                 continue;
             }
             let missing: i64 = {
