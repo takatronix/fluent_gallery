@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Hardened Runtime 用。サンドボックスは使わない(ユーザーのフォルダを直接読み書きし、子プロセス(llama-server/sd-cli)を起動するため) -->
+  <!-- 同梱 dylib は全部同じ Developer ID で署名するのでライブラリ検証の緩和は不要。将来 JIT やサードパーティ dylib を足す時にここへ -->
+  <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+  <false/>
+</dict>
+</plist>

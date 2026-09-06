@@ -5,9 +5,11 @@
 #   bash mac/build_mac.sh --store              # ストア提出版(顔IDなし・YouTube/X拒否・COCOはCC BY系のみ)。既定はフル機能
 #   bash mac/build_mac.sh --no-test            # 回帰テストを飛ばす
 #   bash mac/build_mac.sh --plain              # Tauri殻なし(素のバイナリ+ブラウザ起動の仮.app)
-#   SIGN="Developer ID Application: Your Name (TEAMID)" bash mac/build_mac.sh   # 署名(Tauri/plain共通)
-#   notarize: Tauri殻は APPLE_ID/APPLE_PASSWORD/APPLE_TEAM_ID(または APPLE_API_KEY系)を環境変数で渡すと自動。
-#             --plain は NOTARY_PROFILE=fg(notarytool store-credentials で事前登録)
+#   SIGN="Developer ID Application: Your Name (TEAMID)" NOTARY_PROFILE=fg bash mac/build_mac.sh
+#       署名(束の中の llama/sd の dylib と実行ファイルも全部)→ dmg → 公証 → staple。Tauri/plain 共通。
+#       事前: developer.apple.com で Developer ID Application 証明書を作ってキーチェーンへ、
+#             xcrun notarytool store-credentials fg --apple-id <Apple ID> --team-id <TEAMID> --password <App用パスワード>
+#   SIGN=-  は構造確認(ad-hoc、公証なし)
 #   BUNDLE_ID=com.example.fluentgallery        # 既定 com.takatronix.fluentgallery
 set -euo pipefail
 cd "$(dirname "$0")/.."; ROOT=$PWD
@@ -27,6 +29,36 @@ SD_ZIP="${SD_ZIP:-sd-master-${SD_BUILD##*-}-bin-Darwin-macOS-26.5.2-arm64.zip}" 
 APP=dist/FluentGallery.app
 DMG=dist/FluentGallery-$VERSION.dmg
 step() { printf '\n\033[1;36m== %s\033[0m\n' "$*"; }
+
+# 束の中の実行ファイル/dylib を全部同じ Developer ID で署名してから .app を封印する(順番が逆だと封印が壊れる)。
+# Resources/llama, Resources/sd の Mach-O は Tauri の bundler が触らないので自前で回す。
+# SIGN="-" は構造確認用(ad-hoc: タイムスタンプ無し。配布は不可)
+sign_bundle() {
+  local app="$1" id="$2" ts=(--timestamp) rt=(--options runtime)
+  [ "$id" = "-" ] && ts=()
+  local ent="$ROOT/mac/entitlements.plist"
+  while IFS= read -r f; do
+    file -b "$f" | grep -q 'Mach-O' || continue
+    codesign --force "${rt[@]}" "${ts[@]}" --sign "$id" "$f" || return 1
+  done < <(find "$app/Contents/Resources" "$app/Contents/Frameworks" -type f 2>/dev/null \( -name '*.dylib' -o -perm -u+x \) | sort)
+  codesign --force "${rt[@]}" "${ts[@]}" --sign "$id" "$app/Contents/MacOS/fluent_gallery" || return 1
+  codesign --force "${rt[@]}" "${ts[@]}" --entitlements "$ent" --sign "$id" "$app" || return 1
+  codesign --verify --deep --strict "$app" && echo "署名OK: $(codesign -dv "$app" 2>&1 | grep -o 'Authority=[^,]*' | head -1)"
+}
+# dmg は自前(Tauri の bundle_dmg.sh は Finder を AppleScript で操作するので無人実行だと失敗し、rw.dmg をマウントしたまま残す)
+make_dmg() {
+  local app="$1" dmg="$2" stage; stage=$(mktemp -d)
+  cp -R "$app" "$stage/"; ln -s /Applications "$stage/Applications"
+  [ -f "$ROOT/mac/README-install.txt" ] && cp "$ROOT/mac/README-install.txt" "$stage/はじめに読んでください.txt"
+  rm -f "$dmg"; hdiutil create -quiet -volname "Fluent Gallery" -srcfolder "$stage" -ov -format UDZO "$dmg"; rm -rf "$stage"
+}
+# 公証: dmg を提出 → app と dmg にチケットを貼る
+notarize_dmg() {
+  local app="$1" dmg="$2" id="$3" profile="$4"
+  codesign --force --timestamp --sign "$id" "$dmg"
+  xcrun notarytool submit "$dmg" --keychain-profile "$profile" --wait || return 1
+  xcrun stapler staple "$app" && xcrun stapler staple "$dmg" && spctl -a -vv -t exec "$app" 2>&1 | tail -n 2
+}
 
 step "依存チェック"
 [ "$(uname -m)" = arm64 ] || { echo "Apple Silicon 専用です"; exit 1; }
@@ -80,12 +112,26 @@ if [ "$PLAIN" = 0 ]; then
     rm -rf "$TMPS"; chmod +x "$SD"/sd-*
   fi
   ls "$SD" | wc -l | xargs echo "  sd/ files:"
-  if [ -n "${SIGN:-}" ]; then export APPLE_SIGNING_IDENTITY="$SIGN"; else unset APPLE_SIGNING_IDENTITY; fi  # 未指定=未署名
-  (cd mac/tauri && npx tauri build --ci 2>&1 | grep -vE '^\s+(Compiling|Finished)')
+  # 署名は Tauri に任せず後で束ごと自前で行う(Resources の llama/sd の Mach-O を Tauri は署名しないため)。
+  # dmg も Tauri の物は使わない(--bundles app だけ作らせる)
+  unset APPLE_SIGNING_IDENTITY
+  (cd mac/tauri && npx tauri build --ci --bundles app 2>&1 | grep -vE '^\s+(Compiling|Finished)')
   BUNDLE=mac/tauri/src-tauri/target/release/bundle
   rm -rf "$APP" "$DMG"; mkdir -p dist
   cp -R "$BUNDLE/macos/Fluent Gallery.app" "$APP"
-  cp "$BUNDLE"/dmg/*.dmg "$DMG"
+  if [ -n "${SIGN:-}" ]; then
+    step "署名 ($SIGN)"
+    sign_bundle "$APP" "$SIGN" || { echo "署名失敗"; exit 1; }
+  else
+    # 未署名のままだと本体だけ linker の ad-hoc 署名で Resources を封印せず「壊れているため開けません」になる → 束ごと ad-hoc で整合
+    codesign --force --deep --sign - "$APP" && codesign --verify --deep --strict "$APP" && echo "ad-hoc 署名OK(整合のみ。配布には SIGN= で Developer ID 署名)"
+  fi
+  step "DMG $DMG"; make_dmg "$APP" "$DMG"
+  if [ -n "${SIGN:-}" ] && [ "$SIGN" != "-" ] && [ -n "${NOTARY_PROFILE:-}" ]; then
+    step "notarize ($NOTARY_PROFILE)"; notarize_dmg "$APP" "$DMG" "$SIGN" "$NOTARY_PROFILE" || { echo "公証失敗(xcrun notarytool log <id> --keychain-profile $NOTARY_PROFILE で理由を見る)"; exit 1; }
+  elif [ -n "${SIGN:-}" ]; then
+    echo "(NOTARY_PROFILE 未指定: 公証なし。xcrun notarytool store-credentials fg --apple-id … --team-id … --password <app用パスワード> で登録して NOTARY_PROFILE=fg)"
+  fi
   step "完了"
   ls -lh "$APP/Contents/MacOS/"* "$DMG" | awk '{print $5, $9}'
   echo "起動: open \"$APP\"   (データ: ~/Library/Application Support/FluentGallery/)"
@@ -105,9 +151,7 @@ echo "同梱: $(du -sh "$APP" | cut -f1)"
 
 if [ -n "${SIGN:-}" ]; then
   step "署名 ($SIGN)"
-  codesign --force --options runtime --timestamp --sign "$SIGN" "$APP/Contents/MacOS/fluent_gallery"
-  codesign --force --options runtime --timestamp --sign "$SIGN" "$APP"
-  codesign --verify --deep --strict "$APP" && echo "署名OK"
+  sign_bundle "$APP" "$SIGN" || { echo "署名失敗"; exit 1; }
 else
   # 未署名のままだと本体だけ linker の ad-hoc 署名で Resources を封印していない=署名が「壊れている」扱いになり、
   # ダウンロードした人に「壊れているため開けません。ゴミ箱に入れる必要があります」が出る(2026-09-06 実害)。
@@ -117,15 +161,10 @@ else
   echo "(SIGN 未指定: Developer ID 署名なし。配布するには Developer ID Application で署名+notarize が必要)"
 fi
 
-step "DMG $DMG"
-rm -f "$DMG"; STAGE=$(mktemp -d); cp -R "$APP" "$STAGE/"; ln -s /Applications "$STAGE/Applications"
-hdiutil create -quiet -volname "Fluent Gallery" -srcfolder "$STAGE" -ov -format UDZO "$DMG"; rm -rf "$STAGE"
+step "DMG $DMG"; make_dmg "$APP" "$DMG"
 
-if [ -n "${SIGN:-}" ] && [ -n "${NOTARY_PROFILE:-}" ]; then
-  step "notarize ($NOTARY_PROFILE)"
-  codesign --force --timestamp --sign "$SIGN" "$DMG"
-  xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" --wait
-  xcrun stapler staple "$DMG"; xcrun stapler staple "$APP"
+if [ -n "${SIGN:-}" ] && [ "$SIGN" != "-" ] && [ -n "${NOTARY_PROFILE:-}" ]; then
+  step "notarize ($NOTARY_PROFILE)"; notarize_dmg "$APP" "$DMG" "$SIGN" "$NOTARY_PROFILE" || { echo "公証失敗"; exit 1; }
 fi
 
 step "完了"
