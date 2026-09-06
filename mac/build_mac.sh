@@ -10,6 +10,7 @@
 #       事前: developer.apple.com で Developer ID Application 証明書を作ってキーチェーンへ、
 #             xcrun notarytool store-credentials fluent --apple-id <Apple ID> --team-id <TEAMID> --password <App用パスワード>
 #   SIGN=-  は構造確認(ad-hoc、公証なし)
+#   リリース一式(取り込み→版番号→この署名ビルド→検証→GitHub Release)は mac/release.sh
 #   BUNDLE_ID=com.example.fluentgallery        # 既定 com.takatronix.fluentgallery
 set -euo pipefail
 cd "$(dirname "$0")/.."; ROOT=$PWD
@@ -99,6 +100,7 @@ if [ "$PLAIN" = 0 ]; then
   step "Tauri アプリ殻 (mac/tauri)"
   command -v node >/dev/null || { echo "node が無い(Tauri CLI用)。brew install node か --plain"; exit 1; }
   [ -d mac/tauri/node_modules ] || (cd mac/tauri && npm install --silent)
+  mkdir -p mac/tauri/src-tauri/binaries  # 新しい checkout/worktree には無い(gitignore)
   cp "$BIN" mac/tauri/src-tauri/binaries/fluent_gallery-aarch64-apple-darwin
   step "内蔵VLM用 llama-server(公式リリース $LLAMA_BUILD, macOS arm64, MIT)を同梱"
   LL=mac/tauri/src-tauri/llama
