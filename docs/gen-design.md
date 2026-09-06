@@ -291,10 +291,10 @@ pub trait Provider { fn caps(&self) -> Caps /* refs, lora, models */; async fn g
 
 | | Mac(.app) | Linux(rtx4090) |
 |---|---|---|
-| バイナリ | `mac/build_mac.sh` が sd.cpp 公式リリース(macOS arm64 zip、約 50MB)を `Resources/sd/sd-server` に同梱(llama と同じ手順) | `deploy.sh` で `cmake -DSD_CUDA=ON` ビルド → `engine/bin/sd-server`(公式 Linux CUDA バイナリは無い。Vulkan バイナリは保険) |
+| バイナリ | `mac/build_mac.sh` が sd.cpp 公式リリース(macOS arm64 zip、約 50MB)を `Resources/sd/` に同梱(llama と同じ手順) | `deploy.sh` が `tools/build_sdcpp.sh` を呼び、無ければ `~/stable-diffusion.cpp` を同じコミット(6b3edaa)で `-DSD_CUDA=ON` ビルド → `engine/bin/`(✅ 2026-09-05。公式 Linux CUDA バイナリは無い。`SD_BACKEND=VULKAN` で代替可) |
 | 探索順 | `FG_SD_SERVER` → `engine/bin/` → 実行ファイルの隣 → `../Resources/sd/` → `/opt/homebrew/bin` → PATH(vlm.rs `server_bin` と同じ) | 同左 |
 | モデル | `engine/models/` に初回 DL(vlm.rs `download` 流用、サイズ一致で完了判定、`.part` 再開)。AI 配役の「取得」ボタン、進捗は `/api/gen/status` | 同左(共有 Qwen3-4B は二重 DL しない) |
-| メモリ | klein Q8_0 ≒ 7GB 常駐(統合メモリ)。VLM 3.3GB+LLM 2.5GB と同居可 | 24GB: klein Q8_0+TE Q4 で余裕。Qwen-Image-Edit は Q4 必須。ollama 9.8GB と同居中なので VRAM 譲り合いは `--offload-to-cpu` を予備に |
+| メモリ | klein Q8_0 ≒ 7GB 常駐(統合メモリ)。VLM 3.3GB+LLM 2.5GB と同居可 | 24GB: klein Q8_0+TE Q4 で余裕。Qwen-Image-Edit は Q4 必須。ollama 9.8GB と同居中なので、Linux では 12GB 超のモデルに `--offload-to-cpu` を自動付与(設定 gen.offload = auto/on/off、✅ 2026-09-05) |
 
 ## 7. 精製(refine) — 最終目的への骨格
 

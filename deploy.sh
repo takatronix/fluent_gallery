@@ -4,6 +4,8 @@
 set -e
 cd "$(dirname "$0")"
 bash build.sh
+# 生成エンジン(sd.cpp CUDA)。engine/bin/ に無ければビルドして置く(失敗してもデプロイは続ける=生成だけ不可)
+bash tools/build_sdcpp.sh || echo "sd.cpp のビルドに失敗(生成フォルダは動かない)"
 OLD=$(pgrep -x fluent_gallery || true)
 if [ -n "$OLD" ]; then kill $OLD; sleep 3; fi
 setsid nohup ./target/release/fluent_gallery > /tmp/fluent_gallery.log 2>&1 &

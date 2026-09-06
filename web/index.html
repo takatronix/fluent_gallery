@@ -1637,6 +1637,7 @@ async function renderSettings() {
       ${(G.models || []).map(m => row(`ステップ数 — ${esc(m.label.replace(/[(（].*$/, '').trim())}`, num(`gen.model_steps.${m.id}`, 1, 50),
         m.id === G.default ? '少なすぎるとノイズが残った絵になる。モデルごとに適正値が違う' : '')).join('')}
       ${row('途中経過を見る', sw('gen.preview'), 'ローカル生成(sd-cli)で各ステップの途中画像を出す。1枚あたり数秒遅くなる')}
+      ${row('VRAM 節約(offload)', `<select data-path="gen.offload" onchange="setSetting(this)">${[['auto', '自動(Linux で 12GB 超のモデルだけ)'], ['on', '常に'], ['off', '使わない']].map(([v, l]) => `<option value="${v}" ${(C.gen?.offload || 'auto') === v ? 'selected' : ''}>${l}</option>`).join('')}</select>`, '重みを RAM に置いて必要な層だけ GPU へ(sd.cpp --offload-to-cpu)。Mac の統合メモリでは不要')}
     </div>
 
     <div class="setsec" data-tab="run"><h3>保存先と容量</h3>
