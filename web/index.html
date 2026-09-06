@@ -1013,17 +1013,29 @@ function nameHint() {
 }
 
 function renderSide() {
-  if (renaming) return; // 名前を書いている最中に描き替えると入力が消える
-  if (dragNav_) return; // ドラッグ中の描き替えは掴んでいる行ごとDOMを壊す(2秒ポーリング対策)
-  $('nav_lib').innerHTML = LIB.map(l =>
+  // 名前入力中/ドラッグ中は描き替えない(入力や掴んでいる行ごとDOMが消える)。
+  // ただし当の入力/行が別の理由でもう存在しない時はフラグだけの迷子なので自己復帰する
+  // (迷子のまま返し続けると、以後サイドバーが一切描き替わらず「開閉できない」に見える 2026-09-06報告の真因)
+  if (renaming) {
+    if (document.querySelector('input.rn')) return;
+    renaming = null;
+  }
+  if (dragNav_) {
+    if (document.querySelector('.nav.dragging')) return;
+    dragNav_ = null;
+  }
+  // 内容が同じなら innerHTML を触らない = クリックの mousedown〜mouseup の間にDOMを壊さない
+  // (収集中は2秒ごとに再描画が走り、押した行が作り直されてクリックが無かったことになる)
+  const setHtml = (el, h) => { if (el._h !== h) { el._h = h; el.innerHTML = h; } };
+  setHtml($('nav_lib'), LIB.map(l =>
     `<div class="nav" data-loc="lib:${l.key}" onclick="go({type:'lib', key:'${l.key}', criteria:${esc(JSON.stringify(l.criteria))}})">
       ${ic(l.icon)}<span class="nm">${l.label}</span><span class="n" id="n_${l.key}"></span></div>`).join('') +
     `<div class="nav" data-loc="trash:" onclick="go({type:'trash', key:'', criteria:{}})">
-      ${ic('trash')}<span class="nm">ゴミ箱</span><span class="n" id="n_trash"></span></div>`;
+      ${ic('trash')}<span class="nm">ゴミ箱</span><span class="n" id="n_trash"></span></div>`);
   const foldersOpen = !folded.has('/folders');
   $('fold_folders_ic').innerHTML = ic(foldersOpen ? 'chevD' : 'chevR', 11);
   $('nav_folders').style.display = foldersOpen ? '' : 'none';
-  $('nav_folders').innerHTML = treeHtml(buildTree(albumsCache, groupsCache), (a, d) =>
+  let foldersHtml = treeHtml(buildTree(albumsCache, groupsCache), (a, d) =>
     `<div class="nav${a.running ? ' running' : ''}" data-loc="folder:${esc(a.name)}" data-album="${esc(a.name)}" style="padding-left:${10 + d * 13}px"
        title="${a.kind === 'gen' ? '生成: ' : a.goal ? '収集: ' : ''}${esc(a.goal || 'スマートフォルダ(条件)')}${a.running ? '\n● ' + (a.running_kind === 'gen' ? '生成中' : '収集中') : ''}\n掴んでグループへ=移動 / 他のフォルダの中央へ=合流 / 行の上下の縁=並び替え"
        data-dsrc="${esc(a.criteria?.source || (a.goal ? 'crawl:' + a.name : ''))}"
@@ -1055,13 +1067,14 @@ function renderSide() {
   // 💰フォルダ合計(各フォルダの累計使用額の総和)を一覧の下に常時表示
   const spentSum = albumsCache.reduce((t, a) => t + (a.agent?.spent_usd || 0), 0);
   if (spentSum > 0) {
-    $('nav_folders').innerHTML += `<div class="nav" style="pointer-events:none">
+    foldersHtml += `<div class="nav" style="pointer-events:none">
       ${ic('coin', 12)}<span class="nm sub" style="cursor:pointer" onclick="cycleCostMode(event)">使用合計</span><span class="n" style="color:#e5c07b; cursor:pointer" onclick="cycleCostMode(event)">${fmtCost(albumsCache.reduce((t, a) => t + (a.agent?.spent_tok || 0), 0), spentSum)}</span></div>`;
   }
+  setHtml($('nav_folders'), foldersHtml);
   // 取り込み元(preset/gen/import等の自動グループ)。crawl:*はフォルダの持ち物なので出さない(二重表示の混乱防止)
   const srcs = Object.entries(facetsCache?.sources || {}).filter(([s]) => !s.startsWith('crawl:'));
   const open = !folded.has('/sources');
-  $('nav_sources_sec').innerHTML = `
+  setHtml($('nav_sources_sec'), `
     <div class="sec" style="cursor:pointer" onclick="toggleFold('/sources')">取り込み元 ${ic(open ? 'chevD' : 'chevR', 11)}
       <span class="add" title="ディレクトリ取り込み" onclick="event.stopPropagation(); openIngest()">${ic('upload', 13)}</span></div>` +
     (open ? srcs.map(([s, n]) =>
@@ -1073,7 +1086,7 @@ function renderSide() {
         ${ic(s.startsWith('crawl') ? 'globe' : s.includes('gen') ? 'spark' : 'upload', 13)}
         <span class="nm" title="${esc(s)}">${esc(s)}</span><span class="n">${n}</span>
         <span class="del" title="この取り込み元の画像を全部ゴミ箱へ(30日は戻せる)"
-          onclick="event.stopPropagation(); sourceTrash('${esc(s)}', ${n})">${ic('trash', 12)}</span></div>`).join('') : '');
+          onclick="event.stopPropagation(); sourceTrash('${esc(s)}', ${n})">${ic('trash', 12)}</span></div>`).join('') : ''));
   // 再描画で枚数が消えないよう、キャッシュから即埋める(facets取得待ちにしない)
   if (facetsCache) {
     $('n_all').textContent = (facetsCache.total ?? 0).toLocaleString();
@@ -5073,7 +5086,7 @@ async function makeDataset() {
   } catch (e) { toast('❌ ' + e.message); }
 }
 async function loadDatasets() {
-  if (renaming) return; // 名前を書いている最中に描き替えない
+  if (renaming && document.querySelector('input.rn')) return; // 名前を書いている最中に描き替えない(入力が消えた迷子フラグは無視)
   try {
     const ds = await j('/api/datasets');
     datasetsCache = ds.filter(d => !d.name.startsWith('_refs_'));
