@@ -55,12 +55,16 @@ echo "$VER" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.]+)?$' || die "�
 if git ls-remote --tags origin | grep -q "refs/tags/v$VER$"; then die "タグ v$VER は既に origin にある(--version で新しい番号を)"; fi
 if [ -n "$NEWVER" ] && [ "$NEWVER" != "$CUR" ]; then
   step "版番号 $CUR → $NEWVER"
-  sed -i '' "0,/^version = \"$CUR\"/s//version = \"$NEWVER\"/" Cargo.toml
-  sed -i '' "0,/^version = \"$CUR\"/s//version = \"$NEWVER\"/" mac/tauri/src-tauri/Cargo.toml
-  python3 - "$NEWVER" <<'EOF'
-import json,sys,re
-p='mac/tauri/src-tauri/tauri.conf.json'; t=open(p,encoding='utf-8').read()
-t=re.sub(r'"version":\s*"[^"]+"', '"version": "%s"' % sys.argv[1], t, count=1); open(p,'w',encoding='utf-8').write(t)
+  # BSD sed に 0,/re/ は無いので python で(最初の 1 か所だけ)
+  python3 - "$CUR" "$NEWVER" <<'EOF'
+import sys,re
+cur,new=sys.argv[1],sys.argv[2]
+for p,pat,rep in [('Cargo.toml', r'^version = "%s"' % re.escape(cur), 'version = "%s"' % new),
+                  ('mac/tauri/src-tauri/Cargo.toml', r'^version = "%s"' % re.escape(cur), 'version = "%s"' % new),
+                  ('mac/tauri/src-tauri/tauri.conf.json', r'"version":\s*"%s"' % re.escape(cur), '"version": "%s"' % new)]:
+    t=open(p,encoding='utf-8').read(); t2=re.sub(pat, rep, t, count=1, flags=re.M)
+    if t2==t: sys.exit("%s に version %s が見つからない" % (p, cur))
+    open(p,'w',encoding='utf-8').write(t2)
 EOF
   grep -m1 '^version' Cargo.toml; grep -m1 '"version"' mac/tauri/src-tauri/tauri.conf.json
 fi
@@ -84,7 +88,7 @@ step "配布物の検証(ダウンロード直後の状態を模す)"
 xcrun stapler validate "$APP" >/dev/null || die "app にチケットが無い"
 xcrun stapler validate "$DMG" >/dev/null || die "dmg にチケットが無い"
 T=$(mktemp -d); cp "$DMG" "$T/dl.dmg"; xattr -w com.apple.quarantine "0083;$(printf '%x' "$(date +%s)");Chrome;" "$T/dl.dmg"
-spctl -a -t open --context context:primary-signature "$T/dl.dmg" 2>&1 | grep -q accepted || die "quarantine 付き dmg が Gatekeeper に弾かれる"
+spctl -a -t open --context context:primary-signature "$T/dl.dmg" >/dev/null 2>&1 || die "quarantine 付き dmg が Gatekeeper に弾かれる" # 成功時は無言(終了コードで見る)
 mkdir -p "$T/mnt"; hdiutil attach -nobrowse -readonly -mountpoint "$T/mnt" "$T/dl.dmg" -quiet
 INNER="$T/mnt/Fluent Gallery.app"
 spctl -a -vv -t exec "$INNER" 2>&1 | grep -q 'Notarized Developer ID' || { hdiutil detach "$T/mnt" -quiet; die "dmg の中の app が公証済みと判定されない"; }
