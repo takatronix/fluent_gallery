@@ -924,9 +924,14 @@ pub async fn run(
             if st.stop.load(Relaxed) || st.ingested.load(Relaxed) >= limits.max_n || started.elapsed().as_secs() > limits.max_secs {
                 break 'outer;
             }
-            // 閲覧中は道を譲る(GPU を取り合わない)。夜間の量産では誰も触らないので止まらない
+            // 閲覧中は道を譲る(GPU を取り合わない)。夜間の量産では誰も触らないので止まらない。
+            // ただし上限 45 秒: 一覧を触り続ける(スクロール/自動更新/監視スクリプト)と永遠に始まらず、
+            // 表示も「設計中」のままで原因が分からなかった(2026-09-06 検証で 12 分停止)
             enrich_st.user_priority(10);
-            while st.ui_recent(8) && !st.stop.load(Relaxed) {
+            let mut yielded = 0u32;
+            while st.ui_recent(8) && !st.stop.load(Relaxed) && yielded < 45 {
+                if yielded == 0 { set_last("閲覧中なので待機(GPU を譲ります。8 秒触らなければ再開、最長 45 秒)".into()); }
+                yielded += 1;
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
             // 参照の束ね: 固定 + 各フォルダ/データセットから k 枚抽選(モデルが参照非対応なら空)
