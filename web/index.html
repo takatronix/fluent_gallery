@@ -1826,10 +1826,10 @@ function loraCard(it, st) {
   const fits = genFolders.filter(a => !it.model || (a.recipe?.model || loraModels.find(m => m.present)?.id || 'flux2-klein-4b') === it.model);
   const already = a => (a.recipe?.lora || []).some(x => x.file === it.file);
   return `<div class="lcard" data-file="${esc(it.file)}">
-    <div class="art">${art ? `<img src="${art}?t=${it.imported || 0}" onerror="this.remove()" onmouseenter="hoverPv(this, '${esc(it.name || it.file)} の試し描き', true)" onmouseleave="hoverPvHide()" style="cursor:zoom-in">` : ic('wand', 40)}
+    <div class="art">${art ? `<img src="${art}?t=${it.imported || 0}" onerror="this.remove()">` : ic('wand', 40)}
       <span class="lbadge ${badge}" title="親モデル${it.base_manual ? '(手で指定)' : '(自動判定。違えば「編集」で直せます)'}">${esc(LORA_BASE_LABEL[it.base] || it.base)}${it.base_manual ? ' ✎' : ''}</span>
       ${it.nsfw ? `<span class="lbadge" style="left:auto; right:8px; background:#7f1d1dcc">NSFW</span>` : ''}
-      ${it.previews?.length > 1 ? `<span class="arts">${it.previews.slice(1).map(i => `<img src="/lora/preview/${it.file}/${i}" onmouseenter="hoverPv(this, '試し描き', true)" onmouseleave="hoverPvHide()">`).join('')}</span>` : ''}
+      ${it.previews?.length > 1 ? `<span class="arts">${it.previews.slice(1).map(i => `<img src="/lora/preview/${it.file}/${i}">`).join('')}</span>` : ''}
     </div>
     <div class="body">
       <div class="nm" title="${esc(it.file)}.safetensors${it.file_name ? '\n元のファイル名: ' + esc(it.file_name) : ''}">${esc(it.name || it.file)}</div>
@@ -1899,7 +1899,7 @@ function renderLoraFind() {
     const inShelf = !!x.in_shelf;
     const ok = !!x.model;
     return `<div class="lcard lfind">
-      <div class="art" style="aspect-ratio:4/3">${x.thumb ? `<img src="${esc(x.thumb)}" loading="lazy" onerror="this.remove()" onmouseenter="hoverPv(this, '${esc(x.name)}', true)" onmouseleave="hoverPvHide()" style="cursor:zoom-in">` : ic(x.site === 'hf' ? 'globe' : 'wand', 36)}
+      <div class="art" style="aspect-ratio:4/3">${x.thumb ? `<img src="${esc(x.thumb)}" loading="lazy" onerror="this.remove()">` : ic(x.site === 'hf' ? 'globe' : 'wand', 36)}
         <span class="lbadge ${x.base_key === 'z-image-turbo' ? 'zi' : x.base_key === 'qwen-image' ? 'qw' : ok ? '' : 'ng'}" title="配布元の親モデル表記: ${esc(x.base || '')}">${esc(x.base || LORA_BASE_LABEL[x.base_key] || '?')}</span>
         <span class="lbadge" style="left:auto; right:8px; background:#000a">${x.site === 'hf' ? 'Hugging Face' : 'Civitai'}</span>
       </div>
@@ -5523,10 +5523,17 @@ function hoverPv(el, why, big) {
   const im = $('hoverpv_img');
   im.style.maxWidth = size + 'px'; im.style.maxHeight = size + 'px';
   // 途中経過(--preview proj)は潜在空間の投影で元が 128px 程度しかない → 自然寸法のままだと「大きく出ない」。
-  // big の時は箱の幅に引き伸ばす(縦横比は画像側で維持)
-  if (big) { im.style.width = size + 'px'; im.style.height = 'auto'; im.style.imageRendering = 'auto'; }
-  else { im.style.width = ''; im.style.height = ''; }
+  // big の時は箱に収まる最大まで、縦横比を保って引き伸ばす(幅だけ固定すると max-height で潰れて比率が狂った)
+  im.style.width = ''; im.style.height = '';
+  const fit = () => {
+    if (!big || !im.naturalWidth) return;
+    const k = Math.min(size / im.naturalWidth, size / im.naturalHeight);
+    im.style.width = Math.round(im.naturalWidth * k) + 'px';
+    im.style.height = Math.round(im.naturalHeight * k) + 'px';
+  };
+  im.onload = fit;
   im.src = el.src;
+  if (im.complete) fit();
   hoverPv._el = el; // 途中経過(ah_prev/gn_prev)はポーリングで差し替わるので、出している間は追従させる(watchGenPart)
   $('hoverpv_cap').textContent = why || '';
   pv.style.display = 'block';
