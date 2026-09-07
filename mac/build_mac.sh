@@ -125,9 +125,14 @@ if [ "$PLAIN" = 0 ]; then
   # dmg も Tauri の物は使わない(--bundles app だけ作らせる)
   unset APPLE_SIGNING_IDENTITY
   (cd mac/tauri && npx tauri build --ci --bundles app 2>&1 | grep -vE '^\s+(Compiling|Finished)')
-  BUNDLE=mac/tauri/src-tauri/target/release/bundle
+  BUNDLE=${CARGO_TARGET_DIR:-mac/tauri/src-tauri/target}/release/bundle   # Tauri も CARGO_TARGET_DIR に従う
   rm -rf "$APP" "$DMG"; mkdir -p dist
   cp -R "$BUNDLE/macos/Fluent Gallery.app" "$APP"
+  # 束の中身が「今ビルドした物」か確かめる(mac/tauri/src-tauri/target を別チェックアウトと共有していると、同時ビルドで
+  # 他人の束が混ざる実害 2026-09-07: 新しい API が 0 件の .app を配ってしまった)
+  cmp -s "$BIN" "$APP/Contents/MacOS/fluent_gallery" || { echo "❌ 束のサーバ本体が $BIN と一致しない(共有 target の混線?)"; exit 1; }
+  cmp -s web/index.html "$APP/Contents/Resources/web/index.html" || { echo "❌ 束の web/index.html が作業ツリーと一致しない"; exit 1; }
+  echo "束の中身OK(本体・web が作業ツリーと一致)"
   if [ -n "${SIGN:-}" ]; then
     step "署名 ($SIGN)"
     sign_bundle "$APP" "$SIGN" || { echo "署名失敗"; exit 1; }
