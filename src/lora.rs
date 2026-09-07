@@ -43,7 +43,7 @@ pub fn safe_stem(name: &str) -> String {
 /// 親モデルの当たり付け(Civitai の baseModel / HF のリポジトリ名 / ファイル名から)
 pub fn base_from_text(s: &str) -> &'static str {
     let t = s.to_lowercase();
-    if t.contains("klein") { return "flux2-klein-4b"; }
+    if t.contains("klein") { return if t.contains("9b") { "flux2-klein-9b" } else { "flux2-klein-4b" }; } // 9B 用は 4B に載らない
     if t.contains("z-image") || t.contains("z_image") || t.contains("zimage") || t.contains("z image") { return "z-image-turbo"; }
     if t.contains("qwen") { return "qwen-image"; }
     if t.contains("flux.2") || t.contains("flux2") || t.contains("flux-2") { return "flux2-dev"; }
@@ -71,6 +71,21 @@ pub fn save_meta(root: &Path, stem: &str, m: &Value) {
     let _ = std::fs::write(meta_path(root, stem), serde_json::to_string_pretty(m).unwrap_or_default());
 }
 
+/// 取り込み元 URL から「人が見るページ」を作る(棚カードの「配布ページを開く」)。
+/// HF の resolve 直リンク → リポジトリのページ、Civitai の API ダウンロード → model-versions ページ、それ以外はそのまま
+pub fn page_url(source: &str) -> String {
+    let u = source.trim();
+    if let Some(rest) = u.strip_prefix("https://huggingface.co/").or_else(|| u.strip_prefix("https://hf.co/")) {
+        let parts: Vec<&str> = rest.split('/').collect();
+        if parts.len() >= 2 { return format!("https://huggingface.co/{}/{}", parts[0], parts[1]); }
+    }
+    if let Some(rest) = u.strip_prefix("https://civitai.com/api/download/models/") {
+        let vid: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if !vid.is_empty() { return format!("https://civitai.com/model-versions/{vid}"); }
+    }
+    u.to_string()
+}
+
 /// 棚の一覧: 実ファイルが正本。json は付随情報。previews は試し描き/作例の枚数
 pub fn list(root: &Path, albums: &[Value]) -> Vec<Value> {
     let mut out = vec![];
@@ -86,14 +101,42 @@ pub fn list(root: &Path, albums: &[Value]) -> Vec<Value> {
         let used_by: Vec<String> = albums.iter().filter(|a| a["recipe"]["lora"].as_array().map(|l| l.iter().any(|x| x["file"].as_str() == Some(stem.as_str()))).unwrap_or(false))
             .filter_map(|a| a["name"].as_str().map(String::from)).collect();
         let base = m["base"].as_str().map(String::from).unwrap_or_else(|| base_from_text(&stem).to_string());
+        let source = m["source"].as_str().unwrap_or("").to_string();
         out.push(json!({
             "file": stem, "name": m["name"].as_str().unwrap_or(&stem), "base": base, "model": model_for_base(&base),
-            "triggers": m["triggers"].as_array().cloned().unwrap_or_default(), "source": m["source"], "license": m["license"],
-            "description": m["description"].as_str().unwrap_or("").chars().take(200).collect::<String>(),
+            "base_manual": m["base_manual"].as_bool().unwrap_or(false),
+            "triggers": m["triggers"].as_array().cloned().unwrap_or_default(), "source": source, "page": if source.is_empty() { Value::Null } else { json!(page_url(&source)) },
+            "license": m["license"], "nsfw": m["nsfw"], "file_name": m["file"], "note": m["note"].as_str().unwrap_or(""),
+            "default_scale": m["default_scale"].as_f64().unwrap_or(1.0),
+            "description": m["description"].as_str().unwrap_or("").chars().take(300).collect::<String>(),
             "size_mb": size_mb, "previews": previews, "art": art, "imported": m["imported"], "used_by": used_by,
         }));
     }
     out
+}
+
+pub const BASES: &[&str] = &["flux2-klein-4b", "flux2-klein-9b", "z-image-turbo", "qwen-image", "flux1", "flux2-dev", "sdxl", "sd15", "unknown"];
+
+/// 棚カードの編集(名前・トリガー語・親モデルの手直し・既定の強さ・メモ)。親モデルの当たり付けが外れた時の逃げ道
+pub fn update_meta(root: &Path, stem: &str, patch: &Value) -> Result<Value, String> {
+    if !file_path(root, stem).exists() { return Err("その LoRA は棚にありません".into()); }
+    let mut m = load_meta(root, stem);
+    if let Some(v) = patch["name"].as_str() { m["name"] = json!(v.trim()); }
+    if let Some(v) = patch["description"].as_str() { m["description"] = json!(v.trim()); }
+    if let Some(v) = patch["note"].as_str() { m["note"] = json!(v.trim()); }
+    if let Some(a) = patch["triggers"].as_array() {
+        m["triggers"] = json!(a.iter().filter_map(|t| t.as_str()).map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect::<Vec<_>>());
+    } else if let Some(t) = patch["triggers"].as_str() {
+        m["triggers"] = json!(t.split(|c: char| c == ',' || c == '、' || c == '\n').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect::<Vec<_>>());
+    }
+    if let Some(b) = patch["base"].as_str() {
+        if !BASES.contains(&b) { return Err(format!("親モデルの値が変: {b}")); }
+        m["base"] = json!(b);
+        m["base_manual"] = json!(true);
+    }
+    if let Some(sc) = patch["default_scale"].as_f64() { m["default_scale"] = json!(sc.clamp(0.05, 2.0)); }
+    save_meta(root, stem, &m);
+    Ok(m)
 }
 
 pub fn delete(root: &Path, stem: &str) -> bool {
@@ -229,6 +272,111 @@ async fn download(client: &reqwest::Client, url: &str, dst: &Path, st: &LoraStat
     if got < 100_000 { let _ = std::fs::remove_file(&tmp); return Err("ファイルが小さすぎます(HTML が返った可能性)".into()); }
     std::fs::rename(&tmp, dst).map_err(|e| e.to_string())?;
     Ok(got)
+}
+
+/// 既に同じ出典が棚にあれば、その stem
+pub fn find_by_source(root: &Path, url: &str) -> Option<String> {
+    let want = page_url(url);
+    let Ok(rd) = std::fs::read_dir(dir(root)) else { return None };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.extension().and_then(|x| x.to_str()) != Some("json") { continue; }
+        let stem = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        if !file_path(root, &stem).exists() { continue; }
+        let m = load_meta(root, &stem);
+        let src = m["source"].as_str().unwrap_or("");
+        if src.is_empty() { continue; }
+        if src == url || page_url(src) == want { return Some(stem); }
+    }
+    None
+}
+
+/// 内蔵モデル → Civitai の baseModels 名(2026-09-07 の API 実測)。Z-Image は Base 用も Turbo に載ることが多いので両方
+fn civitai_bases(model: &str) -> Vec<&'static str> {
+    match model {
+        "flux2-klein-4b" => vec!["Flux.2 Klein 4B", "Flux.2 Klein 4B-base"],
+        "z-image-turbo" => vec!["ZImageTurbo", "ZImageBase"],
+        "qwen-image-edit-2509" => vec!["Qwen"],
+        _ => vec!["Flux.2 Klein 4B", "Flux.2 Klein 4B-base", "ZImageTurbo", "ZImageBase", "Qwen"],
+    }
+}
+/// 内蔵モデル → HF 検索の当たり語(query が空の時)
+fn hf_hint(model: &str) -> &'static str {
+    match model { "flux2-klein-4b" => "klein", "z-image-turbo" => "z-image", "qwen-image-edit-2509" => "qwen-image", _ => "lora" }
+}
+
+/// 配布サイトを親モデルで絞って探す。Civitai(サムネ・DL 数・トリガー語あり)と Hugging Face(文字情報だけ)。
+/// 戻り: {items:[{site,id,name,version,base,base_key,model,page,import_url,thumb,downloads,likes,triggers,file_name,size_mb,nsfw,creator,description,in_shelf}], next_cursor}
+pub async fn search(root: &Path, client: &reqwest::Client, site: &str, model: &str, q: &str, sort: &str, cursor: &str, civitai_key: Option<&str>) -> Result<Value, String> {
+    let to = std::time::Duration::from_secs(25);
+    let mut items: Vec<Value> = vec![];
+    let mut next_cursor = Value::Null;
+    if site != "hf" {
+        let sort_v = match sort { "new" => "Newest", "rating" => "Highest Rated", _ => "Most Downloaded" };
+        let mut url = format!("https://civitai.com/api/v1/models?types=LORA&limit=24&nsfw=false&sort={}", urlenc(sort_v));
+        if !q.trim().is_empty() { url.push_str(&format!("&query={}", urlenc(q.trim()))); }
+        for b in civitai_bases(model) { url.push_str(&format!("&baseModels={}", urlenc(b))); }
+        if !cursor.is_empty() { url.push_str(&format!("&cursor={}", urlenc(cursor))); }
+        let mut req = client.get(&url).timeout(to);
+        if let Some(k) = civitai_key { req = req.bearer_auth(k); }
+        let v: Value = req.send().await.map_err(|e| format!("Civitai に繋がりません: {e}"))?
+            .error_for_status().map_err(|e| format!("Civitai: {e}"))?.json().await.map_err(|e| format!("Civitai 応答壊れ: {e}"))?;
+        next_cursor = v["metadata"]["nextCursor"].clone();
+        let want = civitai_bases(model);
+        for it in v["items"].as_array().cloned().unwrap_or_default() {
+            let vers = it["modelVersions"].as_array().cloned().unwrap_or_default();
+            // 要求した親モデルの版を優先(1 モデルに複数の版があり、先頭が別の親モデルのことがある)
+            let ver = vers.iter().find(|x| want.iter().any(|w| x["baseModel"].as_str() == Some(w))).or(vers.first()).cloned().unwrap_or(json!({}));
+            let base_name = ver["baseModel"].as_str().unwrap_or("").to_string();
+            let base_key = base_from_text(&format!("{base_name} {}", ver["name"].as_str().unwrap_or("")));
+            let f = ver["files"].as_array().and_then(|fs| fs.iter().find(|f| f["type"].as_str() == Some("Model") && f["name"].as_str().map(|n| n.ends_with(".safetensors")).unwrap_or(false)).or(fs.first())).cloned().unwrap_or(json!({}));
+            let thumb = ver["images"].as_array().and_then(|a| a.iter().find(|i| i["type"].as_str() != Some("video") && i["nsfwLevel"].as_u64().unwrap_or(1) <= 1))
+                .and_then(|i| i["url"].as_str()).map(|u| u.replace("/original=true/", "/width=450/")).unwrap_or_default();
+            if it["nsfw"].as_bool() == Some(true) || it["name"].as_str().unwrap_or("").to_lowercase().contains("nsfw") { continue; } // nsfw=false でも混ざる
+            let (id, vid) = (it["id"].as_u64().unwrap_or(0), ver["id"].as_u64().unwrap_or(0));
+            let page = format!("https://civitai.com/models/{id}?modelVersionId={vid}");
+            items.push(json!({
+                "site": "civitai", "id": id.to_string(), "name": it["name"], "version": ver["name"], "base": base_name, "base_key": base_key,
+                "model": model_for_base(base_key), "page": page, "import_url": page, "thumb": thumb,
+                "downloads": it["stats"]["downloadCount"], "likes": it["stats"]["thumbsUpCount"],
+                "triggers": ver["trainedWords"].as_array().cloned().unwrap_or_default(),
+                "file_name": f["name"], "size_mb": (f["sizeKB"].as_f64().unwrap_or(0.0) / 1024.0).round(),
+                "nsfw": it["nsfw"], "creator": it["creator"]["username"],
+                "description": strip_tags(it["description"].as_str().unwrap_or("")).chars().take(200).collect::<String>(),
+                "in_shelf": find_by_source(root, &page),
+            }));
+        }
+    }
+    if site != "civitai" {
+        let sort_v = match sort { "new" => "lastModified", "rating" => "likes", _ => "downloads" };
+        let query = if q.trim().is_empty() { hf_hint(model).to_string() } else { q.trim().to_string() };
+        let url = format!("https://huggingface.co/api/models?search={}&filter=lora&sort={sort_v}&direction=-1&limit=30", urlenc(&query));
+        let v: Value = client.get(&url).timeout(to).send().await.map_err(|e| format!("Hugging Face に繋がりません: {e}"))?
+            .error_for_status().map_err(|e| format!("HF: {e}"))?.json().await.map_err(|e| format!("HF 応答壊れ: {e}"))?;
+        for m in v.as_array().cloned().unwrap_or_default() {
+            let id = m["id"].as_str().unwrap_or("").to_string();
+            if id.is_empty() { continue; }
+            let tags: Vec<String> = m["tags"].as_array().map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect()).unwrap_or_default();
+            let base_key = base_from_text(&format!("{id} {}", tags.iter().filter(|t| t.starts_with("base_model:")).cloned().collect::<Vec<_>>().join(" ")));
+            let mm = model_for_base(base_key);
+            if model != "all" && mm != Some(model) { continue; }
+            let page = format!("https://huggingface.co/{id}");
+            items.push(json!({
+                "site": "hf", "id": id, "name": id.rsplit('/').next().unwrap_or(&id), "version": "", "base": base_key, "base_key": base_key, "model": mm,
+                "page": page, "import_url": page, "thumb": "", "downloads": m["downloads"], "likes": m["likes"], "triggers": [],
+                "file_name": Value::Null, "size_mb": Value::Null, "nsfw": false, "creator": id.split('/').next().unwrap_or(""),
+                "description": "", "in_shelf": find_by_source(root, &page),
+            }));
+        }
+    }
+    Ok(json!({"items": items, "next_cursor": next_cursor}))
+}
+fn urlenc(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        match b { b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char), _ => out.push_str(&format!("%{b:02X}")) }
+    }
+    out
 }
 
 /// URL から棚へ取り込む。戻り = 棚のエントリ名(stem)

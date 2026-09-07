@@ -78,7 +78,7 @@ echo "cargo $(cargo --version | cut -d' ' -f2) / cmake $(cmake --version | head 
 
 step "ビルド (--no-default-features --features $FEATURES)"
 cargo build --release --no-default-features --features "$FEATURES"
-BIN=target/release/fluent_gallery
+BIN=${CARGO_TARGET_DIR:-target}/release/fluent_gallery   # CARGO_TARGET_DIR を使う時(worktree で共有 target を避ける)もそこを見る
 file "$BIN" | grep -q arm64 || { echo "arm64 バイナリになっていない"; exit 1; }
 
 if [ "$RUN_TEST" = 1 ]; then

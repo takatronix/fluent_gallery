@@ -174,6 +174,19 @@
   /* 設定ページ(docs/gen-design.md §8.1): 節ごとのカード、行ごとに自動保存 */
   #grid.page { display:block; }  /* 設定/棚ページはサムネのグリッドではなく普通の文書として流す */
   .lgrid { display:grid; grid-template-columns:repeat(auto-fill, minmax(230px, 1fr)); gap:14px; }
+  .lcard .act2 { gap:4px; flex-wrap:wrap; } .lcard .act2 button, .lcard .act2 select { font-size:11px; padding:3px 8px; }
+  .lfindbox { border:1px dashed var(--line); border-radius:12px; padding:10px 12px; margin-bottom:12px; background:rgba(255,255,255,.02); }
+  .lcard .art { flex:none; } /* 絵の箱は伸ばさない(行の高さに引っ張られて巨大化していた) */
+  .lcard.lfind .art { aspect-ratio:4/3; }
+  .lcard.lfind .body { font-size:11px; }
+  .lfindbox .lgrid { align-items:start; }
+  /* 来歴: 参照元/派生先のサムネ(クリックで開く、ホバーで拡大) */
+  .provthumb { width:44px; height:44px; object-fit:cover; border-radius:6px; margin:3px 3px 0 0; cursor:pointer; border:1px solid var(--line); vertical-align:middle; }
+  .provthumb:hover { border-color:var(--acc); }
+  /* よく使う言語指示のタグ */
+  .phr { font-size:11px; padding:2px 8px 2px 9px; border-radius:99px; border:1px solid var(--line); color:var(--tx); cursor:pointer; background:rgba(255,255,255,.03); display:inline-flex; align-items:center; gap:2px; line-height:1.5; }
+  .phr:hover { border-color:var(--acc); } .phr.learned { border-color:rgba(124,92,255,.5); } .phr.more { color:var(--faint); }
+  .phr .x { opacity:0; margin-left:2px; padding:0 2px; font-size:11px; } .phr:hover .x { opacity:.6; } .phr .x:hover { opacity:1; color:#e06c75; }
   .lcard { background:var(--panel); border:1px solid var(--line); border-radius:12px; overflow:hidden; display:flex; flex-direction:column; }
   .lcard .art { position:relative; aspect-ratio:1; background:#0e1219; display:flex; align-items:center; justify-content:center; color:var(--faint); }
   .lcard .art img { width:100%; height:100%; object-fit:cover; display:block; }
@@ -852,8 +865,8 @@ function params(extra) {
 function syncHash() {
   const o = {t: loc.type, k: loc.key || ''};
   if (loc.type === 'search') o.q = $('q').value.trim();
-  for (const [k, v] of Object.entries(fchips)) if (v) o['f_' + k] = typeof v === 'boolean' ? '1' : v;
-  for (const [k, v] of Object.entries(chipFilters)) if (v) o['c_' + k] = v;
+  // フィルタ(実写/生成/品質8+/セーフ/権利クリーン/透かし除外/属性チップ)は URL に残さない。
+  // 残すと次に開いた時に ON のまま始まり「なぜか絞り込まれている」になる(2026-09-07 指示: 起動時は全部 OFF)
   if ($('lb').classList.contains('show') && items[lbIdx]) o.img = items[lbIdx].sha1;
   history.replaceState(null, '', '#' + new URLSearchParams(o).toString());
 }
@@ -1716,59 +1729,226 @@ function kindChips() {
     <span class="kchip gen ${newKind === 'gen' ? 'on' : ''}" onclick="setNewKind('gen')" title="内蔵の画像生成AIで作る。目標まで自動で作り続ける(自動精製)">${ic('wand', 12)} 作る</span>
     <span class="lbl" style="width:auto; color:var(--faint); font-size:11px">${newKind === 'gen' ? '内蔵の生成AIで、目標枚数まで自動で作り続けます' : 'Web から集めます。生成で増やすなら「作る」'}</span></span>`;
 }
+// ================= よく使う言語指示(タグ) =================
+// ヘッダを描くたびにタグの行を後付け(renderViewhead を包む。関数宣言は再代入できる)
+{
+  const _rv = renderViewhead;
+  renderViewhead = function () { const r = _rv.apply(this, arguments); Promise.resolve(r).then(() => mountPhrases()).catch(() => {}); return r; };
+}
+// 目標を書くのが面倒な人向け。クリックで目標に足す。フォルダの目標を保存すると断片を学習して増える(store/phrases.json)
+const phraseCache = {gen: null, crawl: null};
+let phraseMore = false;
+async function loadPhrases(kind, force) {
+  if (phraseCache[kind] && !force) return phraseCache[kind];
+  try { const r = await j('/api/phrases?kind=' + kind); phraseCache[kind] = r.items || []; } catch (e) { phraseCache[kind] = []; }
+  return phraseCache[kind];
+}
+function phraseKind() {
+  if (loc.type === 'new') return newKind === 'gen' ? 'gen' : 'crawl';
+  const a = albumsCache.find(x => x.name === loc.key);
+  return a?.kind === 'gen' ? 'gen' : 'crawl';
+}
+// ヘッダ描画のたびに、目標入力の行の下にタグの行を足す(テンプレを触らずに済むよう後付け)
+async function mountPhrases() {
+  const g = document.getElementById('ah_goal'); if (!g) return;
+  const row = g.closest('.frow'); if (!row) return;
+  const kind = phraseKind();
+  const list = await loadPhrases(kind);
+  if (document.getElementById('ah_goal') !== g) return; // 描き直された
+  let box = document.getElementById('ah_phr');
+  if (!box) { box = document.createElement('div'); box.className = 'frow'; box.id = 'ah_phr'; row.insertAdjacentElement('afterend', box); }
+  const shown = phraseMore ? list : list.slice(0, 14);
+  box.innerHTML = `<span class="lbl" title="クリックすると目標に足します。フォルダの目標を保存すると言い回しを覚えて、よく使う物ほど前に来ます">よく使う指示</span>
+    <span style="display:flex; flex-wrap:wrap; gap:4px; align-items:center; flex:1; min-width:0">
+      ${shown.map(x => `<span class="phr ${x.seed ? '' : 'learned'}" onclick="phraseUse('${kind}', this.dataset.t)" data-t="${esc(x.text)}" title="${x.seed ? '出荷時の例' : '使った回数 ' + x.count}。右の ✕ で消せます">${esc(x.text)}<span class="x" onclick="event.stopPropagation(); phraseHide('${kind}', this.parentElement.dataset.t)" title="この指示を一覧から消す">×</span></span>`).join('')}
+      ${list.length > 14 ? `<span class="phr more" onclick="phraseMore = !phraseMore; mountPhrases()">${phraseMore ? '少なく' : `もっと(${list.length - 14})`}</span>` : ''}
+    </span>`;
+}
+async function phraseUse(kind, text) {
+  const g = document.getElementById('ah_goal'); if (!g) return;
+  const cur = g.value.trim().replace(/[。、,]+$/, '');
+  if (cur.split(/[、。,]/).map(x => x.trim()).includes(text)) return toast('もう入っています');
+  g.value = cur ? cur + '、' + text : text;
+  g.dispatchEvent(new Event('input', {bubbles: true})); // 既存フォルダなら自動保存(headAutoSave)
+  g.focus();
+  try { await j('/api/phrases/use', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({kind, text})}); await loadPhrases(kind, true); } catch (e) {}
+}
+async function phraseHide(kind, text) {
+  try { await j('/api/phrases/hide', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({kind, text})}); await loadPhrases(kind, true); mountPhrases(); toast('消しました(同じ言い回しを使えば戻ります)'); } catch (e) { toast('❌ ' + e.message); }
+}
+
 // ================= LoRA 棚(G4, docs/gen-design.md §5) =================
 let loraCache = [];
 async function loadLora() {
-  try { const r = await j('/api/lora'); loraCache = r.items || []; const n = $('n_lora'); if (n) n.textContent = loraCache.length || ''; return r; }
+  try { const r = await j('/api/lora'); loraCache = r.items || []; loraModels = r.models || loraModels; const n = $('n_lora'); if (n) n.textContent = loraCache.length || ''; return r; }
   catch (e) { return {items: [], state: {}}; }
 }
-const LORA_BASE_LABEL = {'flux2-klein-4b': 'klein 4B', 'z-image-turbo': 'Z-Image', 'qwen-image': 'Qwen-Image', 'flux1': 'FLUX.1(非対応)', 'flux2-dev': 'FLUX.2 dev(非対応)', 'sdxl': 'SDXL(非対応)', 'sd15': 'SD1.5(非対応)', 'unknown': '親モデル不明'};
+let loraModels = [];
+const LORA_BASE_LABEL = {'flux2-klein-4b': 'klein 4B', 'flux2-klein-9b': 'klein 9B(非対応)', 'z-image-turbo': 'Z-Image', 'qwen-image': 'Qwen-Image', 'flux1': 'FLUX.1(非対応)', 'flux2-dev': 'FLUX.2 dev(非対応)', 'sdxl': 'SDXL(非対応)', 'sd15': 'SD1.5(非対応)', 'unknown': '親モデル不明'};
+const LORA_MODEL_LABEL = {'flux2-klein-4b': 'FLUX.2 klein 4B', 'z-image-turbo': 'Z-Image Turbo', 'qwen-image-edit-2509': 'Qwen-Image-Edit 2509'};
+// 棚の絞り込み/並び(セッションを跨いで記憶)
+let loraTab = (() => { try { return localStorage.getItem('fg_lora_tab') || 'all'; } catch (e) { return 'all'; } })();
+let loraQ = '', loraSort = (() => { try { return localStorage.getItem('fg_lora_sort') || 'new'; } catch (e) { return 'new'; } })(), loraOnlyUsed = false;
+const LORA_TABS = [['all', 'すべて'], ['flux2-klein-4b', 'klein 4B'], ['z-image-turbo', 'Z-Image'], ['qwen-image-edit-2509', 'Qwen-Image'], ['none', '非対応']];
+// 配布サイトを探すパネルの状態
+const loraFind = {open: false, site: 'civitai', model: '', q: '', sort: 'dl', items: [], cursor: '', loading: false, error: '', searched: false};
+
+function loraMatches(it) {
+  if (loraTab === 'none' ? !!it.model : loraTab !== 'all' && it.model !== loraTab) return false;
+  if (loraOnlyUsed && !(it.used_by || []).length) return false;
+  if (loraQ) { const q = loraQ.toLowerCase(); const hay = [it.name, it.file, it.description, it.note, ...(it.triggers || []), it.base].join(' ').toLowerCase(); if (!hay.includes(q)) return false; }
+  return true;
+}
+function loraShown() {
+  const arr = loraCache.filter(loraMatches);
+  const key = {new: (a, b) => (b.imported || 0) - (a.imported || 0), name: (a, b) => String(a.name || a.file).localeCompare(String(b.name || b.file), 'ja'),
+               size: (a, b) => (b.size_mb || 0) - (a.size_mb || 0), used: (a, b) => (b.used_by?.length || 0) - (a.used_by?.length || 0)}[loraSort] || (() => 0);
+  return arr.sort(key);
+}
+function loraTabsHtml() {
+  const count = key => loraCache.filter(it => key === 'all' ? true : key === 'none' ? !it.model : it.model === key).length;
+  return `<div style="display:flex; gap:6px; flex-wrap:wrap; align-items:center; margin-bottom:10px">
+    ${LORA_TABS.map(([k, label]) => `<span class="engchip ${loraTab === k ? 'on' : ''}" onclick="setLoraTab('${k}')" title="${k === 'none' ? '内蔵モデルに載らない(FLUX.1/SDXL 等)' : k === 'all' ? '棚の全部' : LORA_MODEL_LABEL[k] + ' 用'}">${label}${count(k) ? ` <span class="badge">${count(k)}</span>` : ''}</span>`).join('')}
+    <span style="flex:1"></span>
+    <input id="lora_q" placeholder="棚の中を検索(名前・トリガー語・メモ)" value="${esc(loraQ)}" style="width:220px" oninput="loraQ = this.value.trim(); renderLoraList()">
+    <select onchange="loraSort = this.value; try { localStorage.setItem('fg_lora_sort', loraSort); } catch (e) {} renderLoraList()" title="並び順">
+      ${[['new', '新しい順'], ['name', '名前順'], ['size', '大きい順'], ['used', '使っている順']].map(([k, l]) => `<option value="${k}" ${loraSort === k ? 'selected' : ''}>${l}</option>`).join('')}
+    </select>
+    <span class="engchip ${loraOnlyUsed ? 'on' : ''}" onclick="loraOnlyUsed = !loraOnlyUsed; renderLoraList()" title="生成フォルダで使っている物だけ">使用中だけ</span>
+  </div>`;
+}
+function setLoraTab(k) { loraTab = k; try { localStorage.setItem('fg_lora_tab', k); } catch (e) {} if (loraFind.open && k !== 'all' && k !== 'none') loraFind.model = k; renderLora(); }
+
+function loraCard(it, st) {
+  const badge = it.model ? (it.base === 'z-image-turbo' ? 'zi' : it.base === 'qwen-image' ? 'qw' : '') : 'ng';
+  const art = it.previews?.length ? `/lora/preview/${it.file}/${it.previews[0]}` : it.art ? `/lora/preview/${it.file}/art` : '';
+  const genFolders = albumsCache.filter(a => a.kind === 'gen');
+  const fits = genFolders.filter(a => !it.model || (a.recipe?.model || loraModels.find(m => m.present)?.id || 'flux2-klein-4b') === it.model);
+  const already = a => (a.recipe?.lora || []).some(x => x.file === it.file);
+  return `<div class="lcard" data-file="${esc(it.file)}">
+    <div class="art">${art ? `<img src="${art}?t=${it.imported || 0}" onerror="this.remove()" onmouseenter="hoverPv(this, '${esc(it.name || it.file)} の試し描き', true)" onmouseleave="hoverPvHide()" style="cursor:zoom-in">` : ic('wand', 40)}
+      <span class="lbadge ${badge}" title="親モデル${it.base_manual ? '(手で指定)' : '(自動判定。違えば「編集」で直せます)'}">${esc(LORA_BASE_LABEL[it.base] || it.base)}${it.base_manual ? ' ✎' : ''}</span>
+      ${it.nsfw ? `<span class="lbadge" style="left:auto; right:8px; background:#7f1d1dcc">NSFW</span>` : ''}
+      ${it.previews?.length > 1 ? `<span class="arts">${it.previews.slice(1).map(i => `<img src="/lora/preview/${it.file}/${i}" onmouseenter="hoverPv(this, '試し描き', true)" onmouseleave="hoverPvHide()">`).join('')}</span>` : ''}
+    </div>
+    <div class="body">
+      <div class="nm" title="${esc(it.file)}.safetensors${it.file_name ? '\n元のファイル名: ' + esc(it.file_name) : ''}">${esc(it.name || it.file)}</div>
+      <div class="note" style="font-size:11px; color:var(--faint)">${it.model ? `使うモデル: <b style="color:var(--tx)">${esc(LORA_MODEL_LABEL[it.model] || it.model)}</b>` : '<span style="color:#e06c75">内蔵モデルには載りません</span>'} · ${it.size_mb}MB${it.default_scale && it.default_scale !== 1 ? ` · 強さ ${it.default_scale}` : ''}${it.license ? ' · ' + esc(String(it.license)) : ''}</div>
+      ${it.description ? `<div class="desc" title="${esc(it.description)}">${esc(it.description)}</div>` : ''}
+      ${it.note ? `<div class="desc" style="color:var(--tx)">📝 ${esc(it.note)}</div>` : ''}
+      ${it.triggers?.length ? `<div class="trigs">${it.triggers.slice(0, 6).map(x => `<span class="trig" title="トリガー語(プロンプトに入れると効く)。クリックでコピー" style="cursor:copy" onclick="navigator.clipboard?.writeText('${esc(x)}'); toast('コピーしました: ${esc(x)}')">${esc(x)}</span>`).join('')}</div>` : ''}
+      ${it.used_by?.length ? `<div class="note" style="font-size:11px; color:var(--faint)">使用中: ${it.used_by.map(n => `<a href="#" onclick="openFolder('${esc(n)}'); return false" title="このフォルダを開く">${esc(n)}</a>`).join(', ')}</div>` : ''}
+      <div class="act">
+        <button class="pri" style="flex:1" ${it.model ? '' : 'disabled'} onclick="loraMakeFolder('${esc(it.file)}')" title="この LoRA を着せた生成フォルダを新しく作る">${ic('wand', 12)} これで作る</button>
+        <button class="ghost" ${it.model ? '' : 'disabled'} onclick="loraProbe('${esc(it.file)}')" title="内蔵エンジンで 2 題描いてカードの顔にする(約1分)">${st.probing === it.file ? '描いている…' : '試し描き'}</button>
+      </div>
+      <div class="act act2">
+        ${fits.length ? `<select onchange="loraAddToFolder('${esc(it.file)}', this.value); this.value = ''" title="既にある生成フォルダに足す"><option value="">フォルダに足す…</option>${fits.map(a => `<option value="${esc(a.name)}" ${already(a) ? 'disabled' : ''}>${esc(a.name)}${already(a) ? '(済)' : ''}</option>`).join('')}</select>` : ''}
+        ${it.page ? `<button class="ghost" onclick="openExternal('${esc(it.page)}')" title="配布ページを開く(${esc(it.page)})">${ic('globe', 12)} 配布ページ</button>` : ''}
+        <button class="ghost" onclick="loraEdit('${esc(it.file)}')" title="名前・トリガー語・親モデル・既定の強さ・メモを直す">編集</button>
+        <button class="ghost" onclick="loraDelete('${esc(it.file)}')" title="棚から消す">${ic('x', 12)}</button>
+      </div>
+    </div></div>`;
+}
+function renderLoraList() {
+  const grid = document.getElementById('lora_grid'); if (!grid) return;
+  const st = renderLora._st || {};
+  const shown = loraShown();
+  grid.innerHTML = loraCache.length ? (shown.length ? `<div class="lgrid">${shown.map(it => loraCard(it, st)).join('')}</div>` : `<div class="empty">条件に合う LoRA はありません</div>`)
+    : `<div class="empty"><div class="big">${ic('layers', 44)}</div>まだ空です<div class="hint" style="margin-top:8px">上の「配布サイトで探す」から親モデルを選んで探すか、Hugging Face / Civitai の URL を貼るか、.safetensors をここに落としてください</div></div>`;
+  const cnt = document.getElementById('lora_count');
+  if (cnt) cnt.textContent = `${loraCache.length} 個 · ${(loraCache.reduce((a, b) => a + (b.size_mb || 0), 0) / 1024).toFixed(1)} GB`;
+}
 async function renderLora() {
-  $('grid').innerHTML = `<div class="setpage"><h2>${ic('layers', 16)} LoRA 棚</h2><div class="hint">読み込み中…</div></div>`;
+  if (!document.getElementById('lorapage')) $('grid').innerHTML = `<div class="setpage"><h2>${ic('layers', 16)} LoRA 棚</h2><div class="hint">読み込み中…</div></div>`;
   const r = await loadLora();
   const st = r.state || {};
-  const card = it => {
-    const badge = it.model ? (it.base === 'z-image-turbo' ? 'zi' : it.base === 'qwen-image' ? 'qw' : '') : 'ng';
-    const art = it.previews?.length ? `/lora/preview/${it.file}/${it.previews[0]}` : it.art ? `/lora/preview/${it.file}/art` : '';
-    return `<div class="lcard">
-      <div class="art">${art ? `<img src="${art}?t=${it.imported || 0}" onerror="this.remove()">` : ic('wand', 40)}
-        <span class="lbadge ${badge}">${esc(LORA_BASE_LABEL[it.base] || it.base)}</span>
-        ${it.previews?.length > 1 ? `<span class="arts">${it.previews.slice(1).map(i => `<img src="/lora/preview/${it.file}/${i}">`).join('')}</span>` : ''}
-      </div>
-      <div class="body">
-        <div class="nm" title="${esc(it.file)}.safetensors">${esc(it.name || it.file)}</div>
-        ${it.description ? `<div class="desc">${esc(it.description)}</div>` : ''}
-        ${it.triggers?.length ? `<div class="trigs">${it.triggers.slice(0, 6).map(x => `<span class="trig" title="トリガー語(プロンプトに入れると効く)">${esc(x)}</span>`).join('')}</div>` : ''}
-        <div class="note" style="font-size:11px; color:var(--faint)">${it.size_mb}MB${it.license ? ' · ' + esc(String(it.license)) : ''}${it.used_by?.length ? ' · 使用中: ' + it.used_by.map(esc).join(', ') : ''}${it.source && String(it.source).startsWith('http') ? ` · <a href="${esc(it.source)}" target="_blank" rel="noopener" style="color:var(--acc)">出典</a>` : ''}</div>
-        <div class="act">
-          <button class="pri" style="flex:1" ${it.model ? '' : 'disabled'} onclick="loraMakeFolder('${esc(it.file)}')" title="この LoRA を着せた生成フォルダを作る">${ic('wand', 12)} これで作る</button>
-          <button class="ghost" ${it.model ? '' : 'disabled'} onclick="loraProbe('${esc(it.file)}')" title="内蔵エンジンで 2 題描いてカードの顔にする(約1分)">${st.probing === it.file ? '描いている…' : '試し描き'}</button>
-          <button class="ghost" onclick="loraDelete('${esc(it.file)}')" title="棚から消す">${ic('x', 12)}</button>
-        </div>
-      </div></div>`;
-  };
+  renderLora._st = st;
+  if (loc.type !== 'lora') return;
   $('grid').innerHTML = `<div class="setpage" id="lorapage" ondragover="event.preventDefault(); this.classList.add('dropping')" ondragleave="this.classList.remove('dropping')" ondrop="loraDrop(event)">
-    <h2>${ic('layers', 16)} LoRA 棚 <span style="font-weight:400; font-size:11px; color:var(--faint)">生成フォルダに着せる画風・被写体。親モデルごとに互換は無い(klein 4B 用は Z-Image に載らない)</span></h2>
+    <h2>${ic('layers', 16)} LoRA 棚 <span id="lora_count" style="font-weight:400; font-size:11px; color:var(--faint)"></span>
+      <span style="font-weight:400; font-size:11px; color:var(--faint); margin-left:8px">生成フォルダに着せる画風・被写体。親モデルごとに互換は無い(klein 4B 用は Z-Image に載らない)</span></h2>
     <div class="limport">
       <input id="lora_url" placeholder="Hugging Face か Civitai の URL、または .safetensors の直リンクを貼る(親モデルを確認して取り込みます)" onkeydown="if(event.key==='Enter'&&!event.isComposing) loraImport()">
       <button class="pri" onclick="loraImport()">${ic('upload', 13)} 取り込む</button>
+      <button class="${loraFind.open ? 'pri' : 'ghost'}" onclick="loraFindToggle()" title="Civitai / Hugging Face を親モデルで絞って探す">${ic('globe', 13)} 配布サイトで探す</button>
     </div>
-    <div class="hint" style="margin-bottom:10px">.safetensors ファイルをこのページに落としても取り込めます。Civitai のダウンロードには API キーが要ることがあります(設定 → API キー)。
+    <div class="hint" style="margin-bottom:10px">.safetensors ファイルをこのページに落としても取り込めます。Civitai のダウンロードには API キーが要ることがあります(設定 → 接続とキー)。
       ${st.importing ? `<span class="ok">取得中: ${esc(st.name)} ${st.total_mb ? Math.round(100 * st.got_mb / st.total_mb) + '%' : st.got_mb + 'MB'}</span>` : st.last ? `<span class="note">${esc(st.last)}</span>` : ''}</div>
+    <div id="lora_find"></div>
     ${loraTabsHtml()}
-    ${loraCache.length ? (loraShown().length ? `<div class="lgrid">${loraShown().map(card).join('')}</div>` : `<div class="empty">この親モデル用の LoRA はまだありません</div>`) : `<div class="empty"><div class="big">${ic('layers', 44)}</div>まだ空です。URL を貼るか、ファイルを落としてください。</div>`}
+    <div id="lora_grid"></div>
   </div>`;
+  renderLoraList();
+  renderLoraFind();
   if (st.importing || st.probing) setTimeout(() => { if (loc.type === 'lora') renderLora(); }, 3000);
 }
-// 親モデルごとのタブ(2026-09-05 指示「何を持っているか見たい」)。klein 用 / Z-Image 用 / Qwen 用 / 非対応
-let loraTab = (() => { try { return localStorage.getItem('fg_lora_tab') || 'all'; } catch (e) { return 'all'; } })();
-const LORA_TABS = [['all', 'すべて'], ['flux2-klein-4b', 'klein 4B'], ['z-image-turbo', 'Z-Image'], ['qwen-image-edit-2509', 'Qwen-Image'], ['none', '非対応']];
-function loraShown() { return loraCache.filter(it => loraTab === 'all' ? true : loraTab === 'none' ? !it.model : it.model === loraTab); }
-function loraTabsHtml() {
-  const count = key => loraCache.filter(it => key === 'all' ? true : key === 'none' ? !it.model : it.model === key).length;
-  return `<div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:12px">${LORA_TABS.map(([k, label]) => `<span class="engchip ${loraTab === k ? 'on' : ''}" onclick="setLoraTab('${k}')" title="${k === 'none' ? '内蔵モデルに載らない(FLUX.1 / SDXL 等)' : k === 'all' ? '棚の全部' : label + ' で使える LoRA'}">${esc(label)} <span style="opacity:.6">${count(k)}</span></span>`).join('')}</div>`;
+
+// ---- 配布サイトで探す(Civitai / Hugging Face、親モデルで絞る) ----
+function loraFindToggle() {
+  loraFind.open = !loraFind.open;
+  if (loraFind.open && !loraFind.model) loraFind.model = (loraTab !== 'all' && loraTab !== 'none') ? loraTab : (loraModels.find(m => m.present)?.id || 'flux2-klein-4b');
+  renderLora();
+  if (loraFind.open && !loraFind.searched) loraFindSearch();
 }
-function setLoraTab(k) { loraTab = k; try { localStorage.setItem('fg_lora_tab', k); } catch (e) {} renderLora(); }
+function renderLoraFind() {
+  const box = document.getElementById('lora_find'); if (!box) return;
+  if (!loraFind.open) { box.innerHTML = ''; return; }
+  const F = loraFind;
+  const item = x => {
+    const inShelf = !!x.in_shelf;
+    const ok = !!x.model;
+    return `<div class="lcard lfind">
+      <div class="art" style="aspect-ratio:4/3">${x.thumb ? `<img src="${esc(x.thumb)}" loading="lazy" onerror="this.remove()" onmouseenter="hoverPv(this, '${esc(x.name)}', true)" onmouseleave="hoverPvHide()" style="cursor:zoom-in">` : ic(x.site === 'hf' ? 'globe' : 'wand', 36)}
+        <span class="lbadge ${x.base_key === 'z-image-turbo' ? 'zi' : x.base_key === 'qwen-image' ? 'qw' : ok ? '' : 'ng'}" title="配布元の親モデル表記: ${esc(x.base || '')}">${esc(x.base || LORA_BASE_LABEL[x.base_key] || '?')}</span>
+        <span class="lbadge" style="left:auto; right:8px; background:#000a">${x.site === 'hf' ? 'Hugging Face' : 'Civitai'}</span>
+      </div>
+      <div class="body">
+        <div class="nm" title="${esc(x.name)}${x.version ? ' — ' + esc(x.version) : ''}">${esc(x.name)}${x.version ? ` <span style="font-weight:400; color:var(--faint)">${esc(x.version)}</span>` : ''}</div>
+        <div class="note" style="font-size:11px; color:var(--faint)">${ok ? `使うモデル: <b style="color:var(--tx)">${esc(LORA_MODEL_LABEL[x.model] || x.model)}</b>` : '<span style="color:#e06c75">内蔵モデルには載りません</span>'}${x.downloads != null ? ` · DL ${Number(x.downloads).toLocaleString()}` : ''}${x.likes != null ? ` · 👍 ${Number(x.likes).toLocaleString()}` : ''}${x.size_mb ? ` · ${x.size_mb}MB` : ''}${x.creator ? ` · ${esc(x.creator)}` : ''}</div>
+        ${x.description ? `<div class="desc" title="${esc(x.description)}">${esc(x.description)}</div>` : ''}
+        ${x.triggers?.length ? `<div class="trigs">${x.triggers.slice(0, 4).map(t => `<span class="trig">${esc(t)}</span>`).join('')}</div>` : ''}
+        <div class="act">
+          <button class="pri" style="flex:1" ${ok && !inShelf ? '' : 'disabled'} onclick="loraImportUrl('${esc(x.import_url)}', this)" title="${inShelf ? '棚にあります: ' + esc(x.in_shelf) : '棚に取り込む(親モデルを確認してダウンロード)'}">${inShelf ? '棚にあります' : ic('upload', 12) + ' 取り込む'}</button>
+          <button class="ghost" onclick="openExternal('${esc(x.page)}')" title="配布ページを開く">${ic('globe', 12)} ページ</button>
+        </div>
+      </div></div>`;
+  };
+  box.innerHTML = `<div class="lfindbox">
+    <div style="display:flex; gap:6px; flex-wrap:wrap; align-items:center">
+      <span class="lbl" style="width:auto">探す先</span>
+      ${[['civitai', 'Civitai'], ['hf', 'Hugging Face'], ['all', '両方']].map(([k, l]) => `<span class="engchip ${F.site === k ? 'on' : ''}" onclick="loraFind.site = '${k}'; loraFindSearch()">${l}</span>`).join('')}
+      <span class="lbl" style="width:auto; margin-left:8px">親モデル</span>
+      <select onchange="loraFind.model = this.value; loraFindSearch()">${[['flux2-klein-4b', 'FLUX.2 klein 4B'], ['z-image-turbo', 'Z-Image Turbo'], ['qwen-image-edit-2509', 'Qwen-Image / Edit'], ['all', '全部']].map(([k, l]) => `<option value="${k}" ${F.model === k ? 'selected' : ''}>${l}</option>`).join('')}</select>
+      <input id="lora_findq" placeholder="言葉で探す(例: anime, watercolor, film)" value="${esc(F.q)}" style="width:220px" onkeydown="if(event.key==='Enter'&&!event.isComposing){ loraFind.q = this.value.trim(); loraFindSearch(); }">
+      <select onchange="loraFind.sort = this.value; loraFindSearch()">${[['dl', 'ダウンロード順'], ['rating', '評価順'], ['new', '新しい順']].map(([k, l]) => `<option value="${k}" ${F.sort === k ? 'selected' : ''}>${l}</option>`).join('')}</select>
+      <button class="pri" onclick="loraFind.q = document.getElementById('lora_findq').value.trim(); loraFindSearch()">${ic('search', 12)} 検索</button>
+      <span style="flex:1"></span>
+      <span class="lbl" style="width:auto; color:var(--faint)">NSFW は除外。Civitai の一部はログイン必須(設定 → 接続とキー に Civitai の API キー)</span>
+    </div>
+    <div style="margin-top:10px">${F.loading ? '<div class="hint">探しています…</div>' : F.error ? `<div class="hint" style="color:#e06c75">❌ ${esc(F.error)}</div>` : F.items.length ? `<div class="lgrid">${F.items.map(item).join('')}</div>${F.cursor ? `<div style="text-align:center; margin-top:10px"><button class="ghost" onclick="loraFindMore()">もっと見る</button></div>` : ''}` : F.searched ? '<div class="hint">見つかりませんでした。言葉を変えるか、親モデルを「全部」に</div>' : ''}</div>
+  </div>`;
+}
+async function loraFindSearch(more) {
+  const F = loraFind;
+  if (!more) { F.items = []; F.cursor = ''; }
+  F.loading = true; F.error = ''; F.searched = true; renderLoraFind();
+  try {
+    const r = await j(`/api/lora/search?site=${encodeURIComponent(F.site)}&model=${encodeURIComponent(F.model || 'all')}&q=${encodeURIComponent(F.q)}&sort=${encodeURIComponent(F.sort)}&cursor=${encodeURIComponent(more ? F.cursor : '')}`);
+    F.items = more ? F.items.concat(r.items || []) : (r.items || []);
+    F.cursor = r.next_cursor || '';
+  } catch (e) { F.error = e.message; }
+  F.loading = false; renderLoraFind();
+}
+function loraFindMore() { if (loraFind.cursor) loraFindSearch(true); }
+async function loraImportUrl(url, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = '取り込み中…'; }
+  try {
+    const r = await j('/api/lora/import', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({url})});
+    toast(`「${r.name}」(${LORA_BASE_LABEL[r.base] || r.base})を取得中 — 終わると棚に出ます`);
+    setTimeout(renderLora, 1500);
+  } catch (e) { toast('❌ ' + e.message); if (btn) { btn.disabled = false; btn.textContent = '取り込む'; } }
+}
 async function loraImport() {
   const url = $('lora_url')?.value.trim(); if (!url) return toast('URL をください');
   try {
@@ -1791,7 +1971,8 @@ async function loraProbe(file) {
   catch (e) { toast('❌ ' + e.message); }
 }
 async function loraDelete(file) {
-  const ok = await confirmBox({title: `LoRA「${file}」を棚から消す`, body: 'ファイルと試し描きを消します(戻せません)。使っている生成フォルダは LoRA なしで動きます。', ok: '消す', danger: true, icon: 'x'});
+  const it = loraCache.find(x => x.file === file) || {};
+  const ok = await confirmBox({title: `LoRA「${it.name || file}」を棚から消す`, body: `ファイル(${it.size_mb || '?'}MB)と試し描きを消します(戻せません)。${it.used_by?.length ? '使っている生成フォルダ(' + it.used_by.join(', ') + ')は LoRA なしで動きます。' : ''}`, ok: '消す', danger: true, icon: 'x'});
   if (!ok) return;
   try { await j(`/api/lora/${encodeURIComponent(file)}`, {method: 'DELETE'}); toast('消しました'); renderLora(); } catch (e) { toast('❌ ' + e.message); }
 }
@@ -1800,18 +1981,53 @@ async function loraMakeFolder(file) {
   const name = '作る_' + file.slice(0, 16);
   try {
     await j('/api/albums', {method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({name, folder: '', goal: '', kind: 'gen', recipe: {lora: [{file, scale: 1.0}], model: it.model, size: '1024x1024'},
-        agent: {auto: false, target: 50, batch: 10, min_quality: 5}, keywords: [], engines: [], criteria: {source: 'gen:' + name}})});
+      body: JSON.stringify({name, folder: '', goal: '', kind: 'gen', recipe: {lora: [{file, scale: it.default_scale || 1.0}], model: it.model, size: '1024x1024'},
+        agent: {auto: false, target: 50, batch: 10, min_quality: 5}, keywords: [], engines: [], criteria: {source: 'gen:' + name}, create: true})});
     await loadAlbums(); openFolder(name);
     setTimeout(() => { $('viewhead')?.classList.add('open'); if ($('ah_goal')) { $('ah_goal').placeholder = `何を作る? ${it.triggers?.length ? 'トリガー語「' + it.triggers[0] + '」は自動で入ります' : ''}`; $('ah_goal').focus(); } }, 150);
     toast(`「${it.name || file}」を着せた生成フォルダを作りました — 作る物を書いて ▶`);
   } catch (e) { toast('❌ ' + e.message); }
 }
+// 既にある生成フォルダに足す(親モデルが合う物だけ候補に出る)
+async function loraAddToFolder(file, folder) {
+  if (!folder) return;
+  const it = loraCache.find(x => x.file === file); const a = albumsCache.find(x => x.name === folder); if (!it || !a) return;
+  const lora = [...(a.recipe?.lora || []).filter(x => x.file !== file), {file, scale: it.default_scale || 1.0}];
+  try { await saveGenRecipe(a.name, {lora}); await loadAlbums(); toast(`「${a.name}」に足しました`); renderLoraList(); } catch (e) { toast('❌ ' + e.message); }
+}
+// 編集: 名前・トリガー語・親モデル(自動判定が外れた時の逃げ道)・既定の強さ・メモ
+function loraEdit(file) {
+  const it = loraCache.find(x => x.file === file); if (!it) return;
+  $('cfovl')?.remove();
+  const ovl = document.createElement('div'); ovl.id = 'cfovl';
+  const bases = [['flux2-klein-4b', 'FLUX.2 klein 4B 用'], ['flux2-klein-9b', 'FLUX.2 klein 9B 用(非対応)'], ['z-image-turbo', 'Z-Image 用'], ['qwen-image', 'Qwen-Image 用'], ['flux1', 'FLUX.1 用(非対応)'], ['flux2-dev', 'FLUX.2 dev 用(非対応)'], ['sdxl', 'SDXL 用(非対応)'], ['sd15', 'SD1.5 用(非対応)'], ['unknown', '不明(klein で試す)']];
+  ovl.innerHTML = `<div class="box" style="width:min(560px, 92vw)"><div class="t">${ic('layers', 15)}LoRA を編集 — ${esc(it.file)}</div>
+    <div class="b" style="display:grid; grid-template-columns:110px 1fr; gap:8px 10px; align-items:center">
+      <span class="lbl">名前</span><input id="le_name" value="${esc(it.name || '')}">
+      <span class="lbl" title="プロンプトの先頭に自動で入ります。カンマ区切り">トリガー語</span><input id="le_trig" value="${esc((it.triggers || []).join(', '))}" placeholder="例: ohwx style, film grain">
+      <span class="lbl" title="自動判定が違っていたらここで直す。合わないモデルには載りません">親モデル</span><select id="le_base">${bases.map(([k, l]) => `<option value="${k}" ${it.base === k ? 'selected' : ''}>${l}</option>`).join('')}</select>
+      <span class="lbl" title="フォルダに足した時の初期値(0.05〜2)">既定の強さ</span><input id="le_scale" type="number" min="0.05" max="2" step="0.05" value="${it.default_scale || 1}" style="width:90px">
+      <span class="lbl">メモ</span><input id="le_note" value="${esc(it.note || '')}" placeholder="自分用の覚え書き(例: 強さ0.7が良い)">
+      ${it.page ? `<span class="lbl">配布元</span><a href="#" onclick="openExternal('${esc(it.page)}'); return false" style="word-break:break-all">${esc(it.page)}</a>` : ''}
+    </div>
+    <div class="a"><button class="ghost" data-no>やめる</button><button class="pri" data-yes>保存</button></div></div>`;
+  const done = () => ovl.remove();
+  ovl.onclick = e => { if (e.target === ovl) done(); };
+  ovl.querySelector('[data-no]').onclick = done;
+  ovl.querySelector('[data-yes]').onclick = async () => {
+    const patch = {name: $('le_name').value, triggers: $('le_trig').value, base: $('le_base').value, default_scale: parseFloat($('le_scale').value) || 1, note: $('le_note').value};
+    try { await j(`/api/lora/${encodeURIComponent(file)}`, {method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(patch)}); done(); toast('保存しました'); renderLora(); }
+    catch (e) { toast('❌ ' + e.message); }
+  };
+  document.body.appendChild(ovl);
+  setTimeout(() => $('le_name')?.focus(), 30);
+}
 // 生成フォルダの LoRA 行(レシピ recipe.lora = [{file, scale}])
 async function genLoraAdd(sel) {
   const file = sel.value; sel.value = ''; if (!file) return;
   const a = albumsCache.find(x => x.name === loc.key); if (!a) return;
-  const lora = [...(a.recipe?.lora || []), {file, scale: 1.0}];
+  const L = loraCache.find(l => l.file === file) || {};
+  const lora = [...(a.recipe?.lora || []), {file, scale: L.default_scale || 1.0}];
   try { await saveGenRecipe(a.name, {lora}); renderViewhead(); } catch (e) { toast('❌ ' + e.message); }
 }
 async function genLoraRemove(i) {
@@ -2179,7 +2395,7 @@ function genHeadHtml(a, isNew) {
         <option value="">＋ LoRA を足す…</option>
         ${loraCache.filter(l => l.model === curModel).filter(l => !(r.lora || []).some(x => x.file === l.file)).map(l => `<option value="${esc(l.file)}">${esc(l.name || l.file)}${l.triggers?.length ? ' (' + esc(l.triggers[0]) + ')' : ''}</option>`).join('')}
       </select>
-      <span class="lbl" style="width:auto">${loraCache.length ? '' : '棚が空です — サイドバー「棚 › LoRA」で取り込み'}</span>`}
+      <span class="lbl" style="width:auto">${loraCache.length ? `<a href="#" onclick="go({type:'lora', key:'', criteria:{}}); return false" title="LoRA 棚を開く(探す・取り込む・編集)">棚を開く</a>` : `棚が空です — <a href="#" onclick="go({type:'lora', key:'', criteria:{}}); return false">棚を開いて探す</a>`}</span>`}
     </div>
     <div class="frow">
       <span class="lbl">AI配役</span>
@@ -4227,6 +4443,29 @@ function closeLb() {
     }
   };
 }
+// 参照元/派生先の画像を開く。いま見ている一覧に居なければ、この場だけ次の位置に差し込んで開く(← で戻れる)
+async function lbJump(sha) {
+  const i = items.findIndex(x => x.sha1 === sha);
+  if (i >= 0) return lbShow(i);
+  try {
+    const m = await j('/api/meta/' + sha);
+    items.splice(lbIdx + 1, 0, {sha1: sha, w: m.w, h: m.h, ext: m.ext});
+    total++; render(true);
+    lbShow(lbIdx + 1);
+  } catch (e) { toast('❌ その画像は見つかりません(消された可能性)'); }
+}
+// この画像を参照にして作られた画像(生成の来歴の逆引き)
+async function loadDerived(sha) {
+  try {
+    const r = await j('/api/derived/' + sha);
+    if (items[lbIdx]?.sha1 !== sha || !r.items?.length) return;
+    const box = $('lbinfo'); if (!box || box.style.display === 'none') return;
+    const n = r.items.length;
+    box.insertAdjacentHTML('beforeend', `<br>${ic('wand', 12)} この画像から作った: ${n}枚 ` +
+      r.items.slice(0, 8).map(x => `<img class="provthumb" src="/thumb/${esc(x.sha1)}" title="${esc(x.album || '')} — ${esc((x.prompt || '').slice(0, 80))}\nクリックで開く" onclick="lbJump('${esc(x.sha1)}')" onmouseenter="hoverPv(this, '${esc((x.prompt || '').slice(0, 60))}', true)" onmouseleave="hoverPvHide()" onerror="this.remove()">`).join('') +
+      (n > 8 ? ` <span style="color:var(--faint)">他${n - 8}枚</span>` : ''));
+  } catch (e) {}
+}
 async function lbShow(i, dir) {
   if (typeof studioClose === 'function') studioClose(false);
   if (!items.length) return;
@@ -4297,11 +4536,12 @@ async function lbShow(i, dir) {
         (m.gen ? `<br>${ic('wand', 12)} 生成: <b style="color:#e2e5ea">${esc(m.gen.model || '')}</b>` +
           ` · seed ${esc(String(m.gen.seed ?? ''))} · ${esc(String(m.gen.steps ?? ''))}steps · cfg ${esc(String(m.gen.cfg ?? ''))}` +
           `${m.gen.w ? ' · ' + m.gen.w + '×' + m.gen.h : ''}${m.gen.secs ? ' · ' + m.gen.secs + '秒' : ''}${m.gen.quality ? ' · 目利き q' + m.gen.quality : ''}` +
-          `${m.gen.lora?.length ? '<br>LoRA: ' + m.gen.lora.map(l => esc(l.file) + (l.scale != null ? ' ×' + l.scale : '')).join(', ') : ''}` +
-          `${m.gen.refs?.length ? '<br>参照: ' + m.gen.refs.length + '枚' + (m.gen.refs_attached === false ? '(説明文のみ)' : '') : ''}` +
+          `${m.gen.lora?.length ? '<br>LoRA: ' + m.gen.lora.map(l => `<span class="trig" style="cursor:pointer" title="LoRA 棚を開く" onclick="go({type:'lora', key:'', criteria:{}})">${esc(l.file)}${l.scale != null ? ' ×' + l.scale : ''}</span>`).join(' ') : ''}` +
+          `${m.gen.refs?.length ? '<br>元画像: ' + m.gen.refs.map(r => `<img class="provthumb" src="/thumb/${esc(r)}" title="参照にした元画像(クリックで開く)" onclick="lbJump('${esc(r)}')" onmouseenter="hoverPv(this, '参照にした元画像 — クリックで開く', true)" onmouseleave="hoverPvHide()" onerror="this.replaceWith(Object.assign(document.createElement('span'), {textContent: '(消えた画像)', style: 'color:var(--faint)'}))">`).join('') + (m.gen.refs_attached === false ? ' <span style="color:var(--faint)">(画像は渡さず説明文だけ)</span>' : '') : ''}` +
           `<br>プロンプト: <span title="${esc(m.gen.prompt || '')} (クリックでコピー)" style="cursor:copy; text-decoration:underline dotted" onclick="navigator.clipboard?.writeText(lbMeta?.gen?.prompt || ''); toast('プロンプトをコピーしました')">` +
           `${esc((m.gen.prompt || '').length > 140 ? (m.gen.prompt || '').slice(0, 140) + '…' : (m.gen.prompt || ''))}</span>` : '');
     }
+    loadDerived(sha); // この画像を元に作られた画像(あれば情報カードに足す)
     const kind = (() => { // 見た目の種別はVLMのstyleが正(ソース推定は嘘をつく)。ただし自家生成(origin=synthetic)は事実なので最優先
       const st = m.vlm?.attrs?.style;
       if (m.origin === 'synthetic') return st === 'photo' ? '生成(実写風)' : '生成';
@@ -5735,12 +5975,7 @@ setInterval(refreshFacets, 30000);
   await refreshFacets();
   loadDatasets(); loadPresets(); loadLora(); watchActivity();
   const h = new URLSearchParams(location.hash.slice(1));
-  for (const k of ['origin']) if (h.get('f_' + k)) fchips[k] = h.get('f_' + k);
-  for (const k of ['q8', 'safe', 'clean', 'nowm']) if (h.get('f_' + k)) fchips[k] = true;
-  for (const k of Object.keys(chipFilters)) if (h.get('c_' + k)) chipFilters[k] = h.get('c_' + k);
-  $('fc_real').classList.toggle('on', fchips.origin === 'real');
-  $('fc_synth').classList.toggle('on', fchips.origin === 'synthetic');
-  ['q8', 'safe', 'clean', 'nowm'].forEach(k => $('fc_' + k).classList.toggle('on', !!fchips[k]));
+  // フィルタは起動時に全部 OFF(ハッシュから復元しない。2026-09-07)
   const t = h.get('t'), k = h.get('k');
   if (t === 'folder' && albumsCache.find(x => x.name === k)) openFolder(k);
   else if (t === 'dataset' && k) openDataset(k);

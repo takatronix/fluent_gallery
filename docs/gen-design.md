@@ -261,6 +261,18 @@ Qwen-Image 用 / FLUX.1 用は互換なし。9B 用は 4B に載らない)。**�
   カードは lora.html の縦カード(作例が顔、親モデル・サイズ・トリガー語・使っているフォルダ)を SVG/自前ポップアップで移植。
   カードの主操作は「このLoRAで生成フォルダを作る」(=レシピに `@LoRA` を刺した新規フォルダ)。
 - ストア版: LoRA は同梱しない(ユーザー持ち込み)。非商用ライセンスの LoRA は棚の json に license を残し、UI に表示するだけで止めない。
+- **2026-09-07 追加(棚の「当たり前」)**: `GET /api/lora/search?site=civitai|hf|all&model=<内蔵モデルid|all>&q=&sort=dl|rating|new&cursor=`
+  で配布サイトを親モデルで絞って探す(Civitai の baseModels は klein 4B=`Flux.2 Klein 4B`/`-base`、Z-Image=`ZImageTurbo`/`ZImageBase`、
+  Qwen=`Qwen`。9B 用は `flux2-klein-9b`=非対応と判定、NSFW は名前/フラグで除外)。結果の `import_url` をそのまま取り込みへ。
+  `PATCH /api/lora/{stem}` {name, triggers, base, default_scale, note} で手直し(親モデルの自動判定が外れた時の逃げ道)。
+  取り込みは同じ出典があれば 409。一覧に `page`(配布ページ)、`default_scale`、`note`、`file_name`。
+  UI: 棚内検索・並び順・使用中だけ、カードに 配布ページ/編集/フォルダに足す(親モデルが合う生成フォルダだけ)/使用中フォルダへのリンク、
+  試し描きはホバーで拡大。生成フォルダの LoRA 追加は既定の強さを使う。
+- **来歴の行き来(2026-09-07)**: ライトボックスの情報カードで、生成物は「元画像」(gen.refs)のサムネをクリックして開け、
+  元画像側は `GET /api/derived/{sha}`(source LIKE 'gen:%' のサイドカーから gen.refs を逆引き)で「この画像から作った N 枚」を出す。
+  一覧に居ない画像は次の位置に差し込んで開く(lbJump)。
+- **よく使う言語指示(2026-09-07)**: `GET /api/phrases?kind=gen|crawl` / `POST /api/phrases/use` / `POST /api/phrases/hide`。
+  目標欄の下にタグ行(クリックで目標に追記→自動保存)。フォルダの目標保存時に句読点で切った断片を学習し(store/phrases.json)、使った回数順。
 
 ## 6. プロバイダ抽象(内蔵 / 外部 GPU / API を同じ契約に)
 

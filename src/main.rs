@@ -11,6 +11,7 @@ mod config;
 mod enrich;
 mod gen;
 mod lora;
+mod phrases;
 mod llm;
 mod media;
 #[cfg(feature = "faceid")]
@@ -1982,6 +1983,10 @@ async fn api_album_make(State(app): S, Json(a): Json<AlbumIn>) -> impl IntoRespo
     let prev_list = |k: &str| prev.as_ref().map(|p| p[k].clone()).filter(|v| v.is_array()).unwrap_or_else(|| json!([]));
     let folder = a.folder.unwrap_or_else(|| prev_str("folder"));
     let goal = a.goal.unwrap_or_else(|| prev_str("goal"));
+    // 目標の言い回しを覚える(タグとして次から選べる)。変わった時だけ
+    if !goal.trim().is_empty() && prev.as_ref().and_then(|p| p["goal"].as_str()) != Some(goal.as_str()) {
+        phrases::learn(&app.root, if kind == "gen" { "gen" } else { "crawl" }, &goal);
+    }
     let keywords = a.keywords.map(|k| json!(k)).unwrap_or_else(|| prev_list("keywords"));
     let engines = a.engines.map(|e| json!(e)).unwrap_or_else(|| prev_list("engines"));
     let mut rec = json!({"name": slug, "criteria": a.criteria, "folder": folder_norm(&folder), "goal": goal,
@@ -3708,6 +3713,9 @@ async fn api_lora_import(State(app): S, Json(i): Json<LoraImportIn>) -> impl Int
     if lora::model_for_base(&res.base).is_none() {
         return (StatusCode::BAD_REQUEST, Json(json!({"detail": format!("親モデル「{}」は内蔵の生成モデルに載りません(対応: FLUX.2 klein 4B / Z-Image / Qwen-Image)", res.base)}))).into_response();
     }
+    if let Some(stem) = lora::find_by_source(&app.root, &i.url) {
+        return (StatusCode::CONFLICT, Json(json!({"detail": format!("同じ出典の LoRA が既に棚にあります: {stem}"), "file": stem}))).into_response();
+    }
     let url = i.url.clone();
     tokio::spawn(async move {
         match lora::import_url(&app.root, &app.http, &app.lora, &url).await {
@@ -3735,6 +3743,53 @@ async fn api_lora_delete(State(app): S, AxPath(name): AxPath<String>) -> impl In
     let stem = lora::safe_stem(&name);
     if lora::delete(&app.root, &stem) { Json(json!({"ok": true})).into_response() } else { StatusCode::NOT_FOUND.into_response() }
 }
+
+#[derive(Deserialize, Default)]
+struct LoraSearchQ { #[serde(default)] site: String, #[serde(default)] model: String, #[serde(default)] q: String, #[serde(default)] sort: String, #[serde(default)] cursor: String }
+/// 配布サイト(Civitai / Hugging Face)を親モデルで絞って探す。結果の import_url をそのまま /api/lora/import に渡せる
+async fn api_lora_search(State(app): S, Query(q): Query<LoraSearchQ>) -> impl IntoResponse {
+    let model = if q.model.is_empty() { "all".to_string() } else { q.model.clone() };
+    let key = config::key("civitai");
+    match lora::search(&app.root, &app.http, &q.site, &model, &q.q, &q.sort, &q.cursor, key.as_deref()).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({"detail": e}))).into_response(),
+    }
+}
+/// 棚カードの編集(名前・トリガー語・親モデル・既定の強さ・メモ)
+async fn api_lora_patch(State(app): S, AxPath(name): AxPath<String>, Json(p): Json<Value>) -> impl IntoResponse {
+    let stem = lora::safe_stem(&name);
+    match lora::update_meta(&app.root, &stem, &p) {
+        Ok(m) => Json(json!({"ok": true, "meta": m})).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({"detail": e}))).into_response(),
+    }
+}
+/// この画像を参照にして作られた画像(生成の来歴の逆引き。「元画像 → 何が作られたか」)
+async fn api_derived(State(app): S, AxPath(sha1): AxPath<String>) -> Json<Value> {
+    let shas: Vec<String> = {
+        let db = app.db.lock().unwrap();
+        db.prepare("SELECT sha1 FROM images WHERE source LIKE 'gen:%' ORDER BY ingested DESC LIMIT 5000")
+            .and_then(|mut st| st.query_map([], |r| r.get::<_, String>(0)).map(|rs| rs.flatten().collect())).unwrap_or_default()
+    };
+    let mut out = vec![];
+    for s in shas {
+        let Some(m) = store::load_meta(&app.root, &s) else { continue };
+        let hit = m["gen"]["refs"].as_array().map(|a| a.iter().any(|r| r.as_str() == Some(sha1.as_str()))).unwrap_or(false);
+        if hit {
+            out.push(json!({"sha1": s, "w": m["w"], "h": m["h"], "ext": m["ext"], "source": m["source"], "album": m["gen"]["album"],
+                            "prompt": m["gen"]["prompt"], "model": m["gen"]["model"]}));
+            if out.len() >= 60 { break; }
+        }
+    }
+    Json(json!({"items": out}))
+}
+#[derive(Deserialize, Default)]
+struct PhraseQ { #[serde(default)] kind: String }
+/// よく使う言語指示(タグ)。kind=gen|crawl
+async fn api_phrases(State(app): S, Query(q): Query<PhraseQ>) -> Json<Value> { Json(json!({"items": phrases::list(&app.root, &q.kind)})) }
+#[derive(Deserialize)]
+struct PhraseIn { #[serde(default)] kind: String, text: String }
+async fn api_phrases_use(State(app): S, Json(p): Json<PhraseIn>) -> Json<Value> { phrases::used(&app.root, &p.kind, &p.text); Json(json!({"ok": true})) }
+async fn api_phrases_hide(State(app): S, Json(p): Json<PhraseIn>) -> Json<Value> { phrases::hide(&app.root, &p.kind, &p.text); Json(json!({"ok": true})) }
 
 /// 試し描き: 内蔵エンジンで 2 題描いてカードの顔にする(生成中は 409)
 async fn api_lora_probe(State(app): S, AxPath(name): AxPath<String>) -> impl IntoResponse {
@@ -4780,8 +4835,13 @@ async fn main() {
         .route("/api/lora", get(api_lora_list))
         .route("/api/lora/import", post(api_lora_import))
         .route("/api/lora/upload", post(api_lora_upload).layer(axum::extract::DefaultBodyLimit::max(3 << 30)))
-        .route("/api/lora/{name}", delete(api_lora_delete))
+        .route("/api/lora/search", get(api_lora_search))
+        .route("/api/lora/{name}", delete(api_lora_delete).patch(api_lora_patch))
         .route("/api/lora/{name}/probe", post(api_lora_probe))
+        .route("/api/derived/{sha1}", get(api_derived))
+        .route("/api/phrases", get(api_phrases))
+        .route("/api/phrases/use", post(api_phrases_use))
+        .route("/api/phrases/hide", post(api_phrases_hide))
         .route("/lora/preview/{name}/{i}", get(lora_preview_img))
         .route("/api/settings", get(api_settings_get).patch(api_settings_patch))
         .route("/api/settings/test", post(api_settings_test))
