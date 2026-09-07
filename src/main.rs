@@ -1872,6 +1872,19 @@ struct OrderIn {
     #[serde(default)] groups: Vec<GroupOrderIn>,
 }
 
+/// ブラウザの飛行記録(フリーズ等)。「固まった」の報告を後からサーバ側で読めるように追記する
+async fn api_client_log(State(app): S, Json(v): Json<Value>) -> impl IntoResponse {
+    use std::io::Write;
+    let p = app.root.join("store/client_log.jsonl");
+    if p.metadata().map(|m| m.len() > 2_000_000).unwrap_or(false) {
+        let _ = std::fs::rename(&p, app.root.join("store/client_log.old.jsonl"));
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
+        let _ = writeln!(f, "{v}");
+    }
+    Json(json!({"ok": true}))
+}
+
 /// 手動並び替えの一括反映。ドロップ1回で兄弟全員を10刻みに採番し直して送ってくる
 async fn api_order(State(app): S, Json(p): Json<OrderIn>) -> impl IntoResponse {
     let _owner = app.folder_filter_owner.lock().unwrap();
@@ -4740,6 +4753,7 @@ async fn main() {
         .route("/api/groups", get(api_groups).post(api_group_make))
         .route("/api/groups/{name}", delete(api_group_del))
         .route("/api/order", post(api_order))
+        .route("/api/client-log", post(api_client_log))
         .route("/api/albums/{name}", delete(api_album_del))
         .route("/api/albums/{name}/rename", post(api_album_rename))
         .route("/api/albums/{name}/move", post(api_album_move))
