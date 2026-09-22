@@ -66,6 +66,8 @@ class Job {
     this.hostLast = new Map();
     this.goalTerms = terms(this.input.goal);
     this.order = 0;
+    // robots.txt(Disallow/Crawl-delay)を全サイトで見ないフラグ。config.json の robots_ignore(env FG_ROBOTS_IGNORE で一時上書き)。既定は準拠
+    this.ignoreRobots = require('./conf').flag('FG_ROBOTS_IGNORE', 'robots_ignore');
   }
 
   status() {
@@ -118,6 +120,7 @@ class Job {
 
   async run() {
     this.state = 'running'; this.started = now(); this.writeStatus();
+    if (this.ignoreRobots) this.log({ t: now(), robots_ignored: true });
     let ctx = null;
     const watchdog = setTimeout(() => { this._stop = true; this._watchdog = true; }, (this.input.limits.max_minutes * 60 + 90) * 1000);
     try {
@@ -161,9 +164,14 @@ class Job {
     return this.status();
   }
 
+  /** いま見ている画面を jobs/<id>/screen.jpg に残す(ライブビュー用。失敗しても墜ちない) */
+  async snap(page) {
+    try { await page.screenshot({ type: 'jpeg', quality: 60, path: path.join(this.dir, 'screen.jpg') }); } catch {}
+  }
+
   async politeWait(url) {
     const host = new URL(url).hostname;
-    const cd = await this.robots.crawlDelay(url);
+    const cd = this.ignoreRobots ? null : await this.robots.crawlDelay(url);
     let wait = jitter(this.input.limits.delay_ms);
     if (cd) wait = Math.max(wait, Math.min(cd, 30) * 1000);
     const last = this.hostLast.get(host) || 0;
@@ -177,7 +185,7 @@ class Job {
     const L = this.input.limits;
     const t0 = now();
     this.current = { url: item.url, title: '' };
-    if (!(await this.robots.allowed(item.url))) {
+    if (!this.ignoreRobots && !(await this.robots.allowed(item.url))) {
       this.log({ t: now(), url: item.url, depth: item.depth, skipped: 'robots' });
       return; // 訪問数にも飽きにも数えない
     }
@@ -186,6 +194,7 @@ class Job {
     try { resp = await page.goto(item.url, { waitUntil: 'domcontentloaded', timeout: 30000 }); }
     catch (e) { throw new Error('goto: ' + String(e.message || e).split('\n')[0].slice(0, 100)); }
     this.pagesVisited++;
+    this.snap(page);
     const ct = resp ? (resp.headers()['content-type'] || '') : '';
     if (resp && !resp.ok() && resp.status() !== 304) throw new Error(`HTTP ${resp.status()}`);
     if (ct && !/text\/html|application\/xhtml/.test(ct)) {
@@ -204,6 +213,7 @@ class Job {
     const consent = await dismissConsent(page);
     const screens = await humanScroll(page, { maxScreens: 12 });
     await Promise.race([page.waitForLoadState('networkidle').catch(() => {}), sleep(2500)]);
+    await this.snap(page);
     const inv = await readPage(page);
     const pageUrl = normalizeUrl(inv.url) || item.url;
     this.visited.add(pageUrl);

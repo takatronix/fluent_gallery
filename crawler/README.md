@@ -6,6 +6,10 @@ Node.js + Playwright(Chromium 同梱)。依存は `playwright` だけ。仕様(c
 
 - クローラーは**選ぶだけ**(部品を落とし、見込み順に最高解像度で取る)。**採否は gallery 側の目利き(内蔵 VLM)**が決める(`POST /api/deliver`)。
 - 研究目的。robots.txt 厳守、ページ間隔(既定 0.8〜2.5 秒の乱数)、ログイン/CAPTCHA/動画 SNS 媒体は扱わない。UA に `fluent_crawler/0.1 (+research)` を付ける。
+- 固定値は [config.json](config.json) を書き換えるだけで変わる(読むのは起動時 1 回 → 変更後はクローラー再起動。環境変数は一時上書き用)。
+  - `robots_ignore`: `true` で robots.txt(Disallow/Crawl-delay)を全サイトで見ない(自前サーバー/許可済みサイトのテスト用。ジョブログに `robots_ignored` が残る)。ページ間隔の乱数待ちは関係なく効く。env `FG_ROBOTS_IGNORE`
+  - `ua_token`: クローラー名(UA の末尾と robots.txt の User-agent マッチに使う。既定 `fluent_crawler`。空文字 `""` で名乗りごと省き robots は `*` グループのみ見る)。env `FG_UA_TOKEN`
+  - `ua`: User-Agent 文字列を丸ごと固定(空=Chrome 風 + `<ua_token>/0.1 (+research)` を自動組み立て)。env `FG_UA`
 
 ## 動かす
 

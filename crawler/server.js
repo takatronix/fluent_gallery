@@ -59,6 +59,14 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && p === '/health') {
       return send(res, 200, { ok: true, impl: IMPL, version: pkg.version, browser: `chromium ${browser ? browser.version : '(未起動)'}`, running: running ? running.id : null, queued: queue.length });
     }
+    if (req.method === 'GET' && p === '/screen') {
+      // いま見ている画面(実行中が無ければ直近ジョブの最後の画面)
+      const j = running || (orderIds.length ? jobs.get(orderIds[0]) : null);
+      let buf = null; try { if (j) buf = fs.readFileSync(path.join(j.dir, 'screen.jpg')); } catch {}
+      if (!buf) return send(res, 404, { ok: false, detail: 'まだ画面がありません' });
+      res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Cache-Control': 'no-cache', 'Content-Length': buf.length });
+      return res.end(buf);
+    }
     if (req.method === 'POST' && p === '/jobs') {
       const body = await readJson(req);
       if (!body.url || !/^https?:\/\//i.test(String(body.url))) return send(res, 400, { ok: false, detail: 'url (http/https) が必要' });

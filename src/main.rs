@@ -2671,8 +2671,21 @@ async fn api_browse(State(app): S, Json(b): Json<BrowseIn>) -> impl IntoResponse
     if urlimport::media_host(&host) { return bad(format!("{host} は動画/SNS媒体なので「URLから取り込む」(yt-dlp)の側で扱います")); }
     if !crawl::is_safe_url(page.as_str()).await { return bad("内部ネットワーク宛てのURLは対象外です".into()); }
     let slug = album_slug(&b.album);
-    let Some(rec) = load_albums(&app.root).into_iter().find(|a| a["name"] == json!(slug.clone())) else {
-        return (StatusCode::NOT_FOUND, Json(json!({"detail": format!("フォルダ{slug}が見つかりません(先に目標付きフォルダを作ってください)")}))).into_response();
+    let rec = match load_albums(&app.root).into_iter().find(|a| a["name"] == json!(slug.clone())) {
+        Some(r) => r,
+        None => {
+            // フォルダが無ければこの場で作る(見て回るたびに前準備を手作業でさせない)。goal はリクエストのものを目標に据える
+            let rec = json!({"name": slug, "criteria": {"source": format!("crawl:{slug}")}, "folder": "", "goal": b.goal.trim(),
+                             "agent": {}, "keywords": [], "engines": [], "kind": "crawl", "recipe": {},
+                             "created": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64()});
+            let dir = album_dir(&app.root);
+            let _ = std::fs::create_dir_all(&dir);
+            if let Err(e) = std::fs::write(dir.join(format!("{slug}.json")), serde_json::to_string_pretty(&rec).unwrap()) {
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": format!("フォルダ{slug}の自動作成に失敗: {e}")}))).into_response();
+            }
+            println!("📁 フォルダ自動作成: {slug}(見て回って集める)");
+            rec
+        }
     };
     let goal = if b.goal.trim().is_empty() { rec["goal"].as_str().unwrap_or("").to_string() } else { b.goal.trim().to_string() };
     let base = match browse::ensure(&app.root, &app.http, &app.browse).await {
@@ -2708,6 +2721,48 @@ async fn api_browse_status(State(app): S) -> Json<Value> {
         s["crawler"] = match job { Ok(r) => r.json::<Value>().await.unwrap_or(Value::Null), Err(_) => Value::Null };
     }
     Json(s)
+}
+
+/// クローラーが今見ている画面(スクリーンショット)を中継。実行中が無ければ直近ジョブの最後の画面
+async fn api_browse_screen(State(app): S) -> impl IntoResponse {
+    match app.http.get(format!("{}/screen", browse::base())).timeout(std::time::Duration::from_secs(3)).send().await {
+        Ok(r) if r.status().is_success() => {
+            let b = r.bytes().await.unwrap_or_default();
+            ([(header::CONTENT_TYPE, "image/jpeg"), (header::CACHE_CONTROL, "no-cache")], b.to_vec()).into_response()
+        }
+        _ => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// 見て回りのライブビュー: いま見ているページのスクショ+現在地を自動更新で表示する
+async fn api_browse_watch() -> axum::response::Html<&'static str> {
+    axum::response::Html(r#"<!doctype html><html lang="ja"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>見て回りライブ</title>
+<style>
+body{margin:0;background:#0b0e13;color:#dfe6f0;font:14px/1.6 system-ui,-apple-system,sans-serif}
+header{padding:10px 14px;display:flex;gap:12px;align-items:baseline;flex-wrap:wrap}
+#t{font-weight:600}#u,#s{color:#8fa3bd;font-size:12px;word-break:break-all}
+main{padding:0 14px 14px}
+img{max-width:100%;border:1px solid #232a36;border-radius:8px;background:#11151d}
+#none{color:#8fa3bd;padding:48px 0;text-align:center}
+</style>
+<header><span id="t">—</span><span id="u"></span><span id="s"></span></header>
+<main><img id="img" alt="" style="display:none"><div id="none">画面待ち…(ジョブが走ると映ります)</div></main>
+<script>
+const img=document.getElementById('img'),none=document.getElementById('none');
+async function tick(){
+  try{
+    const s=await (await fetch('/api/browse/status')).json();const c=s.crawler||{};
+    document.getElementById('t').textContent=(c.current&&c.current.title)||c.state||'—';
+    document.getElementById('u').textContent=(c.current&&c.current.url)||'';
+    document.getElementById('s').textContent=c.started?`${c.pages_visited||0}ページ / ${c.images_picked||0}枚選定 / 収蔵${s.accepted||0}`:'';
+  }catch(e){}
+  const pre=new Image();
+  pre.onload=()=>{img.src=pre.src;img.style.display='';none.style.display='none'};
+  pre.src='/api/browse/screen?t='+Date.now();
+}
+tick();setInterval(tick,1500);
+</script>"#)
 }
 
 async fn api_browse_stop(State(app): S) -> Json<Value> {
@@ -4822,6 +4877,8 @@ async fn main() {
         .route("/api/browse", post(api_browse))
         .route("/api/browse/status", get(api_browse_status))
         .route("/api/browse/stop", post(api_browse_stop))
+        .route("/api/browse/screen", get(api_browse_screen))
+        .route("/api/browse/watch", get(api_browse_watch))
         .route("/api/deliver", post(api_deliver).layer(axum::extract::DefaultBodyLimit::max(64 << 20)))
         .route("/api/gen", post(api_gen))
         .route("/api/gen/queue/{name}", delete(api_gen_queue_del))

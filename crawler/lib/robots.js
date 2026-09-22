@@ -1,6 +1,6 @@
 'use strict';
 // robots.txt(User-agent: * と自分の名前)の Disallow/Allow を守る。origin ごとにキャッシュ。取れなければ許可扱い(標準の慣行)
-const UA_TOKEN = 'fluent_crawler';
+const UA_TOKEN = require('./conf').str('FG_UA_TOKEN', 'ua_token', 'fluent_crawler');
 
 function parse(text) {
   const groups = []; // {agents:[], rules:[{allow, path}], delay}
@@ -43,7 +43,7 @@ class Robots {
       const txt = await this.fetchText(origin + '/robots.txt');
       if (typeof txt === 'string') {
         const groups = parse(txt);
-        g = groups.find((x) => x.agents.some((a) => a.includes(UA_TOKEN))) || groups.find((x) => x.agents.includes('*')) || null;
+        g = (UA_TOKEN && groups.find((x) => x.agents.some((a) => a.includes(UA_TOKEN)))) || groups.find((x) => x.agents.includes('*')) || null; // 空 token(匿名)は * グループのみ
       }
     } catch { g = null; }
     const rules = g ? g.rules.map((r) => ({ allow: r.allow, path: r.path, re: toRegex(r.path) })) : [];

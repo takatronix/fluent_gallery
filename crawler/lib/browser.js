@@ -19,8 +19,11 @@ class Browser {
     return this;
   }
   userAgent() {
+    const fixed = require('./conf').str('FG_UA', 'ua', '');
+    if (fixed) return fixed; // config.json の ua を丸ごと使う(空なら既定の組み立て)
     const major = (this.version || '120').split('.')[0];
-    return `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}.0.0.0 Safari/537.36 ${UA_TOKEN}/0.1 (+research)`;
+    const base = `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}.0.0.0 Safari/537.36`;
+    return UA_TOKEN ? `${base} ${UA_TOKEN}/0.1 (+research)` : base; // 空 token なら名乗りごと省く
   }
   /** ジョブ用のコンテキスト。戻り: {context, page, util, cache, close} */
   async newContext() {

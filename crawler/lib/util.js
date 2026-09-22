@@ -49,8 +49,10 @@ function sameSite(a, b) {
   try { return site(new URL(a).hostname) === site(new URL(b).hostname); } catch { return false; }
 }
 
-const MEDIA_HOSTS = ['youtube.com', 'youtu.be', 'x.com', 'twitter.com', 'twimg.com', 'instagram.com', 'cdninstagram.com',
-  'facebook.com', 'fbcdn.net', 'tiktok.com', 'threads.net', 'pinterest.com'];
+// config.json の media_hosts(配列)で丸ごと上書き可。[] にすると SNS 判定を無効化
+const MEDIA_HOSTS = Array.isArray(require('./conf').file.media_hosts) ? require('./conf').file.media_hosts
+  : ['youtube.com', 'youtu.be', 'x.com', 'twitter.com', 'twimg.com', 'instagram.com', 'cdninstagram.com',
+     'facebook.com', 'fbcdn.net', 'tiktok.com', 'threads.net', 'pinterest.com'];
 function isMediaHost(hostname) {
   const h = (hostname || '').toLowerCase();
   return MEDIA_HOSTS.some((m) => h === m || h.endsWith('.' + m));
