@@ -1481,6 +1481,11 @@ function ctxItems(row, kind, key) {
       {icon: 'search', label: '似た画像のフォルダを作る', run: () => { openLbSha(key); setTimeout(simFolder, 80); }},
       {icon: 'wand', label: (loc.type === 'folder' && albumsCache.find(x => x.name === loc.key)?.kind === 'gen') ? 'この生成フォルダの参照に足す' : '似た画像を作る(AI生成)', run: () => makeFromImage(key)},
       {icon: 'globe', label: '元ページを開く', run: async () => { try { const m = await j('/api/meta/' + key); const u = m.crawl?.landing || m.crawl?.url; if (u) window.open(u, '_blank', 'noopener'); else toast('取得元の記録がありません(ローカル取込)'); } catch (e) { toast('❌ ' + e.message); } }},
+      {icon: 'play', label: 'スタイルで動画を変換...', run: () => {
+        // 変換サーバは別サービス。公開プロキシ(:8443)経由なら/vf/、直アクセスなら:8791へ。
+        const u = location.port === '8443' ? '/vf/' : `${location.protocol}//${location.hostname}:8791/`;
+        window.open(u, '_blank', 'noopener');
+      }},
       {icon: 'trash', label: 'ゴミ箱へ(30日は戻せる)', danger: true, run: () => trashShas([key])},
     ];
   }
